@@ -1,6 +1,7 @@
 package yupdate
 
 import (
+	"context"
 	"fmt"
 	"slices"
 
@@ -11,39 +12,65 @@ type blockSetV1 struct {
 	clients map[uint32][]ytypes.Struct
 }
 
-// MergeUpdatesV1 consolida múltiplos updates V1 em um único update.
-func MergeUpdatesV1(updates ...[]byte) ([]byte, error) {
-	if len(updates) == 0 {
-		return encodeEmptyUpdateV1(), nil
-	}
+type decodedMergeUpdateV1 struct {
+	blockSet  *blockSetV1
+	deleteSet *ytypes.DeleteSet
+}
 
-	merged := &blockSetV1{clients: make(map[uint32][]ytypes.Struct)}
-	deleteSet := ytypes.NewDeleteSet()
-
-	for _, update := range updates {
-		decoded, err := DecodeV1(update)
-		if err != nil {
-			return nil, err
-		}
-
-		current := newBlockSetV1(decoded.Structs)
-		if err := merged.insertInto(current); err != nil {
-			return nil, err
-		}
-		if err := deleteSet.Merge(decoded.DeleteSet); err != nil {
-			return nil, err
-		}
-	}
-
-	out, err := encodeStructGroupsV1(merged.clients)
+// MergeUpdatesV1Context consolida múltiplos updates V1 em um único update,
+// respeitando cancelamento do contexto durante a etapa de agregação.
+func MergeUpdatesV1Context(ctx context.Context, updates ...[]byte) ([]byte, error) {
+	merged, err := aggregatePayloadsInParallel(ctx, updates, 0, decodeMergeUpdateV1, mergeDecodedUpdatesV1)
 	if err != nil {
 		return nil, err
 	}
-	return AppendDeleteSetBlockV1(out, deleteSet), nil
+
+	out, err := encodeStructGroupsV1(merged.blockSet.clients)
+	if err != nil {
+		return nil, err
+	}
+	return AppendDeleteSetBlockV1(out, merged.deleteSet), nil
+}
+
+// MergeUpdatesV1 consolida múltiplos updates V1 em um único update.
+func MergeUpdatesV1(updates ...[]byte) ([]byte, error) {
+	return MergeUpdatesV1Context(context.Background(), updates...)
 }
 
 func newBlockSetV1(structs []ytypes.Struct) *blockSetV1 {
 	return &blockSetV1{clients: groupStructsByClient(structs)}
+}
+
+func decodeMergeUpdateV1(_ context.Context, _ int, update []byte) (decodedMergeUpdateV1, error) {
+	decoded, err := DecodeV1(update)
+	if err != nil {
+		return decodedMergeUpdateV1{}, err
+	}
+
+	return decodedMergeUpdateV1{
+		blockSet:  newBlockSetV1(decoded.Structs),
+		deleteSet: decoded.DeleteSet,
+	}, nil
+}
+
+func mergeDecodedUpdatesV1(_ context.Context, entries []decodedMergeUpdateV1) (decodedMergeUpdateV1, error) {
+	merged := decodedMergeUpdateV1{
+		blockSet:  &blockSetV1{clients: make(map[uint32][]ytypes.Struct)},
+		deleteSet: ytypes.NewDeleteSet(),
+	}
+	for _, entry := range entries {
+		if entry.blockSet != nil {
+			if err := merged.blockSet.insertInto(entry.blockSet); err != nil {
+				return decodedMergeUpdateV1{}, err
+			}
+		}
+		if entry.deleteSet != nil {
+			if err := merged.deleteSet.Merge(entry.deleteSet); err != nil {
+				return decodedMergeUpdateV1{}, err
+			}
+		}
+	}
+	return merged, nil
 }
 
 func (b *blockSetV1) insertInto(other *blockSetV1) error {
@@ -83,6 +110,13 @@ func (b *blockSetV1) insertInto(other *blockSetV1) error {
 }
 
 func mergeDisjointStructLists(client uint32, left, right []ytypes.Struct, gap uint32) ([]ytypes.Struct, error) {
+	if len(left) == 0 {
+		return slices.Clone(right), nil
+	}
+	if len(right) == 0 {
+		return slices.Clone(left), nil
+	}
+
 	merged := make([]ytypes.Struct, 0, len(left)+len(right)+1)
 	merged = append(merged, left...)
 	if gap > 0 {
@@ -97,6 +131,13 @@ func mergeDisjointStructLists(client uint32, left, right []ytypes.Struct, gap ui
 }
 
 func mergeOverlappingStructLists(client uint32, left, right []ytypes.Struct) ([]ytypes.Struct, error) {
+	if len(left) == 0 {
+		return slices.Clone(right), nil
+	}
+	if len(right) == 0 {
+		return slices.Clone(left), nil
+	}
+
 	result := make([]ytypes.Struct, 0, len(left)+len(right))
 	nextExpected := left[0].ID().Clock
 	li, ri := 0, 0
@@ -122,7 +163,7 @@ func mergeOverlappingStructLists(client uint32, left, right []ytypes.Struct) ([]
 			block = refs[*index]
 		}
 		if block != nil && block.ID().Clock < nextExpected && block.EndClock() > nextExpected {
-			diff := nextExpected - block.ID().Clock
+			diff := block.ID().Clock + block.Length() - nextExpected
 			sliced, err := sliceStructV1(block, diff)
 			if err != nil {
 				return nil, err
@@ -205,13 +246,14 @@ func sliceStructV1(current ytypes.Struct, diff uint32) (ytypes.Struct, error) {
 }
 
 func sliceStructWindowV1(current ytypes.Struct, startOffset, endTrim uint32) (ytypes.Struct, error) {
-	if startOffset+endTrim >= current.Length() {
+	length := current.Length()
+	if uint64(startOffset)+uint64(endTrim) >= uint64(length) {
 		return nil, ErrInvalidSliceOffset
 	}
 	if startOffset == 0 && endTrim == 0 {
 		return current, nil
 	}
-	newLength := current.Length() - startOffset - endTrim
+	newLength := length - startOffset - endTrim
 	if newLength == 0 {
 		return nil, ErrInvalidSliceOffset
 	}

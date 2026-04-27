@@ -1,0 +1,20 @@
+// Package yhttp expõe uma borda mínima de transporte HTTP/WebSocket acima de
+// `pkg/yprotocol.Provider`.
+//
+// O pacote foi desenhado para permanecer neutro em relação ao framework:
+// `Server` implementa `http.Handler`, então pode ser usado diretamente com
+// `net/http` e adaptado em frameworks como Gin e Echo sem duplicar a lógica de
+// sync/awareness.
+//
+// Escopo atual:
+//   - upgrade WebSocket via `net/http`;
+//   - roteamento de conexão para um `storage.DocumentKey`;
+//   - leitura/escrita de frames binários do protocolo Yjs;
+//   - fanout local de broadcasts produzidos por `pkg/yprotocol.Provider`;
+//   - persistência opcional do snapshot no fechamento da conexão.
+//   - hooks opcionais de observabilidade via `Metrics`, com adapter Prometheus
+//     disponível em `pkg/yhttp/prometheus`.
+//
+// O pacote não implementa transporte distribuído, replicação entre processos ou
+// suporte operacional a Update V2.
+package yhttp

@@ -1,0 +1,110 @@
+package yupdate
+
+import (
+	"context"
+	"sort"
+
+	"yjs-go-bridge/internal/varint"
+)
+
+// DecodeStateVector decodifica um state vector em mapa por client.
+// Mantido como wrapper público da versão V1, com semântica equivalente.
+func DecodeStateVector(data []byte) (map[uint32]uint32, error) {
+	return DecodeStateVectorV1(data)
+}
+
+// StateVectorFromUpdatesContext agrega state vectors por cliente a partir de uma
+// lista de payloads, respeitando cancelamento do contexto.
+func StateVectorFromUpdatesContext(ctx context.Context, updates ...[]byte) (map[uint32]uint32, error) {
+	format, err := detectAggregateUpdateFormatSkippingEmptyContext(ctx, updates...)
+	if err != nil {
+		return nil, err
+	}
+	switch format {
+	case UpdateFormatUnknown:
+		return map[uint32]uint32{}, nil
+	case UpdateFormatV2:
+		return nil, wrapUnsupportedV2AtFirstNonEmpty(updates)
+	}
+
+	stateVectors, err := aggregatePayloadsInParallel(ctx, updates, 0, extractStateVectorFromUpdateV1, mergeStateVectors)
+	if err != nil {
+		return nil, err
+	}
+	return stateVectors, nil
+}
+
+// StateVectorFromUpdates agrega state vectors por cliente a partir de uma lista
+// de payloads de update V1.
+func StateVectorFromUpdates(updates ...[]byte) (map[uint32]uint32, error) {
+	return StateVectorFromUpdatesContext(context.Background(), updates...)
+}
+
+// EncodeStateVectorFromUpdatesContext agrega os state vectors de múltiplos
+// updates e serializa no formato V1 estável, respeitando cancelamento.
+func EncodeStateVectorFromUpdatesContext(ctx context.Context, updates ...[]byte) ([]byte, error) {
+	stateVector, err := StateVectorFromUpdatesContext(ctx, updates...)
+	if err != nil {
+		return nil, err
+	}
+	return encodeStateVectorMap(stateVector), nil
+}
+
+// EncodeStateVectorFromUpdates agrega os state vectors de múltiplos updates e
+// serializa no formato V1 estável.
+func EncodeStateVectorFromUpdates(updates ...[]byte) ([]byte, error) {
+	return EncodeStateVectorFromUpdatesContext(context.Background(), updates...)
+}
+
+func extractStateVectorFromUpdateV1(_ context.Context, _ int, update []byte) (map[uint32]uint32, error) {
+	if len(update) == 0 {
+		return map[uint32]uint32{}, nil
+	}
+
+	stateVectorPayload, err := EncodeStateVectorFromUpdateV1(update)
+	if err != nil {
+		return nil, err
+	}
+	return DecodeStateVectorV1(stateVectorPayload)
+}
+
+func mergeStateVectors(_ context.Context, vectors []map[uint32]uint32) (map[uint32]uint32, error) {
+	if len(vectors) == 0 {
+		return map[uint32]uint32{}, nil
+	}
+
+	merged := make(map[uint32]uint32, len(vectors))
+	for _, vector := range vectors {
+		if len(vector) == 0 {
+			continue
+		}
+		for client, clock := range vector {
+			current, ok := merged[client]
+			if !ok || clock > current {
+				merged[client] = clock
+			}
+		}
+	}
+	return merged, nil
+}
+
+func encodeStateVectorMap(stateVector map[uint32]uint32) []byte {
+	if len(stateVector) == 0 {
+		return varint.Append(nil, 0)
+	}
+
+	clients := make([]uint32, 0, len(stateVector))
+	for client := range stateVector {
+		clients = append(clients, client)
+	}
+	sort.Slice(clients, func(i, j int) bool {
+		return clients[i] < clients[j]
+	})
+
+	out := varint.Append(nil, uint32(len(stateVector)))
+	for _, client := range clients {
+		out = varint.Append(out, client)
+		out = varint.Append(out, stateVector[client])
+	}
+	return out
+}

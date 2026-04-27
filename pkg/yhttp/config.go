@@ -1,0 +1,49 @@
+package yhttp
+
+import (
+	"net/http"
+	"time"
+
+	"github.com/coder/websocket"
+
+	"yjs-go-bridge/pkg/storage"
+	"yjs-go-bridge/pkg/yprotocol"
+)
+
+const (
+	defaultReadLimitBytes = 16 << 20
+	defaultWriteTimeout   = 5 * time.Second
+	defaultPersistTimeout = 5 * time.Second
+)
+
+// Request descreve como uma requisição HTTP deve ser associada ao provider.
+//
+// `ClientID` precisa corresponder ao client id usado pelo peer Yjs nos payloads
+// de awareness; o provider usa esse valor para agregar estado efêmero e gerar
+// tombstones no fechamento da conexão.
+type Request struct {
+	DocumentKey    storage.DocumentKey
+	ConnectionID   string
+	ClientID       uint32
+	PersistOnClose bool
+}
+
+// ResolveRequestFunc mapeia a requisição HTTP para o documento e metadados da
+// conexão local.
+type ResolveRequestFunc func(r *http.Request) (Request, error)
+
+// ErrorHandler recebe erros assíncronos da camada de transporte que já não
+// podem mais ser refletidos na resposta HTTP original.
+type ErrorHandler func(r *http.Request, req Request, err error)
+
+// ServerConfig define a configuração do handler HTTP/WebSocket.
+type ServerConfig struct {
+	Provider       *yprotocol.Provider
+	ResolveRequest ResolveRequestFunc
+	AcceptOptions  *websocket.AcceptOptions
+	ReadLimitBytes int64
+	WriteTimeout   time.Duration
+	PersistTimeout time.Duration
+	Metrics        Metrics
+	OnError        ErrorHandler
+}

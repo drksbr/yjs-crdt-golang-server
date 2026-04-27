@@ -7,7 +7,8 @@ import (
 	"yjs-go-bridge/internal/varint"
 )
 
-// ProtocolType identifica a camada externa combinada descrita em y-protocols/PROTOCOL.md.
+// ProtocolType identifica o envelope externo usado pelos providers websocket do
+// ecossistema Yjs para multiplexar sync, awareness e mensagens auxiliares.
 type ProtocolType uint32
 
 const (
@@ -15,6 +16,10 @@ const (
 	ProtocolTypeSync ProtocolType = 0
 	// ProtocolTypeAwareness carrega mensagens do protocolo de awareness.
 	ProtocolTypeAwareness ProtocolType = 1
+	// ProtocolTypeAuth carrega mensagens auxiliares de autorização.
+	ProtocolTypeAuth ProtocolType = 2
+	// ProtocolTypeQueryAwareness consulta o snapshot atual de awareness.
+	ProtocolTypeQueryAwareness ProtocolType = 3
 )
 
 // AppendProtocolType escreve o prefixo do protocolo externo.
@@ -40,19 +45,24 @@ func ReadProtocolType(r *ybinary.Reader) (ProtocolType, error) {
 // Valid informa se o protocolo é reconhecido pelo port atual.
 func (t ProtocolType) Valid() bool {
 	switch t {
-	case ProtocolTypeSync, ProtocolTypeAwareness:
+	case ProtocolTypeSync, ProtocolTypeAwareness, ProtocolTypeAuth, ProtocolTypeQueryAwareness:
 		return true
 	default:
 		return false
 	}
 }
 
+// String retorna a representação textual conhecida do tipo de protocolo.
 func (t ProtocolType) String() string {
 	switch t {
 	case ProtocolTypeSync:
 		return "sync"
 	case ProtocolTypeAwareness:
 		return "awareness"
+	case ProtocolTypeAuth:
+		return "auth"
+	case ProtocolTypeQueryAwareness:
+		return "query-awareness"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint32(t))
 	}

@@ -12,10 +12,14 @@ var (
 	ErrUnexpectedProtocolType = errors.New("yprotocol: tipo de protocolo inesperado")
 	// ErrUnknownSyncMessageType sinaliza um subtipo de mensagem sync não reconhecido.
 	ErrUnknownSyncMessageType = errors.New("yprotocol: tipo de mensagem sync desconhecido")
+	// ErrUnknownAuthMessageType sinaliza um subtipo de auth não reconhecido.
+	ErrUnknownAuthMessageType = errors.New("yprotocol: tipo de mensagem auth desconhecido")
 	// ErrInvalidAwarenessJSON sinaliza um estado JSON inválido no payload awareness.
 	ErrInvalidAwarenessJSON = errors.New("yprotocol: estado awareness json invalido")
 	// ErrTrailingBytes sinaliza bytes extras após o término de uma mensagem isolada.
 	ErrTrailingBytes = errors.New("yprotocol: bytes residuais ao final da mensagem")
+	// ErrProtocolStreamByteLimitExceeded sinaliza que o buffer incremental ultrapassou o limite configurado.
+	ErrProtocolStreamByteLimitExceeded = errors.New("yprotocol: limite de bytes de stream excedido")
 )
 
 // ParseError adiciona contexto mínimo para falhas de parsing do protocolo.
@@ -25,6 +29,7 @@ type ParseError struct {
 	Err    error
 }
 
+// Error retorna a mensagem formatada do erro com contexto e offset.
 func (e *ParseError) Error() string {
 	return fmt.Sprintf("yprotocol: %s falhou no offset %d: %v", e.Op, e.Offset, e.Err)
 }

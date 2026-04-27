@@ -210,3 +210,272 @@ func TestMergeUpdatesV1SlicesOverlappingStringStructs(t *testing.T) {
 		t.Fatalf("sliced string = item=%+v content=%#v, want clock 5 text ! len 1", item.ID(), content)
 	}
 }
+
+func TestMergeUpdatesV1OverlappingItemAfterDeletedGapUsesJsOffset(t *testing.T) {
+	t.Parallel()
+
+	left := buildUpdate(
+		clientBlock{
+			client: 15,
+			clock:  0,
+			structs: []structEncoding{
+				itemDeleted(rootParent("doc"), 6),
+			},
+		},
+	)
+	right := buildUpdate(
+		clientBlock{
+			client: 15,
+			clock:  5,
+			structs: []structEncoding{
+				itemString(rootParent("doc"), "abcd"),
+			},
+		},
+	)
+
+	merged, err := MergeUpdatesV1(left, right)
+	if err != nil {
+		t.Fatalf("MergeUpdatesV1() unexpected error: %v", err)
+	}
+
+	decoded, err := DecodeV1(merged)
+	if err != nil {
+		t.Fatalf("DecodeV1(merged) unexpected error: %v", err)
+	}
+
+	if len(decoded.Structs) != 3 {
+		t.Fatalf("len(Structs) = %d, want 3", len(decoded.Structs))
+	}
+
+	deleted, ok := decoded.Structs[0].(*ytypes.Item)
+	if !ok {
+		t.Fatalf("Structs[0] type = %T, want *ytypes.Item", decoded.Structs[0])
+	}
+	deletedContent := deleted.Content.(ParsedContent)
+	if deletedContent.ContentRef() != itemContentDeleted || deleted.ID().Clock != 0 || deleted.Length() != 6 {
+		t.Fatalf("Structs[0] = %#v, want deleted item at clock 0 len 6", decoded.Structs[0])
+	}
+
+	skip, ok := decoded.Structs[1].(ytypes.Skip)
+	if !ok {
+		t.Fatalf("Structs[1] type = %T, want ytypes.Skip", decoded.Structs[1])
+	}
+	if skip.ID().Clock != 6 || skip.Length() != 2 {
+		t.Fatalf("Structs[1] = %#v, want Skip at clock 6 len 2", skip)
+	}
+
+	item, ok := decoded.Structs[2].(*ytypes.Item)
+	if !ok {
+		t.Fatalf("Structs[2] type = %T, want *ytypes.Item", decoded.Structs[2])
+	}
+	content := item.Content.(ParsedContent)
+	if item.ID().Clock != 8 || content.Text != "d" {
+		t.Fatalf("Structs[2] = id=%+v content=%#v, want item at clock 8 text \"d\"", item.ID(), content)
+	}
+}
+
+func TestMergeUpdatesV1OverlappingMeta9StructsDeduplicatesByClock(t *testing.T) {
+	t.Parallel()
+
+	updateA := buildUpdate(
+		clientBlock{
+			client: 13,
+			clock:  0,
+			structs: []structEncoding{
+				itemType(rootParent("doc"), typeRefYXmlElement, "p"),
+				itemDoc(rootParent("doc"), "guid-meta9", appendAnyString(nil, "left")),
+				itemBinary(rootParent("doc"), []byte{0xde, 0xad}),
+				itemEmbed(rootParent("doc"), appendAnyObjectFields(nil,
+					anyField{key: "kind", value: appendAnyString(nil, "mention")},
+				)),
+				itemFormat(rootParent("doc"), "bold", appendAnyBool(nil, true)),
+				itemAny(rootParent("doc"), appendAnyString(nil, "a"), appendAnyBool(nil, true)),
+			},
+		},
+	)
+	updateB := buildUpdate(
+		clientBlock{
+			client: 13,
+			clock:  0,
+			structs: []structEncoding{
+				itemType(rootParent("doc"), typeRefYXmlElement, "p"),
+				itemDoc(rootParent("doc"), "guid-meta9", appendAnyString(nil, "left")),
+				itemBinary(rootParent("doc"), []byte{0xde, 0xad}),
+				itemEmbed(rootParent("doc"), appendAnyObjectFields(nil,
+					anyField{key: "kind", value: appendAnyString(nil, "mention")},
+				)),
+				itemFormat(rootParent("doc"), "bold", appendAnyBool(nil, true)),
+				itemAny(rootParent("doc"), appendAnyString(nil, "a"), appendAnyBool(nil, true)),
+			},
+		},
+	)
+
+	merged, err := MergeUpdatesV1(updateA, updateB)
+	if err != nil {
+		t.Fatalf("MergeUpdatesV1() unexpected error: %v", err)
+	}
+
+	decoded, err := DecodeV1(merged)
+	if err != nil {
+		t.Fatalf("DecodeV1(merged) unexpected error: %v", err)
+	}
+
+	if len(decoded.Structs) != 6 {
+		t.Fatalf("len(Structs) = %d, want 6", len(decoded.Structs))
+	}
+
+	expectedRefs := []byte{
+		itemContentType,
+		itemContentDoc,
+		itemContentBinary,
+		itemContentEmbed,
+		itemContentFormat,
+		itemContentAny,
+	}
+	for i, expectedRef := range expectedRefs {
+		item, ok := decoded.Structs[i].(*ytypes.Item)
+		if !ok {
+			t.Fatalf("Structs[%d] type = %T, want *ytypes.Item", i, decoded.Structs[i])
+		}
+		content := item.Content.(ParsedContent)
+		if content.ContentRef() != expectedRef {
+			t.Fatalf("Structs[%d].ContentRef = %d, want %d", i, content.ContentRef(), expectedRef)
+		}
+		if expectedRef == itemContentType && content.TypeName != "p" {
+			t.Fatalf("Structs[%d].TypeName = %q, want \"p\"", i, content.TypeName)
+		}
+		if expectedRef == itemContentFormat && (content.TypeName != "bold" || content.IsCountable()) {
+			t.Fatalf("Structs[%d].format = %#v, want non-countable format \"bold\"", i, content)
+		}
+		if expectedRef == itemContentDoc && content.TypeName != "guid-meta9" {
+			t.Fatalf("Structs[%d].TypeName = %q, want \"guid-meta9\"", i, content.TypeName)
+		}
+		if expectedRef == itemContentAny && len(content.Any) != 2 {
+			t.Fatalf("Structs[%d].Any len = %d, want 2", i, len(content.Any))
+		}
+	}
+}
+
+func TestMergeUpdatesV1AnyOverlapSlicesTailFromSecondUpdate(t *testing.T) {
+	t.Parallel()
+
+	leftFirst := appendAnyString(nil, "left-1")
+	leftSecond := appendAnyBool(nil, true)
+	rightSecond := appendAnyString(nil, "right-2")
+	rightThird := appendAnyBool(nil, false)
+
+	left := buildUpdate(
+		clientBlock{
+			client: 14,
+			clock:  0,
+			structs: []structEncoding{
+				itemAny(rootParent("doc"), leftFirst, leftSecond),
+			},
+		},
+	)
+	right := buildUpdate(
+		clientBlock{
+			client: 14,
+			clock:  1,
+			structs: []structEncoding{
+				itemAny(rootParent("doc"), rightSecond, rightThird),
+				itemFormat(rootParent("doc"), "bold", appendAnyBool(nil, true)),
+			},
+		},
+	)
+
+	merged, err := MergeUpdatesV1(left, right)
+	if err != nil {
+		t.Fatalf("MergeUpdatesV1() unexpected error: %v", err)
+	}
+
+	decoded, err := DecodeV1(merged)
+	if err != nil {
+		t.Fatalf("DecodeV1(merged) unexpected error: %v", err)
+	}
+
+	if len(decoded.Structs) != 3 {
+		t.Fatalf("len(Structs) = %d, want 3", len(decoded.Structs))
+	}
+
+	first, ok := decoded.Structs[0].(*ytypes.Item)
+	if !ok {
+		t.Fatalf("Structs[0] type = %T, want *ytypes.Item", decoded.Structs[0])
+	}
+	content := first.Content.(ParsedContent)
+	if content.ContentRef() != itemContentAny || len(content.Any) != 2 {
+		t.Fatalf("first = %#v, want any length 2", content)
+	}
+	if !bytes.Equal(content.Any[0], leftFirst) || !bytes.Equal(content.Any[1], leftSecond) {
+		t.Fatalf("first.Any = %#v, want left-first/second payloads", content.Any)
+	}
+
+	second, ok := decoded.Structs[1].(*ytypes.Item)
+	if !ok {
+		t.Fatalf("Structs[1] type = %T, want *ytypes.Item", decoded.Structs[1])
+	}
+	content = second.Content.(ParsedContent)
+	if content.ContentRef() != itemContentAny || second.ID().Clock != 2 || len(content.Any) != 1 {
+		t.Fatalf("second = id=%+v content=%#v, want clock 2 and any length 1", second.ID(), content)
+	}
+	if !bytes.Equal(content.Any[0], rightThird) {
+		t.Fatalf("second.Any = %#v, want %#v", content.Any, rightThird)
+	}
+
+	third, ok := decoded.Structs[2].(*ytypes.Item)
+	if !ok {
+		t.Fatalf("Structs[2] type = %T, want *ytypes.Item", decoded.Structs[2])
+	}
+	content = third.Content.(ParsedContent)
+	if content.ContentRef() != itemContentFormat || third.ID().Clock != 3 || content.TypeName != "bold" {
+		t.Fatalf("third = id=%+v content=%#v, want format struct at clock 3", third.ID(), content)
+	}
+}
+
+func TestMergeUpdatesV1FillsExplicitSkipFromInput(t *testing.T) {
+	t.Parallel()
+
+	left := buildUpdate(
+		clientBlock{
+			client: 90,
+			clock:  0,
+			structs: []structEncoding{
+				itemString(rootParent("doc"), "ab"),
+				skip(3),
+				itemBinary(rootParent("doc"), []byte{0x7f}),
+			},
+		},
+	)
+	fill := buildUpdate(
+		clientBlock{
+			client: 90,
+			clock:  3,
+			structs: []structEncoding{
+				itemString(rootParent("doc"), "xy"),
+			},
+		},
+	)
+
+	want := buildUpdate(
+		clientBlock{
+			client: 90,
+			clock:  0,
+			structs: []structEncoding{
+				itemString(rootParent("doc"), "ab"),
+				skip(1),
+				itemString(rootParent("doc"), "xy"),
+				itemBinary(rootParent("doc"), []byte{0x7f}),
+			},
+		},
+	)
+
+	for _, updates := range permutations([][]byte{left, fill}) {
+		merged, err := MergeUpdatesV1(updates...)
+		if err != nil {
+			t.Fatalf("MergeUpdatesV1() unexpected error: %v", err)
+		}
+		if !bytes.Equal(merged, want) {
+			t.Fatalf("MergeUpdatesV1() = %v, want %v", merged, want)
+		}
+	}
+}

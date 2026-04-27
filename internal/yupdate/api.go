@@ -1,11 +1,61 @@
 package yupdate
 
-import "errors"
+import (
+	"context"
+	"errors"
+)
+
+// ValidateUpdateFormatWithReason valida um único update preservando a causa detalhada
+// da falha de classificação.
+func ValidateUpdateFormatWithReason(update []byte) (UpdateFormat, error) {
+	return DetectUpdateFormatWithReason(update)
+}
+
+// ValidateUpdatesFormatWithReason valida uma lista de updates e garante formato
+// único entre eles. O erro retornado mantém contexto da origem do problema.
+func ValidateUpdatesFormatWithReason(updates ...[]byte) (UpdateFormat, error) {
+	return ValidateUpdatesFormatWithReasonContext(context.Background(), updates...)
+}
+
+// ValidateUpdatesFormatWithReasonContext valida uma lista de updates e garante
+// formato único entre eles, respeitando cancelamento do contexto.
+func ValidateUpdatesFormatWithReasonContext(ctx context.Context, updates ...[]byte) (UpdateFormat, error) {
+	return DetectUpdatesFormatWithReasonContext(ctx, updates...)
+}
 
 // FormatFromUpdate identifica o formato do update e retorna erro quando a
 // heurística não consegue classificar de forma definitiva.
 func FormatFromUpdate(update []byte) (UpdateFormat, error) {
 	format, err := DetectUpdateFormatWithReason(update)
+	if err != nil {
+		if errors.Is(err, ErrAmbiguousUpdateFormat) {
+			return UpdateFormatUnknown, ErrUnknownUpdateFormat
+		}
+		return UpdateFormatUnknown, err
+	}
+	if format == UpdateFormatUnknown {
+		return UpdateFormatUnknown, ErrUnknownUpdateFormat
+	}
+	return format, nil
+}
+
+// FormatFromUpdates identifica o formato comum de uma lista de updates,
+// preservando erros indexados e rejeitando payloads vazios na API pública.
+func FormatFromUpdates(updates ...[]byte) (UpdateFormat, error) {
+	return FormatFromUpdatesContext(context.Background(), updates...)
+}
+
+// FormatFromUpdatesContext identifica o formato comum de uma lista de updates,
+// preservando erros indexados, rejeitando payloads vazios e respeitando o
+// cancelamento do contexto.
+func FormatFromUpdatesContext(ctx context.Context, updates ...[]byte) (UpdateFormat, error) {
+	for _, update := range updates {
+		if len(update) == 0 {
+			return UpdateFormatUnknown, ErrUnknownUpdateFormat
+		}
+	}
+
+	format, err := ValidateUpdatesFormatWithReasonContext(ctx, updates...)
 	if err != nil {
 		if errors.Is(err, ErrAmbiguousUpdateFormat) {
 			return UpdateFormatUnknown, ErrUnknownUpdateFormat
@@ -34,21 +84,155 @@ func DecodeUpdate(update []byte) (*DecodedUpdate, error) {
 	}
 }
 
-// EncodeUpdate serializa o update em formato V1.
-// A estrutura de atualização internamente ainda não diferencia V1/V2.
-func EncodeUpdate(update *DecodedUpdate) ([]byte, error) {
-	return EncodeV1(update)
-}
-
-// DiffUpdate trata o diff conforme o formato detectado pelo payload.
-func DiffUpdate(update, stateVector []byte) ([]byte, error) {
+// StateVectorFromUpdate extrai o state vector de um único update conforme o
+// formato detectado no payload.
+func StateVectorFromUpdate(update []byte) (map[uint32]uint32, error) {
 	format, err := FormatFromUpdate(update)
 	if err != nil {
 		return nil, err
 	}
 	switch format {
 	case UpdateFormatV1:
-		return DiffUpdateV1(update, stateVector)
+		encoded, err := EncodeStateVectorFromUpdateV1(update)
+		if err != nil {
+			return nil, err
+		}
+		return DecodeStateVectorV1(encoded)
+	case UpdateFormatV2:
+		return nil, ErrUnsupportedUpdateFormatV2
+	default:
+		return nil, ErrUnknownUpdateFormat
+	}
+}
+
+// EncodeStateVectorFromUpdate extrai e serializa o state vector de um único
+// update conforme o formato detectado no payload.
+func EncodeStateVectorFromUpdate(update []byte) ([]byte, error) {
+	format, err := FormatFromUpdate(update)
+	if err != nil {
+		return nil, err
+	}
+	switch format {
+	case UpdateFormatV1:
+		return EncodeStateVectorFromUpdateV1(update)
+	case UpdateFormatV2:
+		return nil, ErrUnsupportedUpdateFormatV2
+	default:
+		return nil, ErrUnknownUpdateFormat
+	}
+}
+
+// CreateContentIDsFromUpdate extrai content ids de um único update conforme o
+// formato detectado no payload.
+func CreateContentIDsFromUpdate(update []byte) (*ContentIDs, error) {
+	format, err := FormatFromUpdate(update)
+	if err != nil {
+		return nil, err
+	}
+	switch format {
+	case UpdateFormatV1:
+		return CreateContentIDsFromUpdateV1(update)
+	case UpdateFormatV2:
+		return nil, ErrUnsupportedUpdateFormatV2
+	default:
+		return nil, ErrUnknownUpdateFormat
+	}
+}
+
+// EncodeUpdate serializa o update em formato V1.
+// A estrutura de atualização internamente ainda não diferencia V1/V2.
+func EncodeUpdate(update *DecodedUpdate) ([]byte, error) {
+	return EncodeV1(update)
+}
+
+// ConvertUpdateToV1 normaliza um update para a representação canônica V1.
+//
+// Para payloads já em V1, o conteúdo é decodificado e reencodificado de forma
+// determinística. Payloads V2 continuam explicitamente não suportados.
+func ConvertUpdateToV1(update []byte) ([]byte, error) {
+	decoded, err := DecodeUpdate(update)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeUpdate(decoded)
+}
+
+// ConvertUpdatesToV1 normaliza uma lista de updates para um único payload
+// canônico em V1, tratando payloads vazios como no-op.
+func ConvertUpdatesToV1(updates ...[]byte) ([]byte, error) {
+	return ConvertUpdatesToV1Context(context.Background(), updates...)
+}
+
+// ConvertUpdatesToV1Context normaliza uma lista de updates para um único
+// payload canônico em V1, respeitando cancelamento e tratando payloads vazios
+// como no-op.
+func ConvertUpdatesToV1Context(ctx context.Context, updates ...[]byte) ([]byte, error) {
+	if len(updates) == 0 {
+		return MergeUpdatesV1Context(ctx)
+	}
+
+	format, err := detectAggregateUpdateFormatSkippingEmptyContext(ctx, updates...)
+	if err != nil {
+		return nil, err
+	}
+
+	switch format {
+	case UpdateFormatUnknown:
+		return MergeUpdatesV1Context(ctx)
+	case UpdateFormatV1:
+		filtered := make([][]byte, 0, len(updates))
+		for _, update := range updates {
+			if len(update) == 0 {
+				continue
+			}
+			filtered = append(filtered, update)
+		}
+		return MergeUpdatesV1Context(ctx, filtered...)
+	case UpdateFormatV2:
+		return nil, wrapUnsupportedV2AtFirstNonEmpty(updates)
+	default:
+		return nil, ErrUnknownUpdateFormat
+	}
+}
+
+// DiffUpdate trata o diff conforme o formato detectado pelo payload.
+func DiffUpdate(update, stateVector []byte) ([]byte, error) {
+	return DiffUpdateContext(context.Background(), update, stateVector)
+}
+
+// DiffUpdateContext trata o diff conforme o formato detectado pelo payload,
+// respeitando cancelamento do contexto.
+func DiffUpdateContext(ctx context.Context, update, stateVector []byte) ([]byte, error) {
+	format, err := FormatFromUpdate(update)
+	if err != nil {
+		return nil, err
+	}
+	switch format {
+	case UpdateFormatV1:
+		return DiffUpdateV1Context(ctx, update, stateVector)
+	case UpdateFormatV2:
+		return nil, ErrUnsupportedUpdateFormatV2
+	default:
+		return nil, ErrUnknownUpdateFormat
+	}
+}
+
+// IntersectUpdateWithContentIDs filtra um update mantendo apenas o conteúdo
+// selecionado pelos content ids, conforme o formato detectado no payload.
+func IntersectUpdateWithContentIDs(update []byte, contentIDs *ContentIDs) ([]byte, error) {
+	return IntersectUpdateWithContentIDsContext(context.Background(), update, contentIDs)
+}
+
+// IntersectUpdateWithContentIDsContext filtra um update mantendo apenas o
+// conteúdo selecionado pelos content ids, respeitando cancelamento.
+func IntersectUpdateWithContentIDsContext(ctx context.Context, update []byte, contentIDs *ContentIDs) ([]byte, error) {
+	format, err := FormatFromUpdate(update)
+	if err != nil {
+		return nil, err
+	}
+	switch format {
+	case UpdateFormatV1:
+		return IntersectUpdateWithContentIDsV1Context(ctx, update, contentIDs)
 	case UpdateFormatV2:
 		return nil, ErrUnsupportedUpdateFormatV2
 	default:
@@ -59,29 +243,36 @@ func DiffUpdate(update, stateVector []byte) ([]byte, error) {
 // MergeUpdates consolida múltiplos updates e valida consistência de formato.
 // Quando há mistura de formatos, retorna erro explícito.
 func MergeUpdates(updates ...[]byte) ([]byte, error) {
+	return MergeUpdatesContext(context.Background(), updates...)
+}
+
+// MergeUpdatesContext consolida múltiplos updates e valida consistência de
+// formato, respeitando cancelamento do contexto na etapa de fusão.
+func MergeUpdatesContext(ctx context.Context, updates ...[]byte) ([]byte, error) {
 	if len(updates) == 0 {
-		return MergeUpdatesV1()
+		return MergeUpdatesV1Context(ctx)
+	}
+	allEmpty := true
+	for _, update := range updates {
+		if len(update) != 0 {
+			allEmpty = false
+			break
+		}
+	}
+	if allEmpty {
+		return MergeUpdatesV1Context(ctx)
 	}
 
-	format, err := FormatFromUpdate(updates[0])
+	format, err := FormatFromUpdatesContext(ctx, updates...)
 	if err != nil {
 		return nil, err
-	}
-	for i := 1; i < len(updates); i++ {
-		current, err := FormatFromUpdate(updates[i])
-		if err != nil {
-			return nil, err
-		}
-		if current != format {
-			return nil, ErrMismatchedUpdateFormats
-		}
 	}
 
 	switch format {
 	case UpdateFormatV1:
-		return MergeUpdatesV1(updates...)
+		return MergeUpdatesV1Context(ctx, updates...)
 	case UpdateFormatV2:
-		return nil, ErrUnsupportedUpdateFormatV2
+		return nil, wrapUnsupportedV2AtFirstNonEmpty(updates)
 	default:
 		return nil, ErrUnknownUpdateFormat
 	}

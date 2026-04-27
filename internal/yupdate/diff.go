@@ -1,10 +1,24 @@
 package yupdate
 
-import "yjs-go-bridge/internal/ytypes"
+import (
+	"context"
+
+	"yjs-go-bridge/internal/ytypes"
+)
 
 // DiffUpdateV1 retorna a parte de `update` que ainda não está coberta pelo state vector.
 // O delete set é preservado integralmente, seguindo a semântica do Yjs.
 func DiffUpdateV1(update, stateVector []byte) ([]byte, error) {
+	return DiffUpdateV1Context(context.Background(), update, stateVector)
+}
+
+// DiffUpdateV1Context retorna a parte de `update` que ainda não está coberta
+// pelo state vector, respeitando cancelamento do contexto.
+func DiffUpdateV1Context(ctx context.Context, update, stateVector []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	state, err := DecodeStateVectorV1(stateVector)
 	if err != nil {
 		return nil, err
@@ -17,6 +31,9 @@ func DiffUpdateV1(update, stateVector []byte) ([]byte, error) {
 
 	writer := newLazyWriterV1()
 	for current := reader.Current(); current != nil; {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		client := current.ID().Client
 		svClock := state[client]
 
@@ -44,6 +61,9 @@ func DiffUpdateV1(update, stateVector []byte) ([]byte, error) {
 			}
 			current = reader.Current()
 			for current != nil && current.ID().Client == client {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 				if err := writer.write(current, 0, 0); err != nil {
 					return nil, err
 				}
@@ -56,6 +76,9 @@ func DiffUpdateV1(update, stateVector []byte) ([]byte, error) {
 		}
 
 		for current != nil && current.ID().Client == client && current.EndClock() <= svClock {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if err := reader.Next(); err != nil {
 				return nil, err
 			}

@@ -243,6 +243,23 @@ func TestSubtractSetsAffectsOnlyMatchingClients(t *testing.T) {
 	}
 }
 
+func TestSubtractSetsPreservesPostRemovalTailLength(t *testing.T) {
+	t.Parallel()
+
+	left := New()
+	mustAdd(t, left, 1, 5, 4)
+
+	remove := New()
+	mustAdd(t, remove, 1, 6, 1)
+
+	got := SubtractSets(left, remove)
+	want := []string{"1:5+1", "1:7+2"}
+
+	if snapshot := snapshot(got); !reflect.DeepEqual(snapshot, want) {
+		t.Fatalf("SubtractSets() = %v, want %v", snapshot, want)
+	}
+}
+
 func TestSetSubtractIsIdempotent(t *testing.T) {
 	t.Parallel()
 

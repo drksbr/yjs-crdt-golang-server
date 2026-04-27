@@ -38,7 +38,7 @@ func TestStateManagerApplyMergesByClockAndSortsSnapshot(t *testing.T) {
 	}
 }
 
-func TestStateManagerRejectsRegressiveClockAndAppliesTombstone(t *testing.T) {
+func TestStateManagerRejectsRegressiveClockAndIgnoresSameClockState(t *testing.T) {
 	t.Parallel()
 
 	var manager StateManager
@@ -66,8 +66,8 @@ func TestStateManagerRejectsRegressiveClockAndAppliesTombstone(t *testing.T) {
 		},
 	})
 	client, ok = manager.Get(10)
-	if !ok || string(client.State) != `{"active":"latest-same-clock"}` {
-		t.Fatalf("estado do cliente 10 = %+v, want clock=7 latest state", client)
+	if !ok || string(client.State) != `{"active":true}` {
+		t.Fatalf("estado do cliente 10 = %+v, want same-clock state ignored", client)
 	}
 
 	manager.Apply(&Update{

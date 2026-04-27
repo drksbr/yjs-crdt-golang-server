@@ -1,6 +1,7 @@
 package yupdate
 
 import (
+	"context"
 	"fmt"
 
 	"yjs-go-bridge/internal/varint"
@@ -250,25 +251,55 @@ func IsSubsetContentIDs(subject, container *ContentIDs) bool {
 	return insertDiff.IsEmpty() && deleteDiff.IsEmpty()
 }
 
+// ContentIDsFromUpdatesContext agrega ContentIDs extraídos de múltiplos updates
+// V1, respeitando cancelamento do contexto.
+//
+// Entradas nil ou com payload vazio são tratadas como no-op, mantendo o estado
+// atual de agregação.
+func ContentIDsFromUpdatesContext(ctx context.Context, updates ...[]byte) (*ContentIDs, error) {
+	format, err := detectAggregateUpdateFormatSkippingEmptyContext(ctx, updates...)
+	if err != nil {
+		return nil, err
+	}
+	switch format {
+	case UpdateFormatUnknown:
+		return NewContentIDs(), nil
+	case UpdateFormatV2:
+		return nil, wrapUnsupportedV2AtFirstNonEmpty(updates)
+	}
+
+	return aggregatePayloadsInParallel(ctx, updates, 0, extractContentIDsFromUpdateV1, mergeContentIDPayloads)
+}
+
 // ContentIDsFromUpdates agrega ContentIDs extraídos de múltiplos updates V1.
 //
 // Entradas nil ou com payload vazio são tratadas como no-op, mantendo o estado
 // atual de agregação.
 func ContentIDsFromUpdates(updates ...[]byte) (*ContentIDs, error) {
+	out, err := ContentIDsFromUpdatesContext(context.Background(), updates...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func extractContentIDsFromUpdateV1(_ context.Context, _ int, update []byte) (*ContentIDs, error) {
+	if len(update) == 0 {
+		return NewContentIDs(), nil
+	}
+	return CreateContentIDsFromUpdateV1(update)
+}
+
+func mergeContentIDPayloads(_ context.Context, contents []*ContentIDs) (*ContentIDs, error) {
 	out := NewContentIDs()
-	for _, update := range updates {
-		if len(update) == 0 {
+	for _, contentIDs := range contents {
+		if contentIDs == nil || contentIDs.IsEmpty() {
 			continue
 		}
-
-		next, err := CreateContentIDsFromUpdateV1(update)
-		if err != nil {
+		if err := yidset.InsertIntoIdSet(out.Inserts, contentIDs.Inserts); err != nil {
 			return nil, err
 		}
-		if err := yidset.InsertIntoIdSet(out.Inserts, next.Inserts); err != nil {
-			return nil, err
-		}
-		if err := yidset.InsertIntoIdSet(out.Deletes, next.Deletes); err != nil {
+		if err := yidset.InsertIntoIdSet(out.Deletes, contentIDs.Deletes); err != nil {
 			return nil, err
 		}
 	}

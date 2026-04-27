@@ -2,6 +2,7 @@ package yupdate
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 
@@ -73,6 +74,227 @@ func TestMergeUpdatesDispatchesV1(t *testing.T) {
 	}
 }
 
+func TestMergeUpdatesContextDispatchesV1(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	left := buildUpdate(
+		clientBlock{
+			client: 4,
+			clock:  0,
+			structs: []structEncoding{
+				gc(1),
+			},
+		},
+	)
+	right := buildUpdate(
+		clientBlock{
+			client: 4,
+			clock:  1,
+			structs: []structEncoding{
+				itemString(rootParent("doc"), "x"),
+			},
+		},
+	)
+
+	got, err := MergeUpdatesContext(ctx, left, right)
+	if err != nil {
+		t.Fatalf("MergeUpdatesContext() unexpected error: %v", err)
+	}
+
+	expected, err := MergeUpdatesV1Context(ctx, left, right)
+	if err != nil {
+		t.Fatalf("MergeUpdatesV1Context() unexpected error: %v", err)
+	}
+
+	if !bytes.Equal(got, expected) {
+		t.Fatalf("MergeUpdatesContext() = %v, want %v", got, expected)
+	}
+}
+
+func TestMergeUpdatesAPIValidation(t *testing.T) {
+	t.Parallel()
+
+	v1Left := buildUpdate(
+		clientBlock{
+			client: 4,
+			clock:  0,
+			structs: []structEncoding{
+				gc(1),
+			},
+		},
+	)
+	v1Right := buildUpdate(
+		clientBlock{
+			client: 4,
+			clock:  1,
+			structs: []structEncoding{
+				itemString(rootParent("doc"), "x"),
+			},
+		},
+	)
+	v2Update := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+
+	tests := []struct {
+		name        string
+		updates     [][]byte
+		wantErr     error
+		assertValue func(*testing.T, []byte)
+	}{
+		{
+			name:    "dispatch_v1_updates",
+			updates: [][]byte{v1Left, v1Right},
+			assertValue: func(t *testing.T, got []byte) {
+				expected, err := MergeUpdatesV1(v1Left, v1Right)
+				if err != nil {
+					t.Fatalf("MergeUpdatesV1() unexpected error: %v", err)
+				}
+				if !bytes.Equal(got, expected) {
+					t.Fatalf("MergeUpdates() = %v, want %v", got, expected)
+				}
+			},
+		},
+		{
+			name:    "empty_argument_list",
+			updates: nil,
+			assertValue: func(t *testing.T, got []byte) {
+				expected := encodeEmptyUpdateV1()
+				if !bytes.Equal(got, expected) {
+					t.Fatalf("MergeUpdates() = %v, want %v", got, expected)
+				}
+			},
+		},
+		{
+			name:    "all_empty_payloads_are_noop",
+			updates: [][]byte{nil, []byte{}},
+			assertValue: func(t *testing.T, got []byte) {
+				expected := encodeEmptyUpdateV1()
+				if !bytes.Equal(got, expected) {
+					t.Fatalf("MergeUpdates() = %v, want %v", got, expected)
+				}
+			},
+		},
+		{
+			name:    "mixed_v1_and_v2",
+			updates: [][]byte{v1Left, v2Update},
+			wantErr: ErrMismatchedUpdateFormats,
+		},
+		{
+			name:        "empty_payload_rejected",
+			updates:     [][]byte{v1Left, nil},
+			wantErr:     ErrUnknownUpdateFormat,
+			assertValue: nil,
+		},
+		{
+			name:    "malformed_payload_rejected",
+			updates: [][]byte{v1Left, []byte{0x80}},
+			wantErr: varint.ErrUnexpectedEOF,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := MergeUpdates(tt.updates...)
+			if tt.wantErr != nil {
+				if err == nil {
+					t.Fatalf("MergeUpdates() error = nil, want %v", tt.wantErr)
+				}
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("MergeUpdates() error = %v, want %v", err, tt.wantErr)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("MergeUpdates() unexpected error: %v", err)
+			}
+
+			if tt.assertValue != nil {
+				tt.assertValue(t, got)
+			}
+		})
+	}
+}
+
+func TestFormatFromUpdatePublicAPI(t *testing.T) {
+	t.Parallel()
+
+	v1Update := buildUpdate(
+		clientBlock{
+			client: 3,
+			clock:  0,
+			structs: []structEncoding{
+				itemString(rootParent("doc"), "z"),
+			},
+		},
+	)
+	v2Update := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+
+	tests := []struct {
+		name    string
+		input   []byte
+		want    UpdateFormat
+		wantErr error
+	}{
+		{
+			name:  "v1",
+			input: v1Update,
+			want:  UpdateFormatV1,
+		},
+		{
+			name:  "v2",
+			input: v2Update,
+			want:  UpdateFormatV2,
+		},
+		{
+			name:    "empty_payload",
+			input:   nil,
+			want:    UpdateFormatUnknown,
+			wantErr: ErrUnknownUpdateFormat,
+		},
+		{
+			name:    "zero_prefix_v1",
+			input:   []byte{0, 0},
+			want:    UpdateFormatV1,
+			wantErr: nil,
+		},
+		{
+			name:    "broken_varint",
+			input:   []byte{0x80},
+			want:    UpdateFormatUnknown,
+			wantErr: varint.ErrUnexpectedEOF,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := FormatFromUpdate(tt.input)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("FormatFromUpdate() error = %v, want %v", err, tt.wantErr)
+				}
+				if got != tt.want {
+					t.Fatalf("FormatFromUpdate() = %s, want %s", got, tt.want)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("FormatFromUpdate() unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("FormatFromUpdate() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUpdateDispatchErrors(t *testing.T) {
 	t.Parallel()
 
@@ -90,5 +312,358 @@ func TestUpdateDispatchErrors(t *testing.T) {
 
 	if _, err := DiffUpdate([]byte{0x00, 0x01}, nil); !errors.Is(err, varint.ErrUnexpectedEOF) {
 		t.Fatalf("DiffUpdate(v2-ambiguous candidate) error = %v, want %v", err, varint.ErrUnexpectedEOF)
+	}
+}
+
+func TestSingleUpdateFormatAwareAPIsDispatchV1(t *testing.T) {
+	t.Parallel()
+
+	update := buildUpdate(
+		clientBlock{
+			client: 7,
+			clock:  0,
+			structs: []structEncoding{
+				itemString(rootParent("doc"), "hi"),
+				itemAny(rootParent("doc"), appendAnyString(nil, "x")),
+			},
+		},
+		clientBlock{
+			client: 9,
+			clock:  0,
+			structs: []structEncoding{
+				itemBinary(rootParent("doc"), []byte{0x01, 0x02}),
+			},
+		},
+		deleteRange{
+			client: 7,
+			clock:  4,
+			length: 1,
+		},
+	)
+
+	gotStateVector, err := StateVectorFromUpdate(update)
+	if err != nil {
+		t.Fatalf("StateVectorFromUpdate() unexpected error: %v", err)
+	}
+	if len(gotStateVector) != 2 || gotStateVector[7] != 3 || gotStateVector[9] != 1 {
+		t.Fatalf("StateVectorFromUpdate() = %#v, want map[7:3 9:1]", gotStateVector)
+	}
+
+	gotEncodedStateVector, err := EncodeStateVectorFromUpdate(update)
+	if err != nil {
+		t.Fatalf("EncodeStateVectorFromUpdate() unexpected error: %v", err)
+	}
+	wantEncodedStateVector, err := EncodeStateVectorFromUpdateV1(update)
+	if err != nil {
+		t.Fatalf("EncodeStateVectorFromUpdateV1() unexpected error: %v", err)
+	}
+	if !bytes.Equal(gotEncodedStateVector, wantEncodedStateVector) {
+		t.Fatalf("EncodeStateVectorFromUpdate() = %v, want %v", gotEncodedStateVector, wantEncodedStateVector)
+	}
+
+	gotContentIDs, err := CreateContentIDsFromUpdate(update)
+	if err != nil {
+		t.Fatalf("CreateContentIDsFromUpdate() unexpected error: %v", err)
+	}
+	wantContentIDs, err := CreateContentIDsFromUpdateV1(update)
+	if err != nil {
+		t.Fatalf("CreateContentIDsFromUpdateV1() unexpected error: %v", err)
+	}
+	if !IsSubsetContentIDs(gotContentIDs, wantContentIDs) || !IsSubsetContentIDs(wantContentIDs, gotContentIDs) {
+		t.Fatalf("CreateContentIDsFromUpdate() = %#v, want %#v", gotContentIDs, wantContentIDs)
+	}
+
+	filter := NewContentIDs()
+	_ = filter.Inserts.Add(7, 2, 1)
+	_ = filter.Deletes.Add(7, 4, 1)
+
+	gotIntersection, err := IntersectUpdateWithContentIDs(update, filter)
+	if err != nil {
+		t.Fatalf("IntersectUpdateWithContentIDs() unexpected error: %v", err)
+	}
+	wantIntersection, err := IntersectUpdateWithContentIDsV1(update, filter)
+	if err != nil {
+		t.Fatalf("IntersectUpdateWithContentIDsV1() unexpected error: %v", err)
+	}
+	if !bytes.Equal(gotIntersection, wantIntersection) {
+		t.Fatalf("IntersectUpdateWithContentIDs() = %v, want %v", gotIntersection, wantIntersection)
+	}
+}
+
+func TestSingleUpdateFormatAwareAPIsRejectUnsupportedOrUnknownFormats(t *testing.T) {
+	t.Parallel()
+
+	v2Update := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	filter := NewContentIDs()
+
+	tests := []struct {
+		name    string
+		call    func([]byte) error
+		input   []byte
+		wantErr error
+	}{
+		{
+			name: "StateVectorFromUpdate_v2",
+			call: func(update []byte) error {
+				_, err := StateVectorFromUpdate(update)
+				return err
+			},
+			input:   v2Update,
+			wantErr: ErrUnsupportedUpdateFormatV2,
+		},
+		{
+			name: "EncodeStateVectorFromUpdate_v2",
+			call: func(update []byte) error {
+				_, err := EncodeStateVectorFromUpdate(update)
+				return err
+			},
+			input:   v2Update,
+			wantErr: ErrUnsupportedUpdateFormatV2,
+		},
+		{
+			name: "CreateContentIDsFromUpdate_v2",
+			call: func(update []byte) error {
+				_, err := CreateContentIDsFromUpdate(update)
+				return err
+			},
+			input:   v2Update,
+			wantErr: ErrUnsupportedUpdateFormatV2,
+		},
+		{
+			name: "IntersectUpdateWithContentIDs_v2",
+			call: func(update []byte) error {
+				_, err := IntersectUpdateWithContentIDs(update, filter)
+				return err
+			},
+			input:   v2Update,
+			wantErr: ErrUnsupportedUpdateFormatV2,
+		},
+		{
+			name: "StateVectorFromUpdate_empty",
+			call: func(update []byte) error {
+				_, err := StateVectorFromUpdate(update)
+				return err
+			},
+			input:   nil,
+			wantErr: ErrUnknownUpdateFormat,
+		},
+		{
+			name: "EncodeStateVectorFromUpdate_empty",
+			call: func(update []byte) error {
+				_, err := EncodeStateVectorFromUpdate(update)
+				return err
+			},
+			input:   nil,
+			wantErr: ErrUnknownUpdateFormat,
+		},
+		{
+			name: "CreateContentIDsFromUpdate_empty",
+			call: func(update []byte) error {
+				_, err := CreateContentIDsFromUpdate(update)
+				return err
+			},
+			input:   nil,
+			wantErr: ErrUnknownUpdateFormat,
+		},
+		{
+			name: "IntersectUpdateWithContentIDs_empty",
+			call: func(update []byte) error {
+				_, err := IntersectUpdateWithContentIDs(update, filter)
+				return err
+			},
+			input:   nil,
+			wantErr: ErrUnknownUpdateFormat,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.call(tt.input)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("%s error = %v, want %v", tt.name, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestMergeUpdatesContextRejectsUnsupportedOrUnknownFormats(t *testing.T) {
+	t.Parallel()
+
+	v1 := buildUpdate(
+		clientBlock{
+			client: 1,
+			clock:  0,
+			structs: []structEncoding{
+				itemString(rootParent("doc"), "x"),
+			},
+		},
+	)
+	v2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+
+	tests := []struct {
+		name    string
+		updates [][]byte
+		wantErr error
+	}{
+		{
+			name:    "v2",
+			updates: [][]byte{v2},
+			wantErr: ErrUnsupportedUpdateFormatV2,
+		},
+		{
+			name:    "mixed",
+			updates: [][]byte{v1, v2},
+			wantErr: ErrMismatchedUpdateFormats,
+		},
+		{
+			name:    "empty_payload",
+			updates: [][]byte{v1, nil},
+			wantErr: ErrUnknownUpdateFormat,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := MergeUpdatesContext(context.Background(), tt.updates...)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("MergeUpdatesContext() error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestDiffAndIntersectContextDispatchV1(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	update := buildUpdate(
+		clientBlock{
+			client: 8,
+			clock:  0,
+			structs: []structEncoding{
+				itemString(rootParent("doc"), "abcd"),
+			},
+		},
+		deleteRange{
+			client: 8,
+			clock:  3,
+			length: 1,
+		},
+	)
+	stateVector := encodeStateVectorEntry(8, 2)
+	filter := NewContentIDs()
+	_ = filter.Inserts.Add(8, 1, 2)
+	_ = filter.Deletes.Add(8, 3, 1)
+
+	gotDiff, err := DiffUpdateContext(ctx, update, stateVector)
+	if err != nil {
+		t.Fatalf("DiffUpdateContext() unexpected error: %v", err)
+	}
+	wantDiff, err := DiffUpdateV1Context(ctx, update, stateVector)
+	if err != nil {
+		t.Fatalf("DiffUpdateV1Context() unexpected error: %v", err)
+	}
+	if !bytes.Equal(gotDiff, wantDiff) {
+		t.Fatalf("DiffUpdateContext() = %v, want %v", gotDiff, wantDiff)
+	}
+
+	gotIntersect, err := IntersectUpdateWithContentIDsContext(ctx, update, filter)
+	if err != nil {
+		t.Fatalf("IntersectUpdateWithContentIDsContext() unexpected error: %v", err)
+	}
+	wantIntersect, err := IntersectUpdateWithContentIDsV1Context(ctx, update, filter)
+	if err != nil {
+		t.Fatalf("IntersectUpdateWithContentIDsV1Context() unexpected error: %v", err)
+	}
+	if !bytes.Equal(gotIntersect, wantIntersect) {
+		t.Fatalf("IntersectUpdateWithContentIDsContext() = %v, want %v", gotIntersect, wantIntersect)
+	}
+}
+
+func TestDiffAndIntersectContextRejectUnsupportedOrUnknownFormats(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	v2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	filter := NewContentIDs()
+
+	tests := []struct {
+		name    string
+		call    func([]byte) error
+		input   []byte
+		wantErr error
+	}{
+		{
+			name: "DiffUpdateContext_v2",
+			call: func(update []byte) error {
+				_, err := DiffUpdateContext(ctx, update, nil)
+				return err
+			},
+			input:   v2,
+			wantErr: ErrUnsupportedUpdateFormatV2,
+		},
+		{
+			name: "IntersectUpdateWithContentIDsContext_v2",
+			call: func(update []byte) error {
+				_, err := IntersectUpdateWithContentIDsContext(ctx, update, filter)
+				return err
+			},
+			input:   v2,
+			wantErr: ErrUnsupportedUpdateFormatV2,
+		},
+		{
+			name: "DiffUpdateContext_empty",
+			call: func(update []byte) error {
+				_, err := DiffUpdateContext(ctx, update, nil)
+				return err
+			},
+			input:   nil,
+			wantErr: ErrUnknownUpdateFormat,
+		},
+		{
+			name: "IntersectUpdateWithContentIDsContext_empty",
+			call: func(update []byte) error {
+				_, err := IntersectUpdateWithContentIDsContext(ctx, update, filter)
+				return err
+			},
+			input:   nil,
+			wantErr: ErrUnknownUpdateFormat,
+		},
+		{
+			name: "DiffUpdateContext_malformed",
+			call: func(update []byte) error {
+				_, err := DiffUpdateContext(ctx, update, nil)
+				return err
+			},
+			input:   []byte{0x80},
+			wantErr: varint.ErrUnexpectedEOF,
+		},
+		{
+			name: "IntersectUpdateWithContentIDsContext_malformed",
+			call: func(update []byte) error {
+				_, err := IntersectUpdateWithContentIDsContext(ctx, update, filter)
+				return err
+			},
+			input:   []byte{0x80},
+			wantErr: varint.ErrUnexpectedEOF,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.call(tt.input)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("%s error = %v, want %v", tt.name, err, tt.wantErr)
+			}
+		})
 	}
 }

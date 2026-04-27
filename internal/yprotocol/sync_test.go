@@ -108,6 +108,62 @@ func TestEncodeProtocolSyncStep1FromUpdateV1(t *testing.T) {
 	}
 }
 
+func TestEncodeProtocolSyncStep1FromUpdatesV1(t *testing.T) {
+	t.Parallel()
+
+	left := buildGCOnlyUpdate(3, 2)
+	right := buildGCOnlyUpdate(7, 1)
+
+	expectedStateVector, err := yupdate.EncodeStateVectorFromUpdates(left, right)
+	if err != nil {
+		t.Fatalf("EncodeStateVectorFromUpdates() unexpected error: %v", err)
+	}
+
+	message, err := EncodeProtocolSyncStep1FromUpdatesV1(left, right)
+	if err != nil {
+		t.Fatalf("EncodeProtocolSyncStep1FromUpdatesV1() unexpected error: %v", err)
+	}
+
+	decoded, err := DecodeProtocolSyncMessage(message)
+	if err != nil {
+		t.Fatalf("DecodeProtocolSyncMessage() unexpected error: %v", err)
+	}
+	if decoded.Type != SyncMessageTypeStep1 {
+		t.Fatalf("decoded.Type = %v, want %v", decoded.Type, SyncMessageTypeStep1)
+	}
+	if !bytes.Equal(decoded.Payload, expectedStateVector) {
+		t.Fatalf("decoded.Payload = %v, want %v", decoded.Payload, expectedStateVector)
+	}
+}
+
+func TestEncodeProtocolSyncStep2FromUpdatesV1(t *testing.T) {
+	t.Parallel()
+
+	left := buildGCOnlyUpdate(4, 1)
+	right := buildGCOnlyUpdate(5, 2)
+
+	expectedMerged, err := yupdate.MergeUpdatesV1(left, right)
+	if err != nil {
+		t.Fatalf("MergeUpdatesV1() unexpected error: %v", err)
+	}
+
+	message, err := EncodeProtocolSyncStep2FromUpdatesV1(left, right)
+	if err != nil {
+		t.Fatalf("EncodeProtocolSyncStep2FromUpdatesV1() unexpected error: %v", err)
+	}
+
+	decoded, err := DecodeProtocolSyncMessage(message)
+	if err != nil {
+		t.Fatalf("DecodeProtocolSyncMessage() unexpected error: %v", err)
+	}
+	if decoded.Type != SyncMessageTypeStep2 {
+		t.Fatalf("decoded.Type = %v, want %v", decoded.Type, SyncMessageTypeStep2)
+	}
+	if !bytes.Equal(decoded.Payload, expectedMerged) {
+		t.Fatalf("decoded.Payload = %v, want %v", decoded.Payload, expectedMerged)
+	}
+}
+
 func TestDecodeSyncMessageRejectsUnknownType(t *testing.T) {
 	t.Parallel()
 
