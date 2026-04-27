@@ -20,14 +20,15 @@ func (c ParsedContent) Slice(diff uint32) (ParsedContent, error) {
 }
 
 func (c ParsedContent) SliceWindow(startOffset, endTrim uint32) (ParsedContent, error) {
-	if startOffset+endTrim >= c.LengthVal {
+	length := c.LengthVal
+	if uint64(startOffset)+uint64(endTrim) >= uint64(length) {
 		return ParsedContent{}, ErrInvalidSliceOffset
 	}
 	if startOffset == 0 && endTrim == 0 {
 		return c.clone(), nil
 	}
 
-	newLen := c.LengthVal - startOffset - endTrim
+	newLen := length - startOffset - endTrim
 	switch c.Ref {
 	case itemContentDeleted:
 		next := c.clone()

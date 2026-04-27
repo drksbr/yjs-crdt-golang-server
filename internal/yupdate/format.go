@@ -1,7 +1,9 @@
 package yupdate
 
 import (
+	"context"
 	"errors"
+	"fmt"
 
 	ybinary "yjs-go-bridge/internal/binary"
 	"yjs-go-bridge/internal/varint"
@@ -50,6 +52,28 @@ func DetectUpdateFormatWithReason(update []byte) (UpdateFormat, error) {
 	return format, nil
 }
 
+// DetectUpdatesFormatWithReasonContext valida uma lista de updates e confirma se
+// todas utilizam o mesmo formato, respeitando cancelamento.
+func DetectUpdatesFormatWithReasonContext(ctx context.Context, updates ...[]byte) (UpdateFormat, error) {
+	stateVectorFormat, err := aggregatePayloadsInParallel(
+		ctx,
+		updates,
+		0,
+		detectSingleUpdateFormat,
+		mergeUpdateFormats,
+	)
+	if err != nil {
+		return UpdateFormatUnknown, err
+	}
+	return stateVectorFormat, nil
+}
+
+// DetectUpdatesFormatWithReason valida uma lista de updates e confirma se todas
+// utilizam o mesmo formato. O retorno inclui o motivo da falha em índice.
+func DetectUpdatesFormatWithReason(updates ...[]byte) (UpdateFormat, error) {
+	return DetectUpdatesFormatWithReasonContext(context.Background(), updates...)
+}
+
 func detectUpdateFormatWithReason(update []byte) (UpdateFormat, error) {
 	if len(update) == 0 {
 		return UpdateFormatUnknown, ErrUnknownUpdateFormat
@@ -67,18 +91,64 @@ func detectUpdateFormatWithReason(update []byte) (UpdateFormat, error) {
 	// O V1 vazio também começa com zero, então tentamos validar o bloco de delete
 	// set restante.
 	reader := ybinary.NewReader(update[consumed:])
-	if _, err := ReadDeleteSetBlockV1(reader); err != nil {
-		if isMalformedUpdatePayloadForV1(err) {
-			return UpdateFormatUnknown, err
+	v1Err := error(nil)
+	if _, err := ReadDeleteSetBlockV1(reader); err == nil {
+		if reader.Remaining() == 0 {
+			return UpdateFormatV1, nil
 		}
-		return UpdateFormatUnknown, ErrAmbiguousUpdateFormat
+		v1Err = ErrTrailingBytes
+	} else if !isMalformedUpdatePayloadForV1(err) {
+		v1Err = ErrAmbiguousUpdateFormat
+	} else {
+		v1Err = err
 	}
 
-	if reader.Remaining() != 0 {
-		return UpdateFormatUnknown, ErrTrailingBytes
+	if err := validateV2HeaderPrefix(update[consumed:]); err == nil {
+		return UpdateFormatV2, nil
 	}
 
-	return UpdateFormatV1, nil
+	if v1Err != nil {
+		return UpdateFormatUnknown, v1Err
+	}
+
+	return UpdateFormatUnknown, ErrAmbiguousUpdateFormat
+}
+
+func detectSingleUpdateFormat(_ context.Context, _ int, update []byte) (UpdateFormat, error) {
+	if len(update) == 0 {
+		return UpdateFormatUnknown, nil
+	}
+	return detectUpdateFormatWithReason(update)
+}
+
+func mergeUpdateFormats(_ context.Context, formats []UpdateFormat) (UpdateFormat, error) {
+	if len(formats) == 0 {
+		return UpdateFormatUnknown, ErrUnknownUpdateFormat
+	}
+
+	var (
+		lastFormat UpdateFormat
+		found      bool
+	)
+
+	for _, format := range formats {
+		if format == UpdateFormatUnknown {
+			continue
+		}
+		if !found {
+			lastFormat = format
+			found = true
+			continue
+		}
+		if format != lastFormat {
+			return UpdateFormatUnknown, fmt.Errorf("%w", ErrMismatchedUpdateFormats)
+		}
+	}
+
+	if !found {
+		return UpdateFormatUnknown, ErrUnknownUpdateFormat
+	}
+	return lastFormat, nil
 }
 
 func isMalformedUpdatePayloadForV1(err error) bool {
@@ -92,4 +162,18 @@ func isMalformedUpdatePayloadForV1(err error) bool {
 		errors.Is(err, ytypes.ErrStructOverflow) ||
 		errors.Is(err, yidset.ErrInvalidLength) ||
 		errors.Is(err, yidset.ErrRangeOverflow)
+}
+
+func validateV2HeaderPrefix(src []byte) error {
+	reader := ybinary.NewReader(src)
+	for i := 0; i < 9; i++ {
+		length, _, err := varint.Read(reader)
+		if err != nil {
+			return err
+		}
+		if _, err := reader.ReadN(int(length)); err != nil {
+			return err
+		}
+	}
+	return nil
 }

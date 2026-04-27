@@ -117,6 +117,18 @@ func groupStructsByClient(structs []ytypes.Struct) map[uint32][]ytypes.Struct {
 		client := current.ID().Client
 		groups[client] = append(groups[client], current)
 	}
+	for client := range groups {
+		slices.SortStableFunc(groups[client], func(a, b ytypes.Struct) int {
+			switch {
+			case a.ID().Clock < b.ID().Clock:
+				return -1
+			case a.ID().Clock > b.ID().Clock:
+				return 1
+			default:
+				return 0
+			}
+		})
+	}
 	return groups
 }
 

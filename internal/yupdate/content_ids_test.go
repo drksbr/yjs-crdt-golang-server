@@ -133,6 +133,7 @@ func TestIntersectContentIDsIsPerFieldAndDeterministic(t *testing.T) {
 
 func TestDiffContentIDsRemovesRangesIndependentlyPerField(t *testing.T) {
 	t.Parallel()
+	// [5,5+3) removendo [6,6+1) mantém apenas os clocks 5 e 7 (2 faixas de 1).
 
 	base := NewContentIDs()
 	_ = base.Inserts.Add(1, 0, 5)
@@ -149,6 +150,22 @@ func TestDiffContentIDsRemovesRangesIndependentlyPerField(t *testing.T) {
 		1: {{0, 2}, {4, 1}},
 		2: {{10, 3}},
 	})
+	assertIDSetRanges(t, got.Deletes, map[uint32][][2]uint32{
+		1: {{5, 1}, {7, 1}},
+	})
+}
+
+func TestDiffContentIDsReturnsExpectedSuffixForLongerRange(t *testing.T) {
+	t.Parallel()
+	// [5,5+4) removendo [6,6+1) deve manter o sufixo [7,7+2).
+
+	base := NewContentIDs()
+	_ = base.Deletes.Add(1, 5, 4)
+
+	remove := NewContentIDs()
+	_ = remove.Deletes.Add(1, 6, 1)
+
+	got := DiffContentIDs(base, remove)
 	assertIDSetRanges(t, got.Deletes, map[uint32][][2]uint32{
 		1: {{5, 1}, {7, 2}},
 	})

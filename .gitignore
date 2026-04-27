@@ -1,0 +1,7 @@
+.serena/
+.tmp/
+.tmpcheck/
+_cmpgo/
+_tmp/
+**/node_modules/
+**/dist/

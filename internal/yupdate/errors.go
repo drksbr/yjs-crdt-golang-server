@@ -28,12 +28,12 @@ var (
 	ErrDeleteSetBeforeStructsEnd = errors.New("yupdate: delete set lido antes do fim dos structs")
 	// ErrTrailingBytes sinaliza bytes remanescentes após o delete set.
 	ErrTrailingBytes = errors.New("yupdate: bytes residuais ao final do update")
-	// ErrInvalidClientOrder sinaliza uso inválido do lazy writer fora da ordem do update.
-	ErrInvalidClientOrder = errors.New("yupdate: lazy writer recebeu clientes fora da ordem esperada")
 	// ErrInvalidContentIDsPayload sinaliza inconsistência sintática/semântica no payload de content ids.
 	ErrInvalidContentIDsPayload = errors.New("yupdate: payload de content ids invalido")
 	// ErrContentIDsTrailingBytes sinaliza bytes remanescentes após decodificação de content ids.
 	ErrContentIDsTrailingBytes = errors.New("yupdate: bytes residuais ao final do content ids")
+	// ErrInconsistentPersistedSnapshot sinaliza snapshot persistido em memória inconsistente com o payload V1 armazenado.
+	ErrInconsistentPersistedSnapshot = errors.New("yupdate: persisted snapshot inconsistente")
 )
 
 // ParseError adiciona contexto de operação e offset aos erros do parser.

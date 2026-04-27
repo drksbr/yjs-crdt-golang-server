@@ -1,6 +1,8 @@
 package yupdate
 
 import (
+	"context"
+
 	"yjs-go-bridge/internal/yidset"
 	"yjs-go-bridge/internal/ytypes"
 )
@@ -8,6 +10,16 @@ import (
 // IntersectUpdateWithContentIDsV1 filtra um update V1 mantendo apenas o conteúdo
 // mencionado pelo padrão de content ids.
 func IntersectUpdateWithContentIDsV1(update []byte, contentIDs *ContentIDs) ([]byte, error) {
+	return IntersectUpdateWithContentIDsV1Context(context.Background(), update, contentIDs)
+}
+
+// IntersectUpdateWithContentIDsV1Context filtra um update V1 mantendo apenas o
+// conteúdo mencionado pelo padrão de content ids, respeitando cancelamento.
+func IntersectUpdateWithContentIDsV1Context(ctx context.Context, update []byte, contentIDs *ContentIDs) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if contentIDs == nil {
 		contentIDs = NewContentIDs()
 	}
@@ -24,8 +36,24 @@ func IntersectUpdateWithContentIDsV1(update []byte, contentIDs *ContentIDs) ([]b
 		firstWrite := false
 		ranges := contentIDs.Inserts.Ranges(client)
 		rangeIdx := 0
+		skipCurrentClient := func() error {
+			for current != nil && current.ID().Client == client {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if err := reader.Next(); err != nil {
+					return err
+				}
+				current = reader.Current()
+			}
+			return nil
+		}
 
 		for current != nil && current.ID().Client == client {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			stopClient := false
 			currentClock := current.ID().Clock
 			currentEndClock := current.EndClock()
 
@@ -36,6 +64,17 @@ func IntersectUpdateWithContentIDsV1(update []byte, contentIDs *ContentIDs) ([]b
 			for rangeIdx < len(ranges) {
 				currentRange := ranges[rangeIdx]
 				if uint64(currentRange.Clock) >= uint64(currentEndClock) {
+					if !firstWrite && currentRange.Clock == currentEndClock {
+						// Mantém a semântica observada no upstream para seleção que
+						// começa exatamente na struct seguinte do cliente: sem uma
+						// escrita prévia, o restante do cliente é descartado.
+						if err := skipCurrentClient(); err != nil {
+							return nil, err
+						}
+						stopClient = true
+					}
+					// Se o range começa após o fim da struct atual, o loop externo
+					// avança para a próxima struct visível do cliente.
 					break
 				}
 
@@ -72,7 +111,12 @@ func IntersectUpdateWithContentIDsV1(update []byte, contentIDs *ContentIDs) ([]b
 
 				if currentRange.End() <= uint64(currentEndClock) {
 					rangeIdx++
+					continue
 				}
+				break
+			}
+			if stopClient {
+				break
 			}
 
 			if err := reader.Next(); err != nil {

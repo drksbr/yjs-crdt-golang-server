@@ -16,8 +16,6 @@ type lazyWriterV1 struct {
 	written    uint32
 	current    []byte
 	fragments  []lazyWriterFragmentV1
-	lastClient uint32
-	hasLast    bool
 }
 
 func newLazyWriterV1() *lazyWriterV1 {
@@ -29,12 +27,13 @@ func (w *lazyWriterV1) write(current ytypes.Struct, startOffset, endTrim uint32)
 		w.flush()
 	}
 	if w.written == 0 {
-		if w.hasLast && current.ID().Client >= w.lastClient {
-			return ErrInvalidClientOrder
+		startID, err := current.ID().Offset(startOffset)
+		if err != nil {
+			return err
 		}
 		w.currClient = current.ID().Client
 		w.current = appendVarUintV1(w.current[:0], w.currClient)
-		w.current = appendVarUintV1(w.current, current.ID().Clock+startOffset)
+		w.current = appendVarUintV1(w.current, startID.Clock)
 	}
 
 	var err error
@@ -54,6 +53,7 @@ func (w *lazyWriterV1) finish(dst []byte) ([]byte, error) {
 		dst = appendVarUintV1(dst, fragment.written)
 		dst = append(dst, fragment.payload...)
 	}
+	w.reset()
 	return dst, nil
 }
 
@@ -65,10 +65,15 @@ func (w *lazyWriterV1) flush() {
 		written: w.written,
 		payload: bytes.Clone(w.current),
 	})
-	w.lastClient = w.currClient
-	w.hasLast = true
 	w.current = w.current[:0]
 	w.written = 0
+}
+
+func (w *lazyWriterV1) reset() {
+	w.currClient = 0
+	w.written = 0
+	w.current = w.current[:0]
+	w.fragments = w.fragments[:0]
 }
 
 func appendStructRangeV1(dst []byte, current ytypes.Struct, startOffset, endTrim uint32) ([]byte, error) {

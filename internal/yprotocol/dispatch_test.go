@@ -13,10 +13,13 @@ func TestReadProtocolMessageStreamingMixedProtocols(t *testing.T) {
 	t.Parallel()
 
 	first := EncodeProtocolSyncStep1([]byte{0x00})
-
-	second := buildAwarenessProtocolMessage()
+	second := EncodeProtocolQueryAwareness()
+	third := EncodeProtocolAuthPermissionDenied("forbidden")
+	fourth := buildAwarenessProtocolMessage()
 
 	stream := append(first, second...)
+	stream = append(stream, third...)
+	stream = append(stream, fourth...)
 	reader := ybinary.NewReader(stream)
 
 	syncMessage, err := ReadProtocolMessage(reader)
@@ -30,9 +33,25 @@ func TestReadProtocolMessageStreamingMixedProtocols(t *testing.T) {
 		t.Fatal("syncMessage.Awareness esperado como nil")
 	}
 
-	awarenessMessage, err := ReadProtocolMessage(reader)
+	queryMessage, err := ReadProtocolMessage(reader)
 	if err != nil {
 		t.Fatalf("ReadProtocolMessage() second unexpected error: %v", err)
+	}
+	if queryMessage.Protocol != ProtocolTypeQueryAwareness || queryMessage.QueryAwareness == nil {
+		t.Fatalf("queryMessage = %#v, want protocolo query-awareness", queryMessage)
+	}
+
+	authMessage, err := ReadProtocolMessage(reader)
+	if err != nil {
+		t.Fatalf("ReadProtocolMessage() third unexpected error: %v", err)
+	}
+	if authMessage.Protocol != ProtocolTypeAuth || authMessage.Auth == nil || authMessage.Auth.Type != AuthMessageTypePermissionDenied || authMessage.Auth.Reason != "forbidden" {
+		t.Fatalf("authMessage = %#v, want protocolo auth permission denied", authMessage)
+	}
+
+	awarenessMessage, err := ReadProtocolMessage(reader)
+	if err != nil {
+		t.Fatalf("ReadProtocolMessage() fourth unexpected error: %v", err)
 	}
 	if awarenessMessage.Protocol != ProtocolTypeAwareness || awarenessMessage.Awareness == nil || len(awarenessMessage.Awareness.Clients) != 1 {
 		t.Fatalf("awarenessMessage = %#v, want protocolo awareness com 1 client", awarenessMessage)

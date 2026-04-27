@@ -103,8 +103,8 @@ func TestMergeUpdatesV1ReplacesBrokenSurrogateBoundary(t *testing.T) {
 		t.Fatalf("Structs[1] type = %T, want *ytypes.Item", decoded.Structs[1])
 	}
 	content := item.Content.(ParsedContent)
-	if item.ID().Clock != 2 || content.Text != "�a" || content.Length() != 2 {
-		t.Fatalf("merged item = id=%+v content=%#v, want clock=2 text=%q len=2", item.ID(), content, "�a")
+	if item.ID().Clock != 2 || content.Text != "\uFFFDa" || content.Length() != 2 {
+		t.Fatalf("merged item = id=%+v content=%#v, want clock=2 text=%q len=2", item.ID(), content, "\uFFFDa")
 	}
 }
 

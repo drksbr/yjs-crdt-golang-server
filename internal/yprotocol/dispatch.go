@@ -10,11 +10,13 @@ import (
 )
 
 // ProtocolMessage representa uma mensagem com envelope externo do y-protocols.
-// Apenas um subtipo (sync ou awareness) deve estar preenchido.
+// Apenas um subtipo deve estar preenchido.
 type ProtocolMessage struct {
-	Protocol  ProtocolType
-	Sync      *SyncMessage
-	Awareness *AwarenessMessage
+	Protocol       ProtocolType
+	Sync           *SyncMessage
+	Awareness      *AwarenessMessage
+	Auth           *AuthMessage
+	QueryAwareness *QueryAwarenessMessage
 }
 
 // AppendProtocolMessagePayload escreve o envelope externo com protocolo e payload bruto.
@@ -54,6 +56,16 @@ func ReadProtocolMessage(r *ybinary.Reader) (*ProtocolMessage, error) {
 			return nil, wrapError("ReadProtocolMessage.awareness", start, err)
 		}
 		message.Awareness = awarenessMessage
+		return message, nil
+	case ProtocolTypeAuth:
+		authMessage, err := ReadAuthMessage(r)
+		if err != nil {
+			return nil, wrapError("ReadProtocolMessage.auth", start, err)
+		}
+		message.Auth = authMessage
+		return message, nil
+	case ProtocolTypeQueryAwareness:
+		message.QueryAwareness = &QueryAwarenessMessage{}
 		return message, nil
 	default:
 		return nil, wrapError("ReadProtocolMessage.protocol", start, fmt.Errorf("%w: %d", ErrUnknownProtocolType, protocol))

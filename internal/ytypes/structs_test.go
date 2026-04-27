@@ -46,6 +46,14 @@ func TestGCAndSkipExposeSharedStructSemantics(t *testing.T) {
 	}
 }
 
+func TestKindStringUnknown(t *testing.T) {
+	t.Parallel()
+
+	if got := Kind(255).String(); got != "unknown" {
+		t.Fatalf("Kind(255).String() = %q, want %q", got, "unknown")
+	}
+}
+
 func TestStructConstructorsRejectInvalidRanges(t *testing.T) {
 	t.Parallel()
 
@@ -80,6 +88,77 @@ func TestStructConstructorsRejectInvalidRanges(t *testing.T) {
 			if err := tt.build(); !errors.Is(err, tt.wantErr) {
 				t.Fatalf("constructor error = %v, want %v", err, tt.wantErr)
 			}
+		})
+	}
+}
+
+func TestEndClockOnInvalidStructsIsPanicFree(t *testing.T) {
+	t.Parallel()
+
+	testNoPanic := func(t *testing.T, fn func()) {
+		t.Helper()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				t.Fatalf("operation panicked unexpectedly: %v", recovered)
+			}
+		}()
+		fn()
+	}
+
+	tests := []struct {
+		name             string
+		structure        baseStruct
+		expectEnd        uint32
+		expectCheckedErr error
+		expectContains   bool
+	}{
+		{
+			name:      "overflow",
+			structure: baseStruct{id: ID{Client: 7, Clock: math.MaxUint32}, length: 1},
+			// fallback for overflow keeps id.clock to avoid undefined behavior
+			expectEnd:        math.MaxUint32,
+			expectCheckedErr: ErrStructOverflow,
+			expectContains:   false,
+		},
+		{
+			name:             "zero_length",
+			structure:        baseStruct{id: ID{Client: 7, Clock: 1}, length: 0},
+			expectEnd:        1,
+			expectCheckedErr: ErrInvalidLength,
+			expectContains:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			testNoPanic(t, func() {
+				if got := tt.structure.EndClock(); got != tt.expectEnd {
+					t.Fatalf("EndClock() = %d, want %d", got, tt.expectEnd)
+				}
+			})
+
+			testNoPanic(t, func() {
+				last := tt.structure.LastID()
+				if last != tt.structure.id {
+					t.Fatalf("LastID() = %#v, want %#v", last, tt.structure.id)
+				}
+			})
+
+			testNoPanic(t, func() {
+				if got := tt.structure.ContainsClock(tt.structure.id.Clock); got != tt.expectContains {
+					t.Fatalf("ContainsClock() = %v, want %v", got, tt.expectContains)
+				}
+			})
+
+			testNoPanic(t, func() {
+				_, err := tt.structure.checkedEndClock()
+				if !errors.Is(err, tt.expectCheckedErr) {
+					t.Fatalf("checkedEndClock() error = %v, want %v", err, tt.expectCheckedErr)
+				}
+			})
 		})
 	}
 }

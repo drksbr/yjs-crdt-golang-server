@@ -66,24 +66,42 @@ func (s baseStruct) Length() uint32 {
 
 // EndClock retorna o clock exclusivo do final da struct.
 func (s baseStruct) EndClock() uint32 {
-	end, err := addClock(s.id.Clock, s.length)
+	end, err := s.checkedEndClock()
 	if err != nil {
-		panic(err)
+		return s.id.Clock
 	}
 	return end
 }
 
 // LastID retorna o último endereço lógico pertencente à struct.
 func (s baseStruct) LastID() ID {
+	end, err := s.checkedEndClock()
+	if err != nil || end == s.id.Clock {
+		return s.id
+	}
 	return ID{
 		Client: s.id.Client,
-		Clock:  s.EndClock() - 1,
+		Clock:  end - 1,
 	}
 }
 
 // ContainsClock informa se clock está dentro do range da struct.
 func (s baseStruct) ContainsClock(clock uint32) bool {
-	return clock >= s.id.Clock && clock < s.EndClock()
+	end, err := s.checkedEndClock()
+	return err == nil && clock >= s.id.Clock && clock < end
+}
+
+func (s baseStruct) checkedEndClock() (uint32, error) {
+	if s.length == 0 {
+		return 0, ErrInvalidLength
+	}
+
+	end, err := addClock(s.id.Clock, s.length)
+	if err != nil {
+		return 0, err
+	}
+
+	return end, nil
 }
 
 // GC modela uma struct já coletada. No Yjs ela é sempre tratada como deletada.

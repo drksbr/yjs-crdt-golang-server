@@ -55,9 +55,29 @@ func EncodeSyncStep1FromUpdateV1(update []byte) ([]byte, error) {
 	return EncodeSyncMessage(SyncMessageTypeStep1, stateVector)
 }
 
+// EncodeSyncStep1FromUpdatesV1 gera um SyncStep1 a partir de múltiplos updates
+// V1, agregando o state vector observado.
+func EncodeSyncStep1FromUpdatesV1(updates ...[]byte) ([]byte, error) {
+	stateVector, err := yupdate.EncodeStateVectorFromUpdates(updates...)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeSyncMessage(SyncMessageTypeStep1, stateVector)
+}
+
 // EncodeSyncStep2 serializa um SyncStep2 com um update binário.
 func EncodeSyncStep2(update []byte) []byte {
 	return encodeKnownSyncMessage(SyncMessageTypeStep2, update)
+}
+
+// EncodeSyncStep2FromUpdatesV1 consolida múltiplos updates V1 e serializa o
+// resultado como SyncStep2.
+func EncodeSyncStep2FromUpdatesV1(updates ...[]byte) ([]byte, error) {
+	merged, err := yupdate.MergeUpdatesV1(updates...)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeSyncMessage(SyncMessageTypeStep2, merged)
 }
 
 // EncodeSyncUpdate serializa uma mensagem incremental de update.
@@ -88,9 +108,29 @@ func EncodeProtocolSyncStep1FromUpdateV1(update []byte) ([]byte, error) {
 	return EncodeProtocolSyncMessage(SyncMessageTypeStep1, stateVector)
 }
 
+// EncodeProtocolSyncStep1FromUpdatesV1 gera uma mensagem combinada de protocolo
+// + SyncStep1 a partir de múltiplos updates V1.
+func EncodeProtocolSyncStep1FromUpdatesV1(updates ...[]byte) ([]byte, error) {
+	stateVector, err := yupdate.EncodeStateVectorFromUpdates(updates...)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeProtocolSyncMessage(SyncMessageTypeStep1, stateVector)
+}
+
 // EncodeProtocolSyncStep2 serializa uma mensagem combinada de protocolo + SyncStep2.
 func EncodeProtocolSyncStep2(update []byte) []byte {
 	return append(AppendProtocolType(nil, ProtocolTypeSync), EncodeSyncStep2(update)...)
+}
+
+// EncodeProtocolSyncStep2FromUpdatesV1 consolida múltiplos updates V1 e
+// serializa o resultado no envelope combinado do protocolo.
+func EncodeProtocolSyncStep2FromUpdatesV1(updates ...[]byte) ([]byte, error) {
+	merged, err := yupdate.MergeUpdatesV1(updates...)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeProtocolSyncMessage(SyncMessageTypeStep2, merged)
 }
 
 // EncodeProtocolSyncUpdate serializa uma mensagem combinada de protocolo + Update.
@@ -167,6 +207,7 @@ func (t SyncMessageType) Valid() bool {
 	}
 }
 
+// String retorna a representação textual conhecida do subtipo de sync.
 func (t SyncMessageType) String() string {
 	switch t {
 	case SyncMessageTypeStep1:

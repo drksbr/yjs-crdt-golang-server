@@ -25,6 +25,7 @@ type ParseError struct {
 	Err    error
 }
 
+// Error retorna a mensagem formatada do erro com contexto e offset.
 func (e *ParseError) Error() string {
 	return fmt.Sprintf("yawareness: %s falhou no offset %d: %v", e.Op, e.Offset, e.Err)
 }
