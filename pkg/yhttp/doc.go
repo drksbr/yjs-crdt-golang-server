@@ -11,13 +11,16 @@
 //   - roteamento de conexão para um `storage.DocumentKey`;
 //   - resolução opcional de owner antes do provider local via
 //     `OwnerAwareServer`;
+//   - seam opcional de forwarding remoto via `RemoteOwnerDialer`/
+//     `NodeMessageStream`, plugável atrás de `OwnerAwareServerConfig.OnRemoteOwner`;
 //   - leitura/escrita de frames binários do protocolo Yjs;
 //   - fanout local de broadcasts produzidos por `pkg/yprotocol.Provider`;
 //   - persistência opcional do snapshot no fechamento da conexão.
 //   - hooks opcionais de observabilidade via `Metrics`, com adapter Prometheus
 //     disponível em `pkg/yhttp/prometheus`.
 //
-// O pacote ainda não implementa proxy inter-node, replicação entre processos ou
-// suporte operacional a Update V2; o caminho owner-aware apenas responde com
-// metadados retryable quando o owner resolvido é remoto.
+// O pacote ainda não implementa um transporte inter-node concreto, replicação
+// entre processos ou suporte operacional a Update V2; quando o owner resolvido
+// é remoto, o fallback padrão continua respondendo com metadados retryable até
+// que o caller injete um `OnRemoteOwner` apropriado.
 package yhttp

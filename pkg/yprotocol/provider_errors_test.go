@@ -331,3 +331,54 @@ func TestConnectionCloseBroadcastsAwarenessTombstone(t *testing.T) {
 		t.Fatalf("UpdateForClients() = %+v, want single tombstone clock=1", update.Clients)
 	}
 }
+
+func TestConnectionCloseReturnsTombstoneWhenLastLocalPeerLeaves(t *testing.T) {
+	t.Parallel()
+
+	provider := NewProvider(ProviderConfig{})
+	key := storage.DocumentKey{
+		Namespace:  "tests",
+		DocumentID: "provider-close-last-local-peer-tombstone",
+	}
+
+	conn, err := provider.Open(context.Background(), key, "solo", 30)
+	if err != nil {
+		t.Fatalf("Open(solo) unexpected error: %v", err)
+	}
+	if err := conn.session.Awareness().SetLocalState(json.RawMessage(`{"name":"solo","cursor":7}`)); err != nil {
+		t.Fatalf("conn.session.Awareness().SetLocalState() unexpected error: %v", err)
+	}
+
+	result, err := conn.Close()
+	if err != nil {
+		t.Fatalf("conn.Close() unexpected error: %v", err)
+	}
+	if len(result.Direct) != 0 {
+		t.Fatalf("len(result.Direct) = %d, want 0", len(result.Direct))
+	}
+	if len(result.Broadcast) == 0 {
+		t.Fatal("len(result.Broadcast) = 0, want tombstone awareness even without local peers")
+	}
+
+	message, err := DecodeProtocolMessage(result.Broadcast)
+	if err != nil {
+		t.Fatalf("DecodeProtocolMessage(result.Broadcast) unexpected error: %v", err)
+	}
+	if message.Protocol != ProtocolTypeAwareness || message.Awareness == nil {
+		t.Fatalf("message = %#v, want awareness tombstone envelope", message)
+	}
+	if len(message.Awareness.Clients) != 1 {
+		t.Fatalf("len(message.Awareness.Clients) = %d, want 1", len(message.Awareness.Clients))
+	}
+
+	tombstone := message.Awareness.Clients[0]
+	if tombstone.ClientID != conn.ClientID() {
+		t.Fatalf("tombstone.ClientID = %d, want %d", tombstone.ClientID, conn.ClientID())
+	}
+	if tombstone.Clock != 1 {
+		t.Fatalf("tombstone.Clock = %d, want 1", tombstone.Clock)
+	}
+	if !tombstone.IsNull() {
+		t.Fatalf("tombstone = %#v, want null awareness state", tombstone)
+	}
+}

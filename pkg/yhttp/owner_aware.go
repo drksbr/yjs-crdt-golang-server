@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"yjs-go-bridge/pkg/storage"
@@ -21,7 +22,8 @@ const (
 //
 // O handler deve retornar `true` quando já tiver escrito a resposta completa.
 // Se retornar `false`, `OwnerAwareServer` cai no payload padrão com metadados do
-// owner remoto.
+// owner remoto. `NewRemoteOwnerForwardHandler` constrói uma implementação
+// padrão para proxy WebSocket via `RemoteOwnerDialer`.
 type RemoteOwnerHandler func(w http.ResponseWriter, r *http.Request, req Request, resolution ycluster.OwnerResolution) bool
 
 // OwnerAwareServerConfig descreve o wiring do handler owner-aware.
@@ -101,6 +103,9 @@ func (s *OwnerAwareServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if resolution.Local {
 		s.local.serveResolvedHTTP(w, r, req)
 		return
+	}
+	if strings.TrimSpace(req.ConnectionID) == "" {
+		req.ConnectionID = s.local.newConnectionID()
 	}
 
 	if s.onRemoteOwner != nil && s.onRemoteOwner(w, r, req, *resolution) {

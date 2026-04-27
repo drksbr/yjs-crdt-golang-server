@@ -11,4 +11,6 @@ var (
 	ErrNilLocalServer = errors.New("yhttp: local server obrigatorio")
 	// ErrNilOwnerLookup sinaliza ausência do lookup de owner em wiring distribuído.
 	ErrNilOwnerLookup = errors.New("yhttp: owner lookup obrigatorio")
+	// ErrNilRemoteOwnerDialer sinaliza ausência do dialer no forwarding remoto.
+	ErrNilRemoteOwnerDialer = errors.New("yhttp: remote owner dialer obrigatorio")
 )

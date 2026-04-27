@@ -1,18 +1,23 @@
 package yhttp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"yjs-go-bridge/pkg/storage"
 	"yjs-go-bridge/pkg/yawareness"
 	"yjs-go-bridge/pkg/ycluster"
+	"yjs-go-bridge/pkg/ynodeproto"
 	"yjs-go-bridge/pkg/yprotocol"
 )
 
@@ -248,6 +253,222 @@ func TestOwnerAwareServerInvokesRemoteOwnerHook(t *testing.T) {
 	}
 }
 
+func TestOwnerAwareServerRemoteForwarderFallsBackToHTTPMetadata(t *testing.T) {
+	t.Parallel()
+
+	local := newLocalHTTPServer(t, nil)
+	lookup := ownerLookupFunc(func(_ context.Context, req ycluster.OwnerLookupRequest) (*ycluster.OwnerResolution, error) {
+		return &ycluster.OwnerResolution{
+			DocumentKey: req.DocumentKey,
+			Placement: ycluster.Placement{
+				ShardID: 5,
+				NodeID:  "node-remote-http",
+			},
+			Local: false,
+		}, nil
+	})
+
+	dialer := &fakeRemoteOwnerDialer{
+		requests: make(chan RemoteOwnerDialRequest, 1),
+		stream:   newFakeRemoteOwnerStream(),
+	}
+	forwardRemoteOwner, err := NewRemoteOwnerForwardHandler(RemoteOwnerForwardConfig{
+		LocalNodeID: "node-edge-http",
+		Dialer:      dialer,
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteOwnerForwardHandler() unexpected error: %v", err)
+	}
+
+	handler, err := NewOwnerAwareServer(OwnerAwareServerConfig{
+		Local:         local,
+		OwnerLookup:   lookup,
+		OnRemoteOwner: forwardRemoteOwner,
+	})
+	if err != nil {
+		t.Fatalf("NewOwnerAwareServer() unexpected error: %v", err)
+	}
+
+	srv := newHTTPTestServerWithHandler(t, handler)
+	resp, err := http.Get(srv.URL + "/ws?doc=room-owner-forward-http&client=706")
+	if err != nil {
+		t.Fatalf("http.Get() unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("resp.StatusCode = %d, want %d", resp.StatusCode, http.StatusConflict)
+	}
+
+	select {
+	case req := <-dialer.requests:
+		t.Fatalf("DialRemoteOwner() called for plain HTTP request: %#v", req)
+	default:
+	}
+}
+
+func TestOwnerAwareServerRemoteForwarderBridgesWebSocketFrames(t *testing.T) {
+	t.Parallel()
+
+	local := newLocalHTTPServer(t, nil)
+	lookup := ownerLookupFunc(func(_ context.Context, req ycluster.OwnerLookupRequest) (*ycluster.OwnerResolution, error) {
+		return &ycluster.OwnerResolution{
+			DocumentKey: req.DocumentKey,
+			Placement: ycluster.Placement{
+				ShardID: 11,
+				NodeID:  "node-remote-ws",
+				Version: 7,
+				Lease: &ycluster.Lease{
+					ShardID: 11,
+					Holder:  "node-remote-ws",
+					Epoch:   29,
+					Token:   "lease-remote-ws",
+				},
+			},
+			Local: false,
+		}, nil
+	})
+
+	stream := newFakeRemoteOwnerStream()
+	dialer := &fakeRemoteOwnerDialer{
+		requests: make(chan RemoteOwnerDialRequest, 1),
+		stream:   stream,
+	}
+	forwardRemoteOwner, err := NewRemoteOwnerForwardHandler(RemoteOwnerForwardConfig{
+		LocalNodeID: "node-edge-ws",
+		Dialer:      dialer,
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteOwnerForwardHandler() unexpected error: %v", err)
+	}
+
+	handler, err := NewOwnerAwareServer(OwnerAwareServerConfig{
+		Local:         local,
+		OwnerLookup:   lookup,
+		OnRemoteOwner: forwardRemoteOwner,
+	})
+	if err != nil {
+		t.Fatalf("NewOwnerAwareServer() unexpected error: %v", err)
+	}
+
+	srv := newHTTPTestServerWithHandler(t, handler)
+	conn := dialWS(t, srv.URL+"/ws?doc=room-owner-forward-ws&client=707")
+
+	select {
+	case dialReq := <-dialer.requests:
+		if dialReq.Request.DocumentKey != testDocumentKey("room-owner-forward-ws") {
+			t.Fatalf("dialReq.Request.DocumentKey = %#v, want %#v", dialReq.Request.DocumentKey, testDocumentKey("room-owner-forward-ws"))
+		}
+		if dialReq.Request.ConnectionID == "" {
+			t.Fatal("dialReq.Request.ConnectionID = empty, want generated connection id")
+		}
+		if dialReq.Resolution.Placement.NodeID != "node-remote-ws" {
+			t.Fatalf("dialReq.Resolution.Placement.NodeID = %q, want %q", dialReq.Resolution.Placement.NodeID, "node-remote-ws")
+		}
+		if got := strings.ToLower(strings.TrimSpace(dialReq.Header.Get("Upgrade"))); got != "websocket" {
+			t.Fatalf("dialReq.Header.Get(\"Upgrade\") = %q, want %q", got, "websocket")
+		}
+	case <-time.After(testIOTimeout):
+		t.Fatal("DialRemoteOwner() was not called")
+	}
+
+	clientUpdate := []byte{0x01, 0x02, 0x03, 0x04}
+	writeBinary(t, conn, yprotocol.EncodeProtocolSyncUpdate(clientUpdate))
+
+	select {
+	case got := <-stream.sends:
+		handshake, ok := got.(*ynodeproto.Handshake)
+		if !ok {
+			t.Fatalf("stream.Send() first message = %T, want *ynodeproto.Handshake", got)
+		}
+		if handshake.NodeID != "node-edge-ws" {
+			t.Fatalf("handshake.NodeID = %q, want %q", handshake.NodeID, "node-edge-ws")
+		}
+		if handshake.DocumentKey != testDocumentKey("room-owner-forward-ws") {
+			t.Fatalf("handshake.DocumentKey = %#v, want %#v", handshake.DocumentKey, testDocumentKey("room-owner-forward-ws"))
+		}
+		if handshake.ConnectionID == "" {
+			t.Fatal("handshake.ConnectionID = empty, want generated connection id")
+		}
+		if handshake.ClientID != 707 {
+			t.Fatalf("handshake.ClientID = %d, want %d", handshake.ClientID, 707)
+		}
+		if handshake.Epoch != 29 {
+			t.Fatalf("handshake.Epoch = %d, want %d", handshake.Epoch, 29)
+		}
+	case <-time.After(testIOTimeout):
+		t.Fatal("remote stream did not receive handshake")
+	}
+
+	select {
+	case got := <-stream.sends:
+		update, ok := got.(*ynodeproto.DocumentUpdate)
+		if !ok {
+			t.Fatalf("stream.Send() second message = %T, want *ynodeproto.DocumentUpdate", got)
+		}
+		if !bytes.Equal(update.UpdateV1, clientUpdate) {
+			t.Fatalf("stream.Send().UpdateV1 = %v, want %v", update.UpdateV1, clientUpdate)
+		}
+		if update.DocumentKey != testDocumentKey("room-owner-forward-ws") {
+			t.Fatalf("stream.Send().DocumentKey = %#v, want %#v", update.DocumentKey, testDocumentKey("room-owner-forward-ws"))
+		}
+		if update.ConnectionID == "" {
+			t.Fatal("stream.Send().ConnectionID = empty, want generated connection id")
+		}
+		if update.Epoch != 29 {
+			t.Fatalf("stream.Send().Epoch = %d, want %d", update.Epoch, 29)
+		}
+	case <-time.After(testIOTimeout):
+		t.Fatal("remote stream did not receive forwarded client frame")
+	}
+
+	remoteUpdate := []byte{0x05, 0x06, 0x07}
+	stream.pushReceive(&ynodeproto.DocumentUpdate{
+		DocumentKey:  testDocumentKey("room-owner-forward-ws"),
+		ConnectionID: "owner-conn",
+		Epoch:        29,
+		UpdateV1:     remoteUpdate,
+	})
+	reply := readBinary(t, conn)
+	messages, err := yprotocol.DecodeProtocolMessages(reply)
+	if err != nil {
+		t.Fatalf("DecodeProtocolMessages() unexpected error: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Sync == nil {
+		t.Fatalf("messages = %#v, want single sync message", messages)
+	}
+	if messages[0].Sync.Type != yprotocol.SyncMessageTypeUpdate {
+		t.Fatalf("messages[0].Sync.Type = %v, want %v", messages[0].Sync.Type, yprotocol.SyncMessageTypeUpdate)
+	}
+	if !bytes.Equal(messages[0].Sync.Payload, remoteUpdate) {
+		t.Fatalf("messages[0].Sync.Payload = %v, want %v", messages[0].Sync.Payload, remoteUpdate)
+	}
+
+	if err := conn.Close(websocket.StatusNormalClosure, "bye"); err != nil {
+		t.Fatalf("conn.Close() unexpected error: %v", err)
+	}
+	select {
+	case got := <-stream.sends:
+		disconnect, ok := got.(*ynodeproto.Disconnect)
+		if !ok {
+			t.Fatalf("stream.Send() close message = %T, want *ynodeproto.Disconnect", got)
+		}
+		if disconnect.DocumentKey != testDocumentKey("room-owner-forward-ws") {
+			t.Fatalf("disconnect.DocumentKey = %#v, want %#v", disconnect.DocumentKey, testDocumentKey("room-owner-forward-ws"))
+		}
+		if disconnect.Epoch != 29 {
+			t.Fatalf("disconnect.Epoch = %d, want %d", disconnect.Epoch, 29)
+		}
+	case <-time.After(testIOTimeout):
+		t.Fatal("remote stream did not receive disconnect")
+	}
+	select {
+	case <-stream.closeCh:
+	case <-time.After(testIOTimeout):
+		t.Fatal("remote stream was not closed after client disconnect")
+	}
+}
+
 func TestOwnerAwareServerReturnsMappedLookupErrors(t *testing.T) {
 	t.Parallel()
 
@@ -341,6 +562,74 @@ type ownerLookupFunc func(ctx context.Context, req ycluster.OwnerLookupRequest) 
 
 func (f ownerLookupFunc) LookupOwner(ctx context.Context, req ycluster.OwnerLookupRequest) (*ycluster.OwnerResolution, error) {
 	return f(ctx, req)
+}
+
+type fakeRemoteOwnerDialer struct {
+	requests chan RemoteOwnerDialRequest
+	stream   NodeMessageStream
+	err      error
+}
+
+func (d *fakeRemoteOwnerDialer) DialRemoteOwner(ctx context.Context, req RemoteOwnerDialRequest) (NodeMessageStream, error) {
+	if d.requests != nil {
+		select {
+		case d.requests <- req:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if d.err != nil {
+		return nil, d.err
+	}
+	return d.stream, nil
+}
+
+type fakeRemoteOwnerStream struct {
+	receives  chan ynodeproto.Message
+	sends     chan ynodeproto.Message
+	closeCh   chan struct{}
+	closeOnce sync.Once
+}
+
+func newFakeRemoteOwnerStream() *fakeRemoteOwnerStream {
+	return &fakeRemoteOwnerStream{
+		receives: make(chan ynodeproto.Message, 4),
+		sends:    make(chan ynodeproto.Message, 4),
+		closeCh:  make(chan struct{}),
+	}
+}
+
+func (s *fakeRemoteOwnerStream) Send(ctx context.Context, message ynodeproto.Message) error {
+	select {
+	case s.sends <- message:
+		return nil
+	case <-s.closeCh:
+		return io.EOF
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *fakeRemoteOwnerStream) Receive(ctx context.Context) (ynodeproto.Message, error) {
+	select {
+	case message := <-s.receives:
+		return message, nil
+	case <-s.closeCh:
+		return nil, io.EOF
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (s *fakeRemoteOwnerStream) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.closeCh)
+	})
+	return nil
+}
+
+func (s *fakeRemoteOwnerStream) pushReceive(message ynodeproto.Message) {
+	s.receives <- message
 }
 
 func newLocalHTTPServer(t *testing.T, store storage.SnapshotStore) *Server {

@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"yjs-go-bridge/pkg/storage"
 	"yjs-go-bridge/pkg/storage/memory"
@@ -20,9 +24,10 @@ import (
 )
 
 const (
-	address    = "127.0.0.1:8080"
-	wsPath     = "/ws"
-	shardCount = 32
+	address       = "127.0.0.1:8080"
+	remoteAddress = "127.0.0.1:9090"
+	wsPath        = "/ws"
+	shardCount    = 32
 )
 
 var (
@@ -31,9 +36,10 @@ var (
 )
 
 type demoApp struct {
-	localNode ycluster.NodeID
-	docs      []demoDocument
-	edge      *ownerAwareEdge
+	localNode       ycluster.NodeID
+	docs            []demoDocument
+	edge            *ownerAwareEdge
+	remoteWSHandler http.Handler
 }
 
 type demoDocument struct {
@@ -75,14 +81,26 @@ func main() {
 	mux.HandleFunc("/owner", app.handleOwner)
 	mux.HandleFunc("/", app.handleRoot)
 
-	log.Printf("owner-aware-http-edge: ouvindo em http://%s\n", address)
+	remoteMux := http.NewServeMux()
+	remoteMux.Handle(wsPath, app.remoteWSHandler)
+	remoteMux.HandleFunc("/", app.handleRemoteRoot)
+
+	go func() {
+		log.Printf("owner-aware-http-edge: owner remoto ouvindo em http://%s\n", remoteAddress)
+		if err := http.ListenAndServe(":9090", remoteMux); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("owner-aware-http-edge: servidor http remoto: %v", err)
+		}
+	}()
+
+	log.Printf("owner-aware-http-edge: edge ouvindo em http://%s\n", address)
 	for _, doc := range app.docs {
 		scope := "remote"
 		if doc.Local {
 			scope = "local"
 		}
+		ownerRoute := withRawQuery(app.edge.ownerRoutes[doc.Owner], fmt.Sprintf("doc=%s&client=101&persist=1", doc.Key.DocumentID))
 		log.Printf(
-			"owner-aware-http-edge: %s doc=%s shard=%s owner=%s ws=ws://%s%s?doc=%s&client=101&persist=1\n",
+			"owner-aware-http-edge: %s doc=%s shard=%s owner=%s edge=ws://%s%s?doc=%s&client=101&persist=1 owner-route=%s\n",
 			scope,
 			doc.Key.DocumentID,
 			doc.Shard,
@@ -90,6 +108,7 @@ func main() {
 			address,
 			wsPath,
 			doc.Key.DocumentID,
+			ownerRoute,
 		)
 	}
 
@@ -110,14 +129,6 @@ func newDemoApp(ctx context.Context) (*demoApp, error) {
 	}
 
 	store := memory.New()
-	provider := yprotocol.NewProvider(yprotocol.ProviderConfig{Store: store})
-	wsHandler, err := yhttp.NewServer(yhttp.ServerConfig{
-		Provider:       provider,
-		ResolveRequest: resolveWSRequest,
-	})
-	if err != nil {
-		return nil, err
-	}
 
 	leaseStore, err := ycluster.NewStorageLeaseStore(store)
 	if err != nil {
@@ -129,7 +140,16 @@ func newDemoApp(ctx context.Context) (*demoApp, error) {
 		return nil, err
 	}
 
-	ownerLookup, err := ycluster.NewStorageOwnerLookup(localNode.LocalNodeID(), resolver, store, store)
+	ownerRoutes := map[ycluster.NodeID]string{
+		localNode.LocalNodeID(): fmt.Sprintf("ws://%s%s", address, wsPath),
+		remoteNodeID:            fmt.Sprintf("ws://%s%s", remoteAddress, wsPath),
+	}
+
+	edgeWSHandler, ownerLookup, err := newOwnerAwareWSHandler(localNode.LocalNodeID(), store, resolver, ownerRoutes)
+	if err != nil {
+		return nil, err
+	}
+	remoteWSHandler, _, err := newOwnerAwareWSHandler(remoteNodeID, store, resolver, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -146,12 +166,10 @@ func newDemoApp(ctx context.Context) (*demoApp, error) {
 		docs:      docs,
 		edge: &ownerAwareEdge{
 			ownerLookup: ownerLookup,
-			wsHandler:   wsHandler,
-			ownerRoutes: map[ycluster.NodeID]string{
-				localNode.LocalNodeID(): fmt.Sprintf("ws://%s%s", address, wsPath),
-				remoteNodeID:            "ws://127.0.0.1:9090/ws",
-			},
+			wsHandler:   edgeWSHandler,
+			ownerRoutes: ownerRoutes,
 		},
+		remoteWSHandler: remoteWSHandler,
 	}, nil
 }
 
@@ -252,6 +270,40 @@ func selectDemoKeys(resolver ycluster.ShardResolver) (storage.DocumentKey, stora
 	return storage.DocumentKey{}, storage.DocumentKey{}, fmt.Errorf("nao foi possivel selecionar documentos em shards distintos")
 }
 
+func newOwnerAwareWSHandler(
+	localNode ycluster.NodeID,
+	store *memory.Store,
+	resolver ycluster.ShardResolver,
+	ownerRoutes map[ycluster.NodeID]string,
+) (http.Handler, ycluster.OwnerLookup, error) {
+	localWSHandler, err := yhttp.NewServer(yhttp.ServerConfig{
+		Provider:       yprotocol.NewProvider(yprotocol.ProviderConfig{Store: store}),
+		ResolveRequest: resolveWSRequest,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ownerLookup, err := ycluster.NewStorageOwnerLookup(localNode, resolver, store, store)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cfg := yhttp.OwnerAwareServerConfig{
+		Local:       localWSHandler,
+		OwnerLookup: ownerLookup,
+	}
+	if len(ownerRoutes) > 0 {
+		cfg.OnRemoteOwner = relayRemoteOwnerHandler(ownerRoutes)
+	}
+
+	handler, err := yhttp.NewOwnerAwareServer(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return handler, ownerLookup, nil
+}
+
 func (a *demoApp) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -262,28 +314,41 @@ func (a *demoApp) handleRoot(w http.ResponseWriter, r *http.Request) {
 		"owner-aware-http-edge",
 		"",
 		fmt.Sprintf("local node: %s", a.localNode),
+		fmt.Sprintf("remote owner server: ws://%s%s", remoteAddress, wsPath),
 		"",
 		"owner resolution samples:",
 	}
 	for _, doc := range a.docs {
-		label := "remote route hint"
+		label := "remote owner relay"
 		if doc.Local {
 			label = "local owner"
 		}
+		ownerRoute := withRawQuery(a.edge.ownerRoutes[doc.Owner], fmt.Sprintf("doc=%s&client=101&persist=1", doc.Key.DocumentID))
 		lines = append(lines,
 			fmt.Sprintf("- %s: doc=%s shard=%s owner=%s", label, doc.Key.DocumentID, doc.Shard, doc.Owner),
 			fmt.Sprintf("  http://%s/owner?doc=%s&client=101&persist=1", address, doc.Key.DocumentID),
-			fmt.Sprintf("  ws://%s%s?doc=%s&client=101&persist=1", address, wsPath, doc.Key.DocumentID),
+			fmt.Sprintf("  edge ws://%s%s?doc=%s&client=101&persist=1", address, wsPath, doc.Key.DocumentID),
+			fmt.Sprintf("  owner %s", ownerRoute),
 		)
 	}
 	lines = append(lines,
 		"",
-		"Only local-owner documents are handed to pkg/yhttp today.",
-		"Remote-owner documents return route metadata instead of forwarding.",
+		"Edge /ws uses yhttp.OwnerAwareServer plus OnRemoteOwner relay.",
+		"Remote-owner documents are proxied to node-b instead of stopping at route metadata.",
 	)
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte(strings.Join(lines, "\n") + "\n"))
+}
+
+func (a *demoApp) handleRemoteRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte("owner-aware-http-edge remote owner node-b\n"))
 }
 
 func (a *demoApp) handleOwner(w http.ResponseWriter, r *http.Request) {
@@ -301,7 +366,7 @@ func (a *demoApp) handleOwner(w http.ResponseWriter, r *http.Request) {
 	if response.Local {
 		response.Note = "este no ja pode materializar o room localmente"
 	} else {
-		response.Note = "forwarding inter-node ainda nao existe; este exemplo para na resolucao de owner"
+		response.Note = "o edge encaminha o websocket ao no owner remoto via relay"
 	}
 
 	if err := writeJSON(w, http.StatusOK, response); err != nil {
@@ -310,33 +375,7 @@ func (a *demoApp) handleOwner(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ownerAwareEdge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	req, err := resolveWSRequest(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	response, err := h.routeForRequest(r.Context(), req.DocumentKey, r.URL.RawQuery)
-	if err != nil {
-		http.Error(w, err.Error(), ownerLookupStatus(err))
-		return
-	}
-	if response.Local {
-		h.wsHandler.ServeHTTP(w, r)
-		return
-	}
-
-	response.Note = "owner remoto resolvido; o room nao e materializado neste no"
-	w.Header().Set("X-Yjs-Owner-Node", response.OwnerNode)
-	if response.OwnerEpoch > 0 {
-		w.Header().Set("X-Yjs-Owner-Epoch", strconv.FormatUint(response.OwnerEpoch, 10))
-	}
-	if response.WebSocketURL != "" {
-		w.Header().Set("X-Yjs-Owner-Websocket", response.WebSocketURL)
-	}
-	if err := writeJSON(w, http.StatusMisdirectedRequest, response); err != nil {
-		log.Printf("owner-aware-http-edge: write remote owner response: %v", err)
-	}
+	h.wsHandler.ServeHTTP(w, r)
 }
 
 func (h *ownerAwareEdge) routeForRequest(
@@ -407,6 +446,76 @@ func ownerLookupStatus(err error) int {
 		return http.StatusNotFound
 	default:
 		return http.StatusInternalServerError
+	}
+}
+
+func relayRemoteOwnerHandler(ownerRoutes map[ycluster.NodeID]string) yhttp.RemoteOwnerHandler {
+	return func(w http.ResponseWriter, r *http.Request, _ yhttp.Request, resolution ycluster.OwnerResolution) bool {
+		targetURL := withRawQuery(ownerRoutes[resolution.Placement.NodeID], r.URL.RawQuery)
+		if err := relayWebSocketBinary(w, r, targetURL); err != nil && !isExpectedRelayClose(err) {
+			log.Printf("owner-aware-http-edge: relay remote owner %s: %v", resolution.Placement.NodeID, err)
+		}
+		return true
+	}
+}
+
+func relayWebSocketBinary(w http.ResponseWriter, r *http.Request, targetURL string) error {
+	if strings.TrimSpace(targetURL) == "" {
+		http.Error(w, "owner route indisponivel", http.StatusBadGateway)
+		return nil
+	}
+
+	upstream, _, err := websocket.Dial(r.Context(), targetURL, nil)
+	if err != nil {
+		http.Error(w, "relay dial remoto: "+err.Error(), http.StatusBadGateway)
+		return err
+	}
+	defer upstream.CloseNow()
+
+	downstream, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		return err
+	}
+	defer downstream.CloseNow()
+
+	relayCtx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	upstreamConn := websocket.NetConn(relayCtx, upstream, websocket.MessageBinary)
+	downstreamConn := websocket.NetConn(relayCtx, downstream, websocket.MessageBinary)
+	defer upstreamConn.Close()
+	defer downstreamConn.Close()
+
+	errCh := make(chan error, 2)
+	go relayCopy(errCh, upstreamConn, downstreamConn)
+	go relayCopy(errCh, downstreamConn, upstreamConn)
+
+	firstErr := <-errCh
+	cancel()
+	_ = upstreamConn.Close()
+	_ = downstreamConn.Close()
+	secondErr := <-errCh
+	if isExpectedRelayClose(firstErr) {
+		return secondErr
+	}
+	return firstErr
+}
+
+func relayCopy(errCh chan<- error, dst net.Conn, src net.Conn) {
+	_, err := io.Copy(dst, src)
+	errCh <- err
+}
+
+func isExpectedRelayClose(err error) bool {
+	switch {
+	case err == nil, errors.Is(err, io.EOF), errors.Is(err, net.ErrClosed):
+		return true
+	default:
+		var closeErr websocket.CloseError
+		if errors.As(err, &closeErr) {
+			return closeErr.Code == websocket.StatusNormalClosure || closeErr.Code == websocket.StatusGoingAway
+		}
+		return false
 	}
 }
 

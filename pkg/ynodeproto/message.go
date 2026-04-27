@@ -11,12 +11,17 @@ import (
 )
 
 const fixedUint64Size = 8
+const fixedUint32Size = 4
 
-type routedPayload struct {
+type routedRoute struct {
 	DocumentKey  storage.DocumentKey
 	ConnectionID string
 	Epoch        uint64
-	Body         []byte
+}
+
+type routedPayload struct {
+	routedRoute
+	Body []byte
 }
 
 // Message representa um payload tipado do protocolo inter-node.
@@ -55,6 +60,7 @@ type Handshake struct {
 	NodeID       string
 	DocumentKey  storage.DocumentKey
 	ConnectionID string
+	ClientID     uint32
 	Epoch        uint64
 }
 
@@ -94,7 +100,8 @@ func (m *Handshake) appendPayload(dst []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return appendUint64(dst, m.Epoch), nil
+	dst = appendUint64(dst, m.Epoch)
+	return appendUint32(dst, m.ClientID), nil
 }
 
 // HandshakeAck confirma o handshake e espelha o contexto roteável aceito.
@@ -103,6 +110,7 @@ type HandshakeAck struct {
 	NodeID       string
 	DocumentKey  storage.DocumentKey
 	ConnectionID string
+	ClientID     uint32
 	Epoch        uint64
 }
 
@@ -142,7 +150,8 @@ func (m *HandshakeAck) appendPayload(dst []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return appendUint64(dst, m.Epoch), nil
+	dst = appendUint64(dst, m.Epoch)
+	return appendUint32(dst, m.ClientID), nil
 }
 
 // DocumentSyncRequest solicita catch-up de um documento e carrega o state
@@ -284,6 +293,141 @@ func (m *AwarenessUpdate) appendPayload(dst []byte) ([]byte, error) {
 	return appendRoutedPayload(dst, m.DocumentKey, m.ConnectionID, m.Epoch, m.Payload)
 }
 
+// QueryAwarenessRequest solicita ao owner o snapshot agregado de awareness
+// para a conexão roteada.
+type QueryAwarenessRequest struct {
+	Flags        Flags
+	DocumentKey  storage.DocumentKey
+	ConnectionID string
+	Epoch        uint64
+}
+
+// Type retorna o message type associado ao payload.
+func (m *QueryAwarenessRequest) Type() MessageType {
+	return MessageTypeQueryAwarenessRequest
+}
+
+// FrameFlags retorna os bits auxiliares do header preservados por esta mensagem.
+func (m *QueryAwarenessRequest) FrameFlags() Flags {
+	if m == nil {
+		return FlagNone
+	}
+	return m.Flags
+}
+
+// Validate confirma se o payload contém os campos mínimos exigidos pelo wire.
+func (m *QueryAwarenessRequest) Validate() error {
+	if m == nil {
+		return ErrNilMessage
+	}
+	return validateRoute(m.DocumentKey, m.ConnectionID, m.Epoch)
+}
+
+func (m *QueryAwarenessRequest) appendPayload(dst []byte) ([]byte, error) {
+	return appendRoutedRoute(dst, m.DocumentKey, m.ConnectionID, m.Epoch)
+}
+
+// QueryAwarenessResponse entrega o snapshot awareness solicitado pelo peer.
+type QueryAwarenessResponse struct {
+	Flags        Flags
+	DocumentKey  storage.DocumentKey
+	ConnectionID string
+	Epoch        uint64
+	Payload      []byte
+}
+
+// Type retorna o message type associado ao payload.
+func (m *QueryAwarenessResponse) Type() MessageType {
+	return MessageTypeQueryAwarenessResponse
+}
+
+// FrameFlags retorna os bits auxiliares do header preservados por esta mensagem.
+func (m *QueryAwarenessResponse) FrameFlags() Flags {
+	if m == nil {
+		return FlagNone
+	}
+	return m.Flags
+}
+
+// Validate confirma se o payload contém os campos mínimos exigidos pelo wire.
+func (m *QueryAwarenessResponse) Validate() error {
+	if m == nil {
+		return ErrNilMessage
+	}
+	return validateRoutedBody(m.DocumentKey, m.ConnectionID, m.Epoch, m.Payload)
+}
+
+func (m *QueryAwarenessResponse) appendPayload(dst []byte) ([]byte, error) {
+	return appendRoutedPayload(dst, m.DocumentKey, m.ConnectionID, m.Epoch, m.Payload)
+}
+
+// Disconnect notifica o owner que a borda perdeu a conexão do cliente e o
+// contexto roteado precisa ser encerrado.
+type Disconnect struct {
+	Flags        Flags
+	DocumentKey  storage.DocumentKey
+	ConnectionID string
+	Epoch        uint64
+}
+
+// Type retorna o message type associado ao payload.
+func (m *Disconnect) Type() MessageType {
+	return MessageTypeDisconnect
+}
+
+// FrameFlags retorna os bits auxiliares do header preservados por esta mensagem.
+func (m *Disconnect) FrameFlags() Flags {
+	if m == nil {
+		return FlagNone
+	}
+	return m.Flags
+}
+
+// Validate confirma se o payload contém os campos mínimos exigidos pelo wire.
+func (m *Disconnect) Validate() error {
+	if m == nil {
+		return ErrNilMessage
+	}
+	return validateRoute(m.DocumentKey, m.ConnectionID, m.Epoch)
+}
+
+func (m *Disconnect) appendPayload(dst []byte) ([]byte, error) {
+	return appendRoutedRoute(dst, m.DocumentKey, m.ConnectionID, m.Epoch)
+}
+
+// Close instrui a borda a fechar explicitamente a conexão encaminhada.
+type Close struct {
+	Flags        Flags
+	DocumentKey  storage.DocumentKey
+	ConnectionID string
+	Epoch        uint64
+}
+
+// Type retorna o message type associado ao payload.
+func (m *Close) Type() MessageType {
+	return MessageTypeClose
+}
+
+// FrameFlags retorna os bits auxiliares do header preservados por esta mensagem.
+func (m *Close) FrameFlags() Flags {
+	if m == nil {
+		return FlagNone
+	}
+	return m.Flags
+}
+
+// Validate confirma se o payload contém os campos mínimos exigidos pelo wire.
+func (m *Close) Validate() error {
+	if m == nil {
+		return ErrNilMessage
+	}
+	return validateRoute(m.DocumentKey, m.ConnectionID, m.Epoch)
+}
+
+func (m *Close) appendPayload(dst []byte) ([]byte, error) {
+	return appendRoutedRoute(dst, m.DocumentKey, m.ConnectionID, m.Epoch)
+}
+
 // Ping carrega um nonce correlacionável para keepalive/latência.
 type Ping struct {
 	Flags Flags
@@ -407,6 +551,14 @@ func DecodeMessagePayload(typ MessageType, flags Flags, payload []byte) (Message
 		message, err = decodeDocumentUpdate(reader, flags)
 	case MessageTypeAwarenessUpdate:
 		message, err = decodeAwarenessUpdate(reader, flags)
+	case MessageTypeQueryAwarenessRequest:
+		message, err = decodeQueryAwarenessRequest(reader, flags)
+	case MessageTypeQueryAwarenessResponse:
+		message, err = decodeQueryAwarenessResponse(reader, flags)
+	case MessageTypeDisconnect:
+		message, err = decodeDisconnect(reader, flags)
+	case MessageTypeClose:
+		message, err = decodeClose(reader, flags)
 	case MessageTypePing:
 		message, err = decodePing(reader, flags)
 	case MessageTypePong:
@@ -459,12 +611,17 @@ func decodeHandshake(r *ybinary.Reader, flags Flags) (*Handshake, error) {
 	if err != nil {
 		return nil, err
 	}
+	clientID, err := readOptionalUint32(r, "ReadHandshake.clientID")
+	if err != nil {
+		return nil, err
+	}
 
 	message := &Handshake{
 		Flags:        flags,
 		NodeID:       nodeID,
 		DocumentKey:  key,
 		ConnectionID: connectionID,
+		ClientID:     clientID,
 		Epoch:        epoch,
 	}
 	if err := message.Validate(); err != nil {
@@ -490,12 +647,17 @@ func decodeHandshakeAck(r *ybinary.Reader, flags Flags) (*HandshakeAck, error) {
 	if err != nil {
 		return nil, err
 	}
+	clientID, err := readOptionalUint32(r, "ReadHandshakeAck.clientID")
+	if err != nil {
+		return nil, err
+	}
 
 	message := &HandshakeAck{
 		Flags:        flags,
 		NodeID:       nodeID,
 		DocumentKey:  key,
 		ConnectionID: connectionID,
+		ClientID:     clientID,
 		Epoch:        epoch,
 	}
 	if err := message.Validate(); err != nil {
@@ -596,6 +758,95 @@ func decodeAwarenessUpdate(r *ybinary.Reader, flags Flags) (*AwarenessUpdate, er
 	return message, nil
 }
 
+func decodeQueryAwarenessRequest(r *ybinary.Reader, flags Flags) (*QueryAwarenessRequest, error) {
+	route, err := readRoutedRoute(
+		r,
+		"ReadQueryAwarenessRequest.documentKey",
+		"ReadQueryAwarenessRequest.connectionID",
+		"ReadQueryAwarenessRequest.epoch",
+	)
+	if err != nil {
+		return nil, err
+	}
+	message := &QueryAwarenessRequest{
+		Flags:        flags,
+		DocumentKey:  route.DocumentKey,
+		ConnectionID: route.ConnectionID,
+		Epoch:        route.Epoch,
+	}
+	if err := message.Validate(); err != nil {
+		return nil, wrapParseError("ReadQueryAwarenessRequest.validate", r.Offset(), err)
+	}
+	return message, nil
+}
+
+func decodeQueryAwarenessResponse(r *ybinary.Reader, flags Flags) (*QueryAwarenessResponse, error) {
+	routed, err := readRoutedPayload(
+		r,
+		"ReadQueryAwarenessResponse.documentKey",
+		"ReadQueryAwarenessResponse.connectionID",
+		"ReadQueryAwarenessResponse.epoch",
+	)
+	if err != nil {
+		return nil, err
+	}
+	message := &QueryAwarenessResponse{
+		Flags:        flags,
+		DocumentKey:  routed.DocumentKey,
+		ConnectionID: routed.ConnectionID,
+		Epoch:        routed.Epoch,
+		Payload:      routed.Body,
+	}
+	if err := message.Validate(); err != nil {
+		return nil, wrapParseError("ReadQueryAwarenessResponse.validate", r.Offset(), err)
+	}
+	return message, nil
+}
+
+func decodeDisconnect(r *ybinary.Reader, flags Flags) (*Disconnect, error) {
+	route, err := readRoutedRoute(
+		r,
+		"ReadDisconnect.documentKey",
+		"ReadDisconnect.connectionID",
+		"ReadDisconnect.epoch",
+	)
+	if err != nil {
+		return nil, err
+	}
+	message := &Disconnect{
+		Flags:        flags,
+		DocumentKey:  route.DocumentKey,
+		ConnectionID: route.ConnectionID,
+		Epoch:        route.Epoch,
+	}
+	if err := message.Validate(); err != nil {
+		return nil, wrapParseError("ReadDisconnect.validate", r.Offset(), err)
+	}
+	return message, nil
+}
+
+func decodeClose(r *ybinary.Reader, flags Flags) (*Close, error) {
+	route, err := readRoutedRoute(
+		r,
+		"ReadClose.documentKey",
+		"ReadClose.connectionID",
+		"ReadClose.epoch",
+	)
+	if err != nil {
+		return nil, err
+	}
+	message := &Close{
+		Flags:        flags,
+		DocumentKey:  route.DocumentKey,
+		ConnectionID: route.ConnectionID,
+		Epoch:        route.Epoch,
+	}
+	if err := message.Validate(); err != nil {
+		return nil, wrapParseError("ReadClose.validate", r.Offset(), err)
+	}
+	return message, nil
+}
+
 func decodePing(r *ybinary.Reader, flags Flags) (*Ping, error) {
 	nonce, err := readUint64(r, "ReadPing.nonce")
 	if err != nil {
@@ -657,6 +908,14 @@ func validateRoutedBody(key storage.DocumentKey, connectionID string, epoch uint
 }
 
 func appendRoutedPayload(dst []byte, key storage.DocumentKey, connectionID string, epoch uint64, body []byte) ([]byte, error) {
+	dst, err := appendRoutedRoute(dst, key, connectionID, epoch)
+	if err != nil {
+		return nil, err
+	}
+	return append(dst, body...), nil
+}
+
+func appendRoutedRoute(dst []byte, key storage.DocumentKey, connectionID string, epoch uint64) ([]byte, error) {
 	var err error
 
 	dst, err = appendDocumentKey(dst, key)
@@ -667,8 +926,7 @@ func appendRoutedPayload(dst []byte, key storage.DocumentKey, connectionID strin
 	if err != nil {
 		return nil, err
 	}
-	dst = appendUint64(dst, epoch)
-	return append(dst, body...), nil
+	return appendUint64(dst, epoch), nil
 }
 
 func appendDocumentKey(dst []byte, key storage.DocumentKey) ([]byte, error) {
@@ -693,6 +951,13 @@ func appendUint64(dst []byte, value uint64) []byte {
 	start := len(dst)
 	dst = append(dst, make([]byte, fixedUint64Size)...)
 	binary.BigEndian.PutUint64(dst[start:start+fixedUint64Size], value)
+	return dst
+}
+
+func appendUint32(dst []byte, value uint32) []byte {
+	start := len(dst)
+	dst = append(dst, make([]byte, fixedUint32Size)...)
+	binary.BigEndian.PutUint32(dst[start:start+fixedUint32Size], value)
 	return dst
 }
 
@@ -752,7 +1017,23 @@ func readUint64(r *ybinary.Reader, op string) (uint64, error) {
 	return binary.BigEndian.Uint64(raw), nil
 }
 
-func readRoutedPayload(r *ybinary.Reader, keyOp string, connectionOp string, epochOp string) (*routedPayload, error) {
+func readUint32(r *ybinary.Reader, op string) (uint32, error) {
+	start := r.Offset()
+	raw, err := r.ReadN(fixedUint32Size)
+	if err != nil {
+		return 0, wrapParseError(op, start, err)
+	}
+	return binary.BigEndian.Uint32(raw), nil
+}
+
+func readOptionalUint32(r *ybinary.Reader, op string) (uint32, error) {
+	if r.Remaining() == 0 {
+		return 0, nil
+	}
+	return readUint32(r, op)
+}
+
+func readRoutedRoute(r *ybinary.Reader, keyOp string, connectionOp string, epochOp string) (*routedRoute, error) {
 	key, err := readDocumentKey(r, keyOp)
 	if err != nil {
 		return nil, err
@@ -765,15 +1046,25 @@ func readRoutedPayload(r *ybinary.Reader, keyOp string, connectionOp string, epo
 	if err != nil {
 		return nil, err
 	}
+	return &routedRoute{
+		DocumentKey:  key,
+		ConnectionID: connectionID,
+		Epoch:        epoch,
+	}, nil
+}
+
+func readRoutedPayload(r *ybinary.Reader, keyOp string, connectionOp string, epochOp string) (*routedPayload, error) {
+	route, err := readRoutedRoute(r, keyOp, connectionOp, epochOp)
+	if err != nil {
+		return nil, err
+	}
 	body, err := readRemainingBytes(r)
 	if err != nil {
 		return nil, err
 	}
 	return &routedPayload{
-		DocumentKey:  key,
-		ConnectionID: connectionID,
-		Epoch:        epoch,
-		Body:         body,
+		routedRoute: *route,
+		Body:        body,
 	}, nil
 }
 

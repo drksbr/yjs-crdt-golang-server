@@ -31,11 +31,13 @@ borda owner-aware que só materializa o room quando o owner resolvido é local.
 - o lifecycle de lease no control plane já sobe `epoch` monotônico: acquire inicial em `1`, renew preserva `epoch/token` e takeover após expiração incrementa o epoch;
 - ownership agora só é considerado resolvido quando existe lease ativa e válida; placement isolado não classifica mais owner local/remoto;
 - os backends de `pkg/storage` agora cercam `SaveLease` com `ErrLeaseConflict`/`ErrLeaseStaleEpoch` e preservam a última geração do shard mesmo após `ReleaseLease`;
+- `pkg/yhttp` agora já expõe um seam typed de forwarding remoto via `RemoteOwnerDialer`/`NodeMessageStream`, plugável atrás de `OwnerAwareServerConfig.OnRemoteOwner`;
+- o wire inter-node agora carrega `clientID` no handshake e mensagens roteadas explícitas para `query-awareness`, `disconnect` e `close`;
 - a resposta owner-aware remota já devolve `epoch` do owner junto dos metadados de roteamento;
 - lease, `epoch` e fencing continuam sendo o próximo fechamento crítico para handoff, failover e prevenção de split-brain;
 - o wire interno permanece separado do `y-protocols`, que continua restrito à borda cliente.
 
-## Epochs 1-4 já entregues
+## Epochs 1-5 já entregues
 
 O branch atual já entrega a base operacional inicial e o segundo corte de
 integração da fase distribuída, ainda sem ligar um runtime multi-nó completo:
@@ -45,11 +47,12 @@ integração da fase distribuída, ainda sem ligar um runtime multi-nó completo
 - `pkg/storage/memory` e `pkg/storage/postgres` já implementam `DistributedStore` com snapshot, update log, placement e lease;
 - `pkg/storage` agora trata `OwnerInfo.Epoch` como obrigatório e endurece o lifecycle de lease com fencing por geração persistida;
 - `pkg/ycluster` expõe tipos, resolver determinístico de shard, lookups de owner e adapter de lease sobre `pkg/storage`, sempre exigindo lease ativa e epoch válida para classificar ownership;
-- `pkg/ynodeproto` agora expõe o framing binário versionado e os payloads tipados do protocolo inter-node (`handshake`, `document-sync-*`, `document-update`, `awareness-update`, `ping/pong`);
+- `pkg/ynodeproto` agora expõe o framing binário versionado e os payloads tipados do protocolo inter-node, incluindo `clientID` em `handshake`, além de `query-awareness`, `disconnect` e `close` roteados;
 - `pkg/yprotocol.Provider` já trata `snapshot + update log` como bootstrap/recovery do owner local, registrando updates no log e compactando o tail em `Persist`;
 - `pkg/yhttp` já expõe `OwnerAwareServer`, que resolve owner antes do provider local e responde com metadados retryable ou hook customizado quando o owner é remoto;
+- `pkg/yhttp` agora também expõe `NewRemoteOwnerForwardHandler`, que transforma o hook `OnRemoteOwner` num relay WebSocket acima de `RemoteOwnerDialer`/`NodeMessageStream`;
 - `pkg/ycluster.StorageLeaseStore` já endurece o lifecycle básico de ownership com `epoch` monotônico em lease ativa, renew preservando `token`/`epoch`, takeover pós-expiração incrementando o epoch persistido e release preservando a geração anterior;
-- `examples/owner-aware-http-edge` e os novos testes de integração cobrem o wiring owner-aware, o replay via `snapshot + update log` e o recovery do provider;
+- `examples/owner-aware-http-edge` e os novos testes de integração agora cobrem wiring owner-aware, relay real para owner remoto, replay via `snapshot + update log` e recovery do provider;
 - handoff, cutover, forwarding inter-node e fencing autoritativo ainda seguem como etapa posterior.
 
 As APIs de update abaixo estão disponíveis na camada pública e seguem validação de formato antes de executar as operações.
@@ -279,6 +282,7 @@ API pública de transporte HTTP/WebSocket acima de `pkg/yprotocol.Provider`.
 
 - `var ErrNilProvider error`
 - `var ErrNilResolveRequest error`
+- `var ErrNilRemoteOwnerDialer error`
 - `type Request struct { DocumentKey storage.DocumentKey; ConnectionID string; ClientID uint32; PersistOnClose bool }`
 - `type ResolveRequestFunc func(r *http.Request) (Request, error)`
 - `type ErrorHandler func(r *http.Request, req Request, err error)`
@@ -287,6 +291,11 @@ API pública de transporte HTTP/WebSocket acima de `pkg/yprotocol.Provider`.
 - `type Server`
 - `func NewServer(cfg ServerConfig) (*Server, error)`
 - `func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request)`
+- `type RemoteOwnerDialRequest struct { Request Request; Resolution ycluster.OwnerResolution; Header http.Header }`
+- `type RemoteOwnerDialer interface { DialRemoteOwner(ctx context.Context, req RemoteOwnerDialRequest) (NodeMessageStream, error) }`
+- `type NodeMessageStream interface { Send(ctx context.Context, message ynodeproto.Message) error; Receive(ctx context.Context) (ynodeproto.Message, error); Close() error }`
+- `type RemoteOwnerForwardConfig struct { LocalNodeID ycluster.NodeID; Dialer RemoteOwnerDialer; AcceptOptions *websocket.AcceptOptions; ReadLimitBytes int64; WriteTimeout time.Duration; Metrics Metrics; OnError ErrorHandler }`
+- `func NewRemoteOwnerForwardHandler(cfg RemoteOwnerForwardConfig) (RemoteOwnerHandler, error)`
 
 #### Observações de comportamento
 
@@ -299,6 +308,7 @@ API pública de transporte HTTP/WebSocket acima de `pkg/yprotocol.Provider`.
 - `ConnectionID` pode ser omitido; o handler gera um identificador local estável para a conexão.
 - o handler aceita apenas frames binários do `y-protocols`.
 - o fanout continua local ao processo, reaproveitando o `DispatchResult` do provider.
+- `NewRemoteOwnerForwardHandler` aceita o WebSocket do cliente, traduz frames Yjs para mensagens `pkg/ynodeproto` e delega o transporte do owner remoto ao `NodeMessageStream` injetado.
 - no roadmap distribuído, `pkg/yhttp` continua como borda pública em qualquer nó, mas entra em modo edge owner-aware: o nó não-owner aceita e autentica a conexão, resolve owner, encaminha frames/respostas pelo wire inter-node e não materializa o room localmente.
 
 #### Adapters por framework
@@ -474,8 +484,8 @@ Pacote público inicial do protocolo binário inter-node, separado do
 Escopo atual:
 
 - framing fixo e versionado;
-- enum de tipos de mensagem para handshake, catch-up de documento, update de documento, awareness e ping/pong;
-- payloads tipados/validados por tipo para handshake, sync request/response, document update, awareness update e ping/pong;
+- enum de tipos de mensagem para handshake, catch-up de documento, update de documento, awareness, `query-awareness`, `disconnect`/`close` e ping/pong;
+- payloads tipados/validados por tipo para handshake/ack com `clientID`, sync request/response, document update, awareness update, `query-awareness`, `disconnect`, `close` e ping/pong;
 - encode/decode estrito para frame único e decode por prefixo para stream concatenado;
 - `ParseError` com offset para falhas de decode de payloads tipados.
 

@@ -24,6 +24,7 @@ func TestTypedMessageRoundTrip(t *testing.T) {
 				NodeID:       "node-a",
 				DocumentKey:  storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-1"},
 				ConnectionID: "conn-1",
+				ClientID:     101,
 				Epoch:        7,
 			},
 			assert: func(t *testing.T, decoded Message) {
@@ -39,8 +40,8 @@ func TestTypedMessageRoundTrip(t *testing.T) {
 				if got.DocumentKey != (storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-1"}) {
 					t.Fatalf("got.DocumentKey = %#v", got.DocumentKey)
 				}
-				if got.ConnectionID != "conn-1" || got.Epoch != 7 {
-					t.Fatalf("got = %#v, want conn-1/7", got)
+				if got.ConnectionID != "conn-1" || got.ClientID != 101 || got.Epoch != 7 {
+					t.Fatalf("got = %#v, want conn-1/client-101/7", got)
 				}
 			},
 		},
@@ -51,6 +52,7 @@ func TestTypedMessageRoundTrip(t *testing.T) {
 				NodeID:       "node-b",
 				DocumentKey:  storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-2"},
 				ConnectionID: "conn-2",
+				ClientID:     202,
 				Epoch:        8,
 			},
 			assert: func(t *testing.T, decoded Message) {
@@ -66,8 +68,8 @@ func TestTypedMessageRoundTrip(t *testing.T) {
 				if got.DocumentKey != (storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-2"}) {
 					t.Fatalf("got.DocumentKey = %#v", got.DocumentKey)
 				}
-				if got.ConnectionID != "conn-2" || got.Epoch != 8 {
-					t.Fatalf("got = %#v, want conn-2/8", got)
+				if got.ConnectionID != "conn-2" || got.ClientID != 202 || got.Epoch != 8 {
+					t.Fatalf("got = %#v, want conn-2/client-202/8", got)
 				}
 			},
 		},
@@ -168,8 +170,92 @@ func TestTypedMessageRoundTrip(t *testing.T) {
 			},
 		},
 		{
+			name: "query_awareness_request",
+			message: &QueryAwarenessRequest{
+				Flags:        Flags(0x25),
+				DocumentKey:  storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-7"},
+				ConnectionID: "conn-7",
+				Epoch:        13,
+			},
+			assert: func(t *testing.T, decoded Message) {
+				t.Helper()
+
+				got, ok := decoded.(*QueryAwarenessRequest)
+				if !ok {
+					t.Fatalf("decoded = %T, want *QueryAwarenessRequest", decoded)
+				}
+				if got.DocumentKey.DocumentID != "doc-7" || got.ConnectionID != "conn-7" || got.Epoch != 13 {
+					t.Fatalf("got = %#v, want document/doc-7 conn-7 epoch 13", got)
+				}
+			},
+		},
+		{
+			name: "query_awareness_response",
+			message: &QueryAwarenessResponse{
+				Flags:        Flags(0x26),
+				DocumentKey:  storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-8"},
+				ConnectionID: "conn-8",
+				Epoch:        14,
+				Payload:      []byte{0x81, 0x00},
+			},
+			assert: func(t *testing.T, decoded Message) {
+				t.Helper()
+
+				got, ok := decoded.(*QueryAwarenessResponse)
+				if !ok {
+					t.Fatalf("decoded = %T, want *QueryAwarenessResponse", decoded)
+				}
+				if got.DocumentKey.DocumentID != "doc-8" || got.ConnectionID != "conn-8" || got.Epoch != 14 {
+					t.Fatalf("got = %#v, want document/doc-8 conn-8 epoch 14", got)
+				}
+				if !bytes.Equal(got.Payload, []byte{0x81, 0x00}) {
+					t.Fatalf("got.Payload = %v, want %v", got.Payload, []byte{0x81, 0x00})
+				}
+			},
+		},
+		{
+			name: "disconnect",
+			message: &Disconnect{
+				Flags:        Flags(0x27),
+				DocumentKey:  storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-9"},
+				ConnectionID: "conn-9",
+				Epoch:        15,
+			},
+			assert: func(t *testing.T, decoded Message) {
+				t.Helper()
+
+				got, ok := decoded.(*Disconnect)
+				if !ok {
+					t.Fatalf("decoded = %T, want *Disconnect", decoded)
+				}
+				if got.DocumentKey.DocumentID != "doc-9" || got.ConnectionID != "conn-9" || got.Epoch != 15 {
+					t.Fatalf("got = %#v, want document/doc-9 conn-9 epoch 15", got)
+				}
+			},
+		},
+		{
+			name: "close",
+			message: &Close{
+				Flags:        Flags(0x28),
+				DocumentKey:  storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-10"},
+				ConnectionID: "conn-10",
+				Epoch:        16,
+			},
+			assert: func(t *testing.T, decoded Message) {
+				t.Helper()
+
+				got, ok := decoded.(*Close)
+				if !ok {
+					t.Fatalf("decoded = %T, want *Close", decoded)
+				}
+				if got.DocumentKey.DocumentID != "doc-10" || got.ConnectionID != "conn-10" || got.Epoch != 16 {
+					t.Fatalf("got = %#v, want document/doc-10 conn-10 epoch 16", got)
+				}
+			},
+		},
+		{
 			name:    "ping",
-			message: &Ping{Flags: Flags(0x31), Nonce: 13},
+			message: &Ping{Flags: Flags(0x31), Nonce: 17},
 			assert: func(t *testing.T, decoded Message) {
 				t.Helper()
 
@@ -177,14 +263,14 @@ func TestTypedMessageRoundTrip(t *testing.T) {
 				if !ok {
 					t.Fatalf("decoded = %T, want *Ping", decoded)
 				}
-				if got.Nonce != 13 {
-					t.Fatalf("got.Nonce = %d, want %d", got.Nonce, 13)
+				if got.Nonce != 17 {
+					t.Fatalf("got.Nonce = %d, want %d", got.Nonce, 17)
 				}
 			},
 		},
 		{
 			name:    "pong",
-			message: &Pong{Flags: Flags(0x32), Nonce: 14},
+			message: &Pong{Flags: Flags(0x32), Nonce: 18},
 			assert: func(t *testing.T, decoded Message) {
 				t.Helper()
 
@@ -192,8 +278,8 @@ func TestTypedMessageRoundTrip(t *testing.T) {
 				if !ok {
 					t.Fatalf("decoded = %T, want *Pong", decoded)
 				}
-				if got.Nonce != 14 {
-					t.Fatalf("got.Nonce = %d, want %d", got.Nonce, 14)
+				if got.Nonce != 18 {
+					t.Fatalf("got.Nonce = %d, want %d", got.Nonce, 18)
 				}
 			},
 		},
@@ -246,6 +332,10 @@ func TestTypedMessageValidationErrors(t *testing.T) {
 		{name: "invalid_sync_response_payload", message: &DocumentSyncResponse{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, ConnectionID: "conn", Epoch: 1}, wantErr: ErrMissingPayload},
 		{name: "invalid_document_update_payload", message: &DocumentUpdate{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, ConnectionID: "conn", Epoch: 1}, wantErr: ErrMissingPayload},
 		{name: "invalid_awareness_payload", message: &AwarenessUpdate{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, ConnectionID: "conn", Epoch: 1}, wantErr: ErrMissingPayload},
+		{name: "invalid_query_awareness_request", message: &QueryAwarenessRequest{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, Epoch: 1}, wantErr: ErrInvalidConnectionID},
+		{name: "invalid_query_awareness_response_payload", message: &QueryAwarenessResponse{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, ConnectionID: "conn", Epoch: 1}, wantErr: ErrMissingPayload},
+		{name: "invalid_disconnect_connection", message: &Disconnect{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, Epoch: 1}, wantErr: ErrInvalidConnectionID},
+		{name: "invalid_close_epoch", message: &Close{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, ConnectionID: "conn"}, wantErr: ErrInvalidEpoch},
 		{name: "invalid_ping_nonce", message: &Ping{}, wantErr: ErrInvalidNonce},
 		{name: "invalid_pong_nonce", message: &Pong{}, wantErr: ErrInvalidNonce},
 	}
@@ -270,6 +360,7 @@ func TestDecodeTypedMessageErrors(t *testing.T) {
 		NodeID:       "node-a",
 		DocumentKey:  storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-1"},
 		ConnectionID: "conn-1",
+		ClientID:     77,
 		Epoch:        7,
 	})
 	if err != nil {
@@ -368,6 +459,50 @@ func TestDecodeFrameMessageCopiesPayload(t *testing.T) {
 	}
 }
 
+func TestDecodeHandshakePayloadWithoutClientID(t *testing.T) {
+	t.Parallel()
+
+	var payload []byte
+	var err error
+
+	payload, err = appendString(payload, "node-a")
+	if err != nil {
+		t.Fatalf("appendString(nodeID) unexpected error: %v", err)
+	}
+	payload, err = appendString(payload, "team-a")
+	if err != nil {
+		t.Fatalf("appendString(namespace) unexpected error: %v", err)
+	}
+	payload, err = appendString(payload, "doc-legacy")
+	if err != nil {
+		t.Fatalf("appendString(documentID) unexpected error: %v", err)
+	}
+	payload, err = appendString(payload, "conn-legacy")
+	if err != nil {
+		t.Fatalf("appendString(connectionID) unexpected error: %v", err)
+	}
+	payload = appendUint64(payload, 9)
+
+	decoded, err := DecodeMessagePayload(MessageTypeHandshake, Flags(0x55), payload)
+	if err != nil {
+		t.Fatalf("DecodeMessagePayload() unexpected error: %v", err)
+	}
+
+	got, ok := decoded.(*Handshake)
+	if !ok {
+		t.Fatalf("decoded = %T, want *Handshake", decoded)
+	}
+	if got.ClientID != 0 {
+		t.Fatalf("got.ClientID = %d, want 0 for legacy payload", got.ClientID)
+	}
+	if got.ConnectionID != "conn-legacy" || got.Epoch != 9 {
+		t.Fatalf("got = %#v, want conn-legacy epoch 9", got)
+	}
+	if got.Flags != Flags(0x55) {
+		t.Fatalf("got.Flags = %#x, want %#x", got.Flags, Flags(0x55))
+	}
+}
+
 func assertDecodedFlags(t *testing.T, message Message, want Flags) {
 	t.Helper()
 
@@ -384,6 +519,14 @@ func assertDecodedFlags(t *testing.T, message Message, want Flags) {
 	case *DocumentUpdate:
 		got = m.Flags
 	case *AwarenessUpdate:
+		got = m.Flags
+	case *QueryAwarenessRequest:
+		got = m.Flags
+	case *QueryAwarenessResponse:
+		got = m.Flags
+	case *Disconnect:
+		got = m.Flags
+	case *Close:
 		got = m.Flags
 	case *Ping:
 		got = m.Flags

@@ -8,11 +8,13 @@
 // - 4 bytes de payload length.
 //
 // Acima do framing, o pacote também expõe structs tipadas para handshake,
-// sync de documento, update de documento, awareness e ping/pong, além de
-// helpers para encode/decode entre mensagens tipadas e frames brutos.
+// sync de documento, update de documento, awareness, query-awareness,
+// disconnect/close e ping/pong, além de helpers para encode/decode entre
+// mensagens tipadas e frames brutos.
 //
 // Strings são codificadas como `varuint(length) + bytes`, usando o codec
 // canônico de `internal/varint`. Campos `epoch` e `nonce` usam uint64 fixo em
-// big-endian. Mensagens com payload opaco de documento usam os bytes restantes
-// do payload tipado como corpo bruto após os metadados roteáveis.
+// big-endian; `clientID` usa uint32 fixo em big-endian. Mensagens com payload
+// opaco de documento usam os bytes restantes do payload tipado como corpo bruto
+// após os metadados roteáveis.
 package ynodeproto

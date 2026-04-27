@@ -20,6 +20,12 @@ const (
 	FlagNone Flags = 0
 )
 
+const (
+	// FlagPersistOnClose informa que a conexão roteada deve persistir o snapshot
+	// ao encerrar o contexto remoto.
+	FlagPersistOnClose Flags = 1 << iota
+)
+
 // MessageType identifica a classe semântica do payload inter-node.
 type MessageType uint8
 
@@ -37,6 +43,14 @@ const (
 	MessageTypeDocumentUpdate MessageType = 18
 	// MessageTypeAwarenessUpdate carrega um delta incremental de awareness.
 	MessageTypeAwarenessUpdate MessageType = 19
+	// MessageTypeQueryAwarenessRequest consulta o snapshot de awareness roteado.
+	MessageTypeQueryAwarenessRequest MessageType = 20
+	// MessageTypeQueryAwarenessResponse entrega o snapshot de awareness solicitado.
+	MessageTypeQueryAwarenessResponse MessageType = 21
+	// MessageTypeDisconnect notifica o owner que a borda perdeu a conexao do cliente.
+	MessageTypeDisconnect MessageType = 22
+	// MessageTypeClose instrui a borda a encerrar explicitamente a conexao encaminhada.
+	MessageTypeClose MessageType = 23
 
 	// MessageTypePing carrega keepalive/medição de latência entre nós.
 	MessageTypePing MessageType = 240
@@ -53,6 +67,10 @@ func (t MessageType) Valid() bool {
 		MessageTypeDocumentSyncResponse,
 		MessageTypeDocumentUpdate,
 		MessageTypeAwarenessUpdate,
+		MessageTypeQueryAwarenessRequest,
+		MessageTypeQueryAwarenessResponse,
+		MessageTypeDisconnect,
+		MessageTypeClose,
 		MessageTypePing,
 		MessageTypePong:
 		return true
@@ -76,6 +94,14 @@ func (t MessageType) String() string {
 		return "document-update"
 	case MessageTypeAwarenessUpdate:
 		return "awareness-update"
+	case MessageTypeQueryAwarenessRequest:
+		return "query-awareness-request"
+	case MessageTypeQueryAwarenessResponse:
+		return "query-awareness-response"
+	case MessageTypeDisconnect:
+		return "disconnect"
+	case MessageTypeClose:
+		return "close"
 	case MessageTypePing:
 		return "ping"
 	case MessageTypePong:

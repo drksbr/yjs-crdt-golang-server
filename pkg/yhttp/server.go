@@ -119,7 +119,7 @@ func (s *Server) serveResolvedHTTP(w http.ResponseWriter, r *http.Request, req R
 	accepted = true
 	socket.SetReadLimit(s.readLimitBytes)
 
-	peer := s.registry.add(req.DocumentKey, req.ConnectionID, socket)
+	peer := s.registry.add(req.DocumentKey, req.ConnectionID, &websocketPeer{conn: socket})
 	s.metrics.ConnectionOpened(req)
 	defer s.cleanup(r, req, connection, socket)
 
@@ -210,7 +210,7 @@ func (s *Server) fanout(r *http.Request, req Request, payload []byte) {
 				s.metrics.Error(req, "write_broadcast", err)
 				s.report(r, req, err)
 			}
-			if closeErr := peer.conn.Close(websocket.StatusGoingAway, "falha ao entregar broadcast local"); closeErr != nil {
+			if closeErr := peer.close("falha ao entregar broadcast local"); closeErr != nil {
 				if isIgnorableTransportError(closeErr) {
 					continue
 				}
@@ -223,13 +223,10 @@ func (s *Server) fanout(r *http.Request, req Request, payload []byte) {
 	}
 }
 
-func (s *Server) writeBinary(peer *peerSocket, payload []byte) error {
-	peer.writeMu.Lock()
-	defer peer.writeMu.Unlock()
-
+func (s *Server) writeBinary(peer roomPeer, payload []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), s.writeTimeout)
 	defer cancel()
-	return peer.conn.Write(ctx, websocket.MessageBinary, payload)
+	return peer.deliver(ctx, payload)
 }
 
 func (s *Server) report(r *http.Request, req Request, err error) {

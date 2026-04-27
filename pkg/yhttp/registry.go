@@ -1,40 +1,38 @@
 package yhttp
 
 import (
+	"context"
 	"sync"
-
-	"github.com/coder/websocket"
 
 	"yjs-go-bridge/pkg/storage"
 )
 
-type roomRegistry struct {
-	mu    sync.RWMutex
-	rooms map[storage.DocumentKey]map[string]*peerSocket
+type roomPeer interface {
+	deliver(ctx context.Context, payload []byte) error
+	close(reason string) error
 }
 
-type peerSocket struct {
-	conn    *websocket.Conn
-	writeMu sync.Mutex
+type roomRegistry struct {
+	mu    sync.RWMutex
+	rooms map[storage.DocumentKey]map[string]roomPeer
 }
 
 func newRoomRegistry() roomRegistry {
 	return roomRegistry{
-		rooms: make(map[storage.DocumentKey]map[string]*peerSocket),
+		rooms: make(map[storage.DocumentKey]map[string]roomPeer),
 	}
 }
 
-func (r *roomRegistry) add(key storage.DocumentKey, connectionID string, conn *websocket.Conn) *peerSocket {
+func (r *roomRegistry) add(key storage.DocumentKey, connectionID string, peer roomPeer) roomPeer {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	room := r.rooms[key]
 	if room == nil {
-		room = make(map[string]*peerSocket)
+		room = make(map[string]roomPeer)
 		r.rooms[key] = room
 	}
 
-	peer := &peerSocket{conn: conn}
 	room[connectionID] = peer
 	return peer
 }
@@ -54,7 +52,7 @@ func (r *roomRegistry) remove(key storage.DocumentKey, connectionID string) {
 	}
 }
 
-func (r *roomRegistry) peersExcept(key storage.DocumentKey, excludeConnectionID string) []*peerSocket {
+func (r *roomRegistry) peersExcept(key storage.DocumentKey, excludeConnectionID string) []roomPeer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -63,7 +61,7 @@ func (r *roomRegistry) peersExcept(key storage.DocumentKey, excludeConnectionID 
 		return nil
 	}
 
-	out := make([]*peerSocket, 0, len(room))
+	out := make([]roomPeer, 0, len(room))
 	for connectionID, peer := range room {
 		if connectionID == excludeConnectionID {
 			continue

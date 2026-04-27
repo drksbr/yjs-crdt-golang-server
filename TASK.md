@@ -64,16 +64,20 @@ Neste momento o repositório já possui:
 - `pkg/storage/memory` e `pkg/storage/postgres` agora cercam leases por geração persistida, com `OwnerInfo.Epoch` obrigatório, `ErrLeaseConflict`/`ErrLeaseStaleEpoch` e preservação da última geração após release
 - `pkg/ycluster` agora só resolve ownership a partir de lease ativa e válida; placement sozinho não classifica mais owner local/remoto
 - `pkg/ynodeproto` agora expõe o framing binário versionado do protocolo inter-node com `Header`, `Frame`, `MessageType`, `Encode/DecodeFrame` e decode por prefixo
+- `pkg/ynodeproto` agora também carrega `clientID` em `handshake`/`handshake-ack` e mensagens roteadas para `query-awareness`, `disconnect` e `close`
 - `pkg/storage/memory` e `pkg/storage/postgres` já implementam stores operacionais de snapshots com persistência canônica em V1
 - `pkg/storage/memory` e `pkg/storage/postgres` agora também já implementam `DistributedStore` com update log, placement e lease
+- `pkg/yhttp` agora expõe um forwarder remoto typed plugável em `OwnerAwareServerConfig.OnRemoteOwner`, baseado em `RemoteOwnerDialer`/`NodeMessageStream`
 - `examples/memory` e `examples/postgres` foram adicionados com fluxos iniciais de persistência usando a API pública e stores referenciados
 - `examples/provider-memory` agora cobre fluxo local de provider com late joiner, persistência explícita e restore em novo provider, servindo como referência do recovery por snapshot antes do replay distribuído
 - `examples/http-memory` foi adicionado como exemplo de transporte `net/http` + WebSocket com `pkg/yhttp`
 - `examples/gin-memory`, `examples/echo-memory` e `examples/chi-memory` foram adicionados como exemplos de acoplamento por adapters específicos de framework
 - `examples/http-postgres`, `examples/gin-postgres`, `examples/echo-postgres` e `examples/chi-postgres` foram adicionados como variantes com persistência PostgreSQL para o fluxo WebSocket
 - `examples/gin-react-tailwind-postgres` foi adicionado como demo full-stack com `vite` + `react` + `tailwindcss`, backend `gin`, persistência PostgreSQL e editor colaborativo com awareness
+- `examples/owner-aware-http-edge` agora sobe um owner remoto real e demonstra relay de tráfego WebSocket entre edge e owner
 - pacote `integration` adiciona smoke tests opt-in com Postgres efêmero via Docker para funcionalidade, persistência e performance básica do fluxo WebSocket
 - pacote `integration` também adiciona matriz opt-in de performance entre `net/http`, `gin`, `echo` e `chi`, cobrindo memória/Postgres e medindo throughput, latência e restore
+- `integration/owner_aware_remote_relay_test.go` agora cobre sync e awareness atravessando o relay owner-aware para um owner remoto
 
 A fase atual é **Meta técnica 9 / Fase 3 em consolidação**, com API pública de snapshot e de update em V1 já em operação em `pkg/yjsbridge`, além da exposição pública de protocolo e awareness em `pkg/yprotocol` e `pkg/yawareness` em V1.
 As metas técnicas 1, 2, 3, 4, 5, 6, 7 e 8 já possuem corte mínimo implementado.
@@ -84,8 +88,8 @@ A próxima fase aberta no roadmap é a **Meta técnica 10 / Fase 4**, que introd
 
 ### Corte provável do próximo epoch
 
-- ligar `pkg/ynodeproto` ao forwarding real entre edge e owner via um forwarder concreto plugado em `yhttp.OwnerAwareServerConfig.OnRemoteOwner`, cobrindo open/sync/update/awareness em caminho remoto;
-- estender o wire inter-node com `clientID` no handshake e mensagens roteadas de `query-awareness` e `close/disconnect`, para espelhar o runtime já existente do provider local;
+- materializar o endpoint owner-side concreto que consome `NodeMessageStream`/`pkg/ynodeproto` e compartilha fanout com o `Provider` local, em vez de parar no seam do edge;
+- substituir o relay de exemplo/teste via WebSocket bruto por um transporte owner-side que use as mensagens tipadas já expostas em `pkg/ynodeproto`;
 - propagar `epoch`/fencing para o caminho autoritativo de `apply`, append log, persistência e respostas de handoff/cutover, para além do lifecycle de lease já endurecido;
 - fechar failover/handoff do owner em cima do bootstrap já implementado por `snapshot + update log`.
 
@@ -203,6 +207,7 @@ Nesta etapa, a aceitação é:
 - [ ] Persistir snapshot base e update log append-only por epoch, com replay determinístico e checkpoint/compaction planejados
 - [x] Materializar payloads inter-node tipados e versionados sobre o framing já exposto em `pkg/ynodeproto`, pelo menos para handshake, sync request/response, document update, awareness update e ping/pong
 - [x] Expor uma borda HTTP/WS owner-aware em `pkg/yhttp` para resolver owner antes do provider local e só materializar `Session`/`Provider` quando o owner resolvido é local
+- [x] Expor um seam typed de forwarding remoto em `pkg/yhttp` via `OwnerAwareServerConfig.OnRemoteOwner`, `RemoteOwnerDialer` e `NodeMessageStream`
 - [ ] Definir comportamento do nó não-owner para requests HTTP e frames WebSocket: autenticar, resolver owner, encaminhar pelo wire inter-node tipado e encerrar/cutover em caso de fencing ou handoff
 - [ ] Definir handoff seguro com bootstrap por snapshot, replay do tail do log e troca atômica de epoch
 - [ ] Introduzir observabilidade e diagnósticos para lease, roteamento, forwarding, replay, lag e troca de owner
