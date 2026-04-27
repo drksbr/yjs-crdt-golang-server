@@ -25,6 +25,10 @@ var (
 	ErrInvalidLease = errors.New("ycluster: lease invalida")
 	// ErrInvalidLeaseRequest sinaliza request invalido para acquire/renew de lease.
 	ErrInvalidLeaseRequest = errors.New("ycluster: lease request invalido")
+	// ErrLeaseHeld sinaliza tentativa de acquire sobre lease ainda ativa de outro owner.
+	ErrLeaseHeld = errors.New("ycluster: lease ativa para outro owner")
+	// ErrLeaseTokenMismatch sinaliza renew/release com token diferente do owner atual.
+	ErrLeaseTokenMismatch = errors.New("ycluster: lease token nao corresponde ao owner atual")
 	// ErrLeaseExpired sinaliza tentativa de operar sobre lease ja expirada.
 	ErrLeaseExpired = errors.New("ycluster: lease expirada")
 	// ErrOwnerNotFound sinaliza ausencia de owner resolvido para a chave consultada.

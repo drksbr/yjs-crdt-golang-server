@@ -59,8 +59,8 @@ func TestLeaseFromStorageRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LeaseFromStorageRecord() unexpected error: %v", err)
 	}
-	if lease.ShardID != 7 || lease.Holder != "node-a" || lease.Token != "lease-token" {
-		t.Fatalf("lease = %#v, want shard=7 holder=node-a token=lease-token", lease)
+	if lease.ShardID != 7 || lease.Holder != "node-a" || lease.Epoch != 3 || lease.Token != "lease-token" {
+		t.Fatalf("lease = %#v, want shard=7 holder=node-a epoch=3 token=lease-token", lease)
 	}
 }
 
@@ -148,8 +148,8 @@ func TestStorageOwnerLookup(t *testing.T) {
 	if resolution.Placement.Version != 4 {
 		t.Fatalf("resolution.Placement.Version = %d, want 4", resolution.Placement.Version)
 	}
-	if resolution.Placement.Lease == nil || resolution.Placement.Lease.Token != "lease-b" {
-		t.Fatalf("resolution.Placement.Lease = %#v, want token lease-b", resolution.Placement.Lease)
+	if resolution.Placement.Lease == nil || resolution.Placement.Lease.Token != "lease-b" || resolution.Placement.Lease.Epoch != 9 {
+		t.Fatalf("resolution.Placement.Lease = %#v, want token=lease-b epoch=9", resolution.Placement.Lease)
 	}
 }
 
@@ -203,7 +203,7 @@ func TestStorageOwnerLookupErrors(t *testing.T) {
 		}
 		if _, err := store.SaveLease(context.Background(), storage.LeaseRecord{
 			ShardID:    storage.ShardID("999"),
-			Owner:      storage.OwnerInfo{NodeID: storage.NodeID("node-a")},
+			Owner:      storage.OwnerInfo{NodeID: storage.NodeID("node-a"), Epoch: 1},
 			Token:      "lease-a",
 			AcquiredAt: time.Unix(120, 0).UTC(),
 			ExpiresAt:  time.Unix(130, 0).UTC(),
@@ -227,7 +227,7 @@ func TestStorageOwnerLookupErrors(t *testing.T) {
 		}
 		if _, err := store.SaveLease(context.Background(), storage.LeaseRecord{
 			ShardID:    StorageShardID(shardID),
-			Owner:      storage.OwnerInfo{NodeID: storage.NodeID("node-a")},
+			Owner:      storage.OwnerInfo{NodeID: storage.NodeID("node-a"), Epoch: 1},
 			Token:      "lease-expired",
 			AcquiredAt: time.Unix(120, 0).UTC(),
 			ExpiresAt:  time.Unix(130, 0).UTC(),
@@ -266,6 +266,9 @@ func TestStorageLeaseStore(t *testing.T) {
 	if acquired.Token == "" {
 		t.Fatal("AcquireLease().Token is empty")
 	}
+	if acquired.Epoch != 1 {
+		t.Fatalf("AcquireLease().Epoch = %d, want 1", acquired.Epoch)
+	}
 	if !acquired.ExpiresAt.Equal(now.Add(30 * time.Second)) {
 		t.Fatalf("AcquireLease().ExpiresAt = %v, want %v", acquired.ExpiresAt, now.Add(30*time.Second))
 	}
@@ -282,6 +285,12 @@ func TestStorageLeaseStore(t *testing.T) {
 	if renewed.Token != acquired.Token {
 		t.Fatalf("RenewLease().Token = %q, want %q", renewed.Token, acquired.Token)
 	}
+	if renewed.Epoch != acquired.Epoch {
+		t.Fatalf("RenewLease().Epoch = %d, want %d", renewed.Epoch, acquired.Epoch)
+	}
+	if !renewed.AcquiredAt.Equal(acquired.AcquiredAt) {
+		t.Fatalf("RenewLease().AcquiredAt = %v, want %v", renewed.AcquiredAt, acquired.AcquiredAt)
+	}
 	if !renewed.ExpiresAt.Equal(now.Add(time.Minute)) {
 		t.Fatalf("RenewLease().ExpiresAt = %v, want %v", renewed.ExpiresAt, now.Add(time.Minute))
 	}
@@ -291,6 +300,96 @@ func TestStorageLeaseStore(t *testing.T) {
 	}
 	if _, err := store.LoadLease(context.Background(), StorageShardID(renewed.ShardID)); !errors.Is(err, storage.ErrLeaseNotFound) {
 		t.Fatalf("LoadLease() after release error = %v, want %v", err, storage.ErrLeaseNotFound)
+	}
+}
+
+func TestStorageLeaseStoreRejectsAcquireWhenForeignHolderIsActive(t *testing.T) {
+	t.Parallel()
+
+	store := memory.New()
+	leases, err := NewStorageLeaseStore(store)
+	if err != nil {
+		t.Fatalf("NewStorageLeaseStore() unexpected error: %v", err)
+	}
+
+	now := time.Unix(700, 0).UTC()
+	leases.now = func() time.Time { return now }
+
+	acquired, err := leases.AcquireLease(context.Background(), LeaseRequest{
+		ShardID: 7,
+		Holder:  "node-a",
+		TTL:     time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease(node-a) unexpected error: %v", err)
+	}
+
+	if _, err := leases.AcquireLease(context.Background(), LeaseRequest{
+		ShardID: 7,
+		Holder:  "node-b",
+		TTL:     time.Minute,
+	}); !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf("AcquireLease(node-b) error = %v, want %v", err, ErrLeaseHeld)
+	}
+
+	stillHeld, err := store.LoadLease(context.Background(), StorageShardID(7))
+	if err != nil {
+		t.Fatalf("LoadLease() unexpected error: %v", err)
+	}
+	if stillHeld.Owner.NodeID != storage.NodeID("node-a") || stillHeld.Owner.Epoch != 1 || stillHeld.Token != acquired.Token {
+		t.Fatalf("LoadLease() = %#v, want owner=node-a epoch=1 token=%q", stillHeld, acquired.Token)
+	}
+}
+
+func TestStorageLeaseStoreExpiredTakeoverIncrementsEpoch(t *testing.T) {
+	t.Parallel()
+
+	store := memory.New()
+	leases, err := NewStorageLeaseStore(store)
+	if err != nil {
+		t.Fatalf("NewStorageLeaseStore() unexpected error: %v", err)
+	}
+
+	now := time.Unix(900, 0).UTC()
+	leases.now = func() time.Time { return now }
+
+	acquired, err := leases.AcquireLease(context.Background(), LeaseRequest{
+		ShardID: 7,
+		Holder:  "node-a",
+		TTL:     30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease(node-a) unexpected error: %v", err)
+	}
+
+	now = now.Add(31 * time.Second)
+	takeover, err := leases.AcquireLease(context.Background(), LeaseRequest{
+		ShardID: 7,
+		Holder:  "node-b",
+		TTL:     45 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease(node-b takeover) unexpected error: %v", err)
+	}
+	if takeover.Holder != "node-b" {
+		t.Fatalf("AcquireLease(node-b takeover).Holder = %q, want %q", takeover.Holder, "node-b")
+	}
+	if takeover.Epoch != acquired.Epoch+1 {
+		t.Fatalf("AcquireLease(node-b takeover).Epoch = %d, want %d", takeover.Epoch, acquired.Epoch+1)
+	}
+	if !takeover.AcquiredAt.Equal(now) {
+		t.Fatalf("AcquireLease(node-b takeover).AcquiredAt = %v, want %v", takeover.AcquiredAt, now)
+	}
+	if !takeover.ExpiresAt.Equal(now.Add(45 * time.Second)) {
+		t.Fatalf("AcquireLease(node-b takeover).ExpiresAt = %v, want %v", takeover.ExpiresAt, now.Add(45*time.Second))
+	}
+
+	stored, err := store.LoadLease(context.Background(), StorageShardID(7))
+	if err != nil {
+		t.Fatalf("LoadLease() unexpected error: %v", err)
+	}
+	if stored.Owner.NodeID != storage.NodeID("node-b") || stored.Owner.Epoch != 2 {
+		t.Fatalf("LoadLease() = %#v, want owner=node-b epoch=2", stored)
 	}
 }
 

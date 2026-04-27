@@ -54,8 +54,8 @@ Comportamento esperado:
 
 - `notes-local` resolve para `node-a` e passa para o handler real de `pkg/yhttp`.
 - `notes-remote` resolve para `node-b` e recebe `421 Misdirected Request` com
-  `X-Yjs-Owner-Node`, `X-Yjs-Owner-Websocket` e payload JSON indicando para
-  onde o edge encaminharia o cliente em uma fase posterior.
+  `X-Yjs-Owner-Node`, `X-Yjs-Owner-Epoch`, `X-Yjs-Owner-Websocket` e payload
+  JSON indicando para onde o edge encaminharia o cliente em uma fase posterior.
 
 ## Limite intencional
 

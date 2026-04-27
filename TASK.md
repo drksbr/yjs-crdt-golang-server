@@ -83,7 +83,8 @@ A próxima fase aberta no roadmap é a **Meta técnica 10 / Fase 4**, que introd
 ### Corte provável do próximo epoch
 
 - formalizar ownership autoritativo por `DocumentKey`/room/shard com lease/epoch/fencing consistente entre `pkg/storage` e `pkg/ycluster`;
-- ligar `pkg/ynodeproto` ao forwarding real entre edge e owner, cobrindo open/sync/update/awareness em caminho remoto;
+- ligar `pkg/ynodeproto` ao forwarding real entre edge e owner via um forwarder concreto plugado em `yhttp.OwnerAwareServerConfig.OnRemoteOwner`, cobrindo open/sync/update/awareness em caminho remoto;
+- estender o wire inter-node com `clientID` no handshake e mensagens roteadas de `query-awareness` e `close/disconnect`, para espelhar o runtime já existente do provider local;
 - fechar failover/handoff do owner em cima do bootstrap já implementado por `snapshot + update log`.
 
 ---
@@ -192,6 +193,7 @@ Nesta etapa, a aceitação é:
 - [x] Expor scaffolding público de control plane em `pkg/ycluster` com `ShardResolver`, `OwnerLookup`, `Runtime`, `DeterministicShardResolver`, `StaticLocalNode` e `PlacementOwnerLookup`
 - [x] Expor adapters storage-backed em `pkg/ycluster` para lookup de owner e lease em cima de `pkg/storage`
 - [x] Expor framing binário inicial do protocolo inter-node em `pkg/ynodeproto`, separado do wire `y-protocols` de cliente
+- [x] Endurecer o lifecycle básico de lease em `pkg/ycluster` com `epoch` monotônico no acquire/renew/takeover e propagação desse epoch na resolução de owner
 - [ ] Formalizar `DocumentKey`/room/shard como unidade de ownership, lease e roteamento
 - [ ] Garantir owner único por documento/shard com lease renovável, expiração detectável e revogação observável
 - [ ] Introduzir `epoch` monotônico e fencing token em toda operação autoritativa (`apply`, persistência, append log, handoff e recovery)

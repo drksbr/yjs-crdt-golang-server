@@ -28,10 +28,12 @@ borda owner-aware que só materializa o room quando o owner resolvido é local.
 - apenas o owner ativo de cada documento/shard materializa `Session`/`Provider` e processa o room;
 - o tráfego inter-node já tem mensagens tipadas e versionadas acima de `pkg/ynodeproto.MessageType`;
 - o owner local já pode ser reidratado a partir de snapshot base + replay do tail do `update log`, com awareness mantido como estado efêmero fora do recovery durável;
+- o lifecycle de lease no control plane já sobe `epoch` monotônico: acquire inicial em `1`, renew preserva `epoch/token` e takeover após expiração incrementa o epoch;
+- a resposta owner-aware remota já devolve `epoch` do owner junto dos metadados de roteamento;
 - lease, `epoch` e fencing continuam sendo o próximo fechamento crítico para handoff, failover e prevenção de split-brain;
 - o wire interno permanece separado do `y-protocols`, que continua restrito à borda cliente.
 
-## Epochs 1-2 já entregues
+## Epochs 1-3 já entregues
 
 O branch atual já entrega a base operacional inicial e o segundo corte de
 integração da fase distribuída, ainda sem ligar um runtime multi-nó completo:
@@ -43,6 +45,7 @@ integração da fase distribuída, ainda sem ligar um runtime multi-nó completo
 - `pkg/ynodeproto` agora expõe o framing binário versionado e os payloads tipados do protocolo inter-node (`handshake`, `document-sync-*`, `document-update`, `awareness-update`, `ping/pong`);
 - `pkg/yprotocol.Provider` já trata `snapshot + update log` como bootstrap/recovery do owner local, registrando updates no log e compactando o tail em `Persist`;
 - `pkg/yhttp` já expõe `OwnerAwareServer`, que resolve owner antes do provider local e responde com metadados retryable ou hook customizado quando o owner é remoto;
+- `pkg/ycluster.StorageLeaseStore` já endurece o lifecycle básico de ownership com `epoch` monotônico em lease ativa, renew preservando `token`/`epoch` e takeover pós-expiração incrementando o epoch persistido;
 - `examples/owner-aware-http-edge` e os novos testes de integração cobrem o wiring owner-aware, o replay via `snapshot + update log` e o recovery do provider;
 - handoff, cutover, forwarding inter-node e fencing autoritativo ainda seguem como etapa posterior.
 
@@ -784,8 +787,8 @@ throughput, latência média, `p50`, `p95`, `p99` e tempo de restore após resta
 - `pkg/yhttp` agora também expõe `OwnerAwareServer` para resolver owner antes do provider local, além dos hooks opcionais de observabilidade e dos subpacotes `pkg/yhttp/gin`, `pkg/yhttp/echo`, `pkg/yhttp/chi` e `pkg/yhttp/prometheus`.
 - `pkg/storage`, `pkg/ycluster` e `pkg/ynodeproto` já expõem a base pública distribuída com replay/recovery, control plane mínimo e wire inter-node tipado; o próximo passo é ligar essas superfícies ao forwarding/handoff do runtime.
 - Ainda não há transporte distribuído, coordenação entre nós ou replicação horizontal entre processos.
-- Recovery operacional agora já cobre `snapshot + update log` via helpers públicos, stores concretos e bootstrap do `Provider`; handoff, cutover, append log por epoch, fencing e forwarding inter-node seguem como etapa posterior.
-- A próxima fase do roadmap fecha owner único por room/documento/shard com `lease/epoch/fencing`, forwarding edge->owner e failover/handoff seguros, mantendo HTTP/WS acessível em qualquer nó.
+- Recovery operacional agora já cobre `snapshot + update log` via helpers públicos, stores concretos e bootstrap do `Provider`; o control plane já materializa `epoch` básico de lease, mas handoff, cutover, append log por epoch, fencing autoritativo e forwarding inter-node seguem como etapa posterior.
+- A próxima fase do roadmap fecha owner único por room/documento/shard com coordenação segura de `lease/epoch/fencing`, forwarding edge->owner e failover/handoff seguros, mantendo HTTP/WS acessível em qualquer nó.
 
 ## Referências do projeto
 

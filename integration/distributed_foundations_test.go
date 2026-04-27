@@ -185,6 +185,9 @@ func TestClusterControlPlaneTracksStorageBackedOwnerHandoff(t *testing.T) {
 	if nodeAResolution.Placement.NodeID != "node-a" {
 		t.Fatalf("LookupOwner(node-a).Placement.NodeID = %q, want %q", nodeAResolution.Placement.NodeID, "node-a")
 	}
+	if nodeAResolution.Placement.Lease == nil || nodeAResolution.Placement.Lease.Epoch != 1 {
+		t.Fatalf("LookupOwner(node-a).Placement.Lease = %#v, want epoch 1", nodeAResolution.Placement.Lease)
+	}
 
 	nodeBResolution, err := nodeBLookup.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
 	if err != nil {
@@ -194,11 +197,20 @@ func TestClusterControlPlaneTracksStorageBackedOwnerHandoff(t *testing.T) {
 		t.Fatal("LookupOwner(node-b).Local = true, want false")
 	}
 
-	if err := leases.ReleaseLease(ctx, *acquiredA); err != nil {
-		t.Fatalf("ReleaseLease(node-a) unexpected error: %v", err)
+	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID: ycluster.StorageShardID(shardID),
+		Owner: storage.OwnerInfo{
+			NodeID: ycluster.StorageNodeID("node-a"),
+			Epoch:  acquiredA.Epoch,
+		},
+		Token:      acquiredA.Token,
+		AcquiredAt: time.Now().UTC().Add(-2 * time.Minute),
+		ExpiresAt:  time.Now().UTC().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("SaveLease(node-a expired) unexpected error: %v", err)
 	}
-	if _, err := nodeALookup.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key}); !errors.Is(err, ycluster.ErrOwnerNotFound) {
-		t.Fatalf("LookupOwner(node-a after release) error = %v, want %v", err, ycluster.ErrOwnerNotFound)
+	if _, err := nodeALookup.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key}); !errors.Is(err, ycluster.ErrLeaseExpired) {
+		t.Fatalf("LookupOwner(node-a after expiry) error = %v, want %v", err, ycluster.ErrLeaseExpired)
 	}
 
 	acquiredB, err := leases.AcquireLease(ctx, ycluster.LeaseRequest{
@@ -208,6 +220,9 @@ func TestClusterControlPlaneTracksStorageBackedOwnerHandoff(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("AcquireLease(node-b) unexpected error: %v", err)
+	}
+	if acquiredB.Epoch != 2 {
+		t.Fatalf("AcquireLease(node-b).Epoch = %d, want 2", acquiredB.Epoch)
 	}
 
 	afterHandoff, err := nodeALookup.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
@@ -220,8 +235,8 @@ func TestClusterControlPlaneTracksStorageBackedOwnerHandoff(t *testing.T) {
 	if afterHandoff.Placement.NodeID != "node-b" {
 		t.Fatalf("LookupOwner(node-a after handoff).Placement.NodeID = %q, want %q", afterHandoff.Placement.NodeID, "node-b")
 	}
-	if afterHandoff.Placement.Lease == nil || afterHandoff.Placement.Lease.Token != acquiredB.Token {
-		t.Fatalf("LookupOwner(node-a after handoff).Placement.Lease = %#v, want token %q", afterHandoff.Placement.Lease, acquiredB.Token)
+	if afterHandoff.Placement.Lease == nil || afterHandoff.Placement.Lease.Token != acquiredB.Token || afterHandoff.Placement.Lease.Epoch != 2 {
+		t.Fatalf("LookupOwner(node-a after handoff).Placement.Lease = %#v, want token %q epoch 2", afterHandoff.Placement.Lease, acquiredB.Token)
 	}
 
 	nodeBLocal, err := nodeBLookup.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
@@ -230,6 +245,9 @@ func TestClusterControlPlaneTracksStorageBackedOwnerHandoff(t *testing.T) {
 	}
 	if !nodeBLocal.Local {
 		t.Fatal("LookupOwner(node-b after handoff).Local = false, want true")
+	}
+	if nodeBLocal.Placement.Lease == nil || nodeBLocal.Placement.Lease.Epoch != 2 {
+		t.Fatalf("LookupOwner(node-b after handoff).Placement.Lease = %#v, want epoch 2", nodeBLocal.Placement.Lease)
 	}
 }
 

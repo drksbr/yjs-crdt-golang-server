@@ -54,6 +54,7 @@ type ownerRouteResponse struct {
 	DocumentID     string    `json:"document_id"`
 	Shard          string    `json:"shard"`
 	OwnerNode      string    `json:"owner_node"`
+	OwnerEpoch     uint64    `json:"owner_epoch,omitempty"`
 	Local          bool      `json:"local"`
 	LeaseToken     string    `json:"lease_token,omitempty"`
 	LeaseExpiresAt time.Time `json:"lease_expires_at,omitempty"`
@@ -327,6 +328,9 @@ func (h *ownerAwareEdge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	response.Note = "owner remoto resolvido; o room nao e materializado neste no"
 	w.Header().Set("X-Yjs-Owner-Node", response.OwnerNode)
+	if response.OwnerEpoch > 0 {
+		w.Header().Set("X-Yjs-Owner-Epoch", strconv.FormatUint(response.OwnerEpoch, 10))
+	}
 	if response.WebSocketURL != "" {
 		w.Header().Set("X-Yjs-Owner-Websocket", response.WebSocketURL)
 	}
@@ -354,6 +358,7 @@ func (h *ownerAwareEdge) routeForRequest(
 		WebSocketURL: withRawQuery(h.ownerRoutes[resolution.Placement.NodeID], rawQuery),
 	}
 	if resolution.Placement.Lease != nil {
+		response.OwnerEpoch = resolution.Placement.Lease.Epoch
 		response.LeaseToken = resolution.Placement.Lease.Token
 		response.LeaseExpiresAt = resolution.Placement.Lease.ExpiresAt
 	}

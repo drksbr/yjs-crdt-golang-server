@@ -132,6 +132,7 @@ func (s *OwnerAwareServer) writeRemoteOwnerResponse(w http.ResponseWriter, req R
 	if lease := resolution.Placement.Lease; lease != nil && !lease.ExpiresAt.IsZero() {
 		expiresAt := lease.ExpiresAt.UTC()
 		response.Owner.LeaseExpiresAt = &expiresAt
+		response.Owner.Epoch = lease.Epoch
 	}
 
 	payload, err := json.Marshal(response)
@@ -147,6 +148,9 @@ func (s *OwnerAwareServer) writeRemoteOwnerResponse(w http.ResponseWriter, req R
 	w.Header().Set("X-Yjs-Retryable", strconv.FormatBool(response.Retryable))
 	if response.Owner.Version > 0 {
 		w.Header().Set("X-Yjs-Owner-Version", strconv.FormatUint(response.Owner.Version, 10))
+	}
+	if response.Owner.Epoch > 0 {
+		w.Header().Set("X-Yjs-Owner-Epoch", strconv.FormatUint(response.Owner.Epoch, 10))
 	}
 	s.setRetryAfterHeader(w)
 	w.WriteHeader(remoteOwnerStatusCode)
@@ -195,5 +199,6 @@ type remoteOwnerMetadata struct {
 	NodeID         string     `json:"nodeID"`
 	ShardID        uint32     `json:"shardID"`
 	Version        uint64     `json:"version,omitempty"`
+	Epoch          uint64     `json:"epoch,omitempty"`
 	LeaseExpiresAt *time.Time `json:"leaseExpiresAt,omitempty"`
 }

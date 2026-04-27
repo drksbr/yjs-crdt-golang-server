@@ -4,7 +4,8 @@
 // A superficie inicial cobre:
 //
 //   - resolucao deterministica de shard a partir de `storage.DocumentKey`;
-//   - tipos estaveis para placement, lease e owner resolution;
+//   - tipos estaveis para placement, lease e owner resolution, incluindo
+//     epoch monotônico e token opaco para fencing;
 //   - interfaces pequenas para runtime local, lookup de owner e backends de
 //     placement/lease;
 //   - adapters storage-backed para wiring sobre `pkg/storage`.

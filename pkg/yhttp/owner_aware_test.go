@@ -84,6 +84,7 @@ func TestOwnerAwareServerReturnsRemoteOwnerMetadata(t *testing.T) {
 				Lease: &ycluster.Lease{
 					ShardID:   9,
 					Holder:    "node-b",
+					Epoch:     23,
 					Token:     "opaque-token",
 					ExpiresAt: expiresAt,
 				},
@@ -122,6 +123,9 @@ func TestOwnerAwareServerReturnsRemoteOwnerMetadata(t *testing.T) {
 	if got := resp.Header.Get("X-Yjs-Owner-Version"); got != "17" {
 		t.Fatalf("X-Yjs-Owner-Version = %q, want %q", got, "17")
 	}
+	if got := resp.Header.Get("X-Yjs-Owner-Epoch"); got != "23" {
+		t.Fatalf("X-Yjs-Owner-Epoch = %q, want %q", got, "23")
+	}
 	if got := resp.Header.Get("X-Yjs-Retryable"); got != "true" {
 		t.Fatalf("X-Yjs-Retryable = %q, want %q", got, "true")
 	}
@@ -158,6 +162,9 @@ func TestOwnerAwareServerReturnsRemoteOwnerMetadata(t *testing.T) {
 	}
 	if payload.Owner.Version != 17 {
 		t.Fatalf("payload.Owner.Version = %d, want %d", payload.Owner.Version, 17)
+	}
+	if payload.Owner.Epoch != 23 {
+		t.Fatalf("payload.Owner.Epoch = %d, want %d", payload.Owner.Epoch, 23)
 	}
 	if payload.Owner.LeaseExpiresAt == nil || !payload.Owner.LeaseExpiresAt.Equal(expiresAt) {
 		t.Fatalf("payload.Owner.LeaseExpiresAt = %v, want %v", payload.Owner.LeaseExpiresAt, expiresAt)

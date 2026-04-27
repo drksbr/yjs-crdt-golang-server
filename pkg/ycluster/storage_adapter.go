@@ -72,6 +72,7 @@ func LeaseFromStorageRecord(record *storage.LeaseRecord) (*Lease, error) {
 	lease := &Lease{
 		ShardID:    shardID,
 		Holder:     holder,
+		Epoch:      record.Owner.Epoch,
 		Token:      record.Token,
 		AcquiredAt: record.AcquiredAt,
 		ExpiresAt:  record.ExpiresAt,
@@ -239,11 +240,34 @@ func (s *StorageLeaseStore) AcquireLease(ctx context.Context, req LeaseRequest) 
 	if token == "" {
 		token = fmt.Sprintf("%s-%s-%d", req.Holder, req.ShardID, now.UnixNano())
 	}
+	epoch := uint64(1)
+
+	existing, err := s.store.LoadLease(ctx, StorageShardID(req.ShardID))
+	switch {
+	case err == nil:
+		if existing == nil {
+			return nil, ErrOwnerNotFound
+		}
+		if existing.Owner.NodeID == StorageNodeID(req.Holder) && !existing.ExpiresAt.IsZero() && now.Before(existing.ExpiresAt) {
+			return nil, fmt.Errorf("%w: shard %s ja esta leased para %q", ErrInvalidLeaseRequest, req.ShardID, req.Holder)
+		}
+		if !existing.ExpiresAt.IsZero() && now.Before(existing.ExpiresAt) {
+			return nil, fmt.Errorf("%w: shard %s esta leased para %q ate %s", ErrLeaseHeld, req.ShardID, existing.Owner.NodeID, existing.ExpiresAt.UTC().Format(time.RFC3339Nano))
+		}
+		if existing.Owner.Epoch > 0 {
+			epoch = existing.Owner.Epoch + 1
+		}
+	case errors.Is(err, storage.ErrLeaseNotFound):
+		// first acquire starts at epoch 1
+	default:
+		return nil, err
+	}
 
 	record, err := s.store.SaveLease(ctx, storage.LeaseRecord{
 		ShardID: StorageShardID(req.ShardID),
 		Owner: storage.OwnerInfo{
 			NodeID: StorageNodeID(req.Holder),
+			Epoch:  epoch,
 		},
 		Token:      token,
 		AcquiredAt: now,
@@ -283,9 +307,15 @@ func (s *StorageLeaseStore) RenewLease(ctx context.Context, req LeaseRequest) (*
 	}
 
 	now := s.nowTime()
+	if !existing.ExpiresAt.IsZero() && !now.Before(existing.ExpiresAt) {
+		return nil, ErrLeaseExpired
+	}
 	token := strings.TrimSpace(req.Token)
-	if token == "" {
+	switch {
+	case token == "":
 		token = existing.Token
+	case token != existing.Token:
+		return nil, ErrLeaseTokenMismatch
 	}
 	record, err := s.store.SaveLease(ctx, storage.LeaseRecord{
 		ShardID: StorageShardID(req.ShardID),

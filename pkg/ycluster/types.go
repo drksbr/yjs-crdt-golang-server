@@ -69,6 +69,7 @@ func (p Placement) Validate() error {
 type Lease struct {
 	ShardID    ShardID
 	Holder     NodeID
+	Epoch      uint64
 	Token      string
 	AcquiredAt time.Time
 	ExpiresAt  time.Time
@@ -78,6 +79,9 @@ type Lease struct {
 func (l Lease) Validate() error {
 	if err := l.Holder.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidLease, err)
+	}
+	if l.Epoch == 0 {
+		return fmt.Errorf("%w: epoch obrigatorio", ErrInvalidLease)
 	}
 	if strings.TrimSpace(l.Token) == "" {
 		return fmt.Errorf("%w: token obrigatorio", ErrInvalidLease)
