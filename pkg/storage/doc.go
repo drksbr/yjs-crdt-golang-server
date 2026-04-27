@@ -6,4 +6,8 @@
 // de updates, placement de shards e leases temporárias de ownership, o pacote
 // também expõe interfaces independentes para essas responsabilidades, sem
 // acoplar a API pública a um backend concreto.
+//
+// O pacote também já inclui helpers públicos de replay/recovery (`ReplaySnapshot`
+// e `RecoverSnapshot`) para compor `snapshot + update log` sem depender de um
+// runtime distribuído completo.
 package storage

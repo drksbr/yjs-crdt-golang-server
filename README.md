@@ -28,6 +28,18 @@ processamento autoritativo do room concentrado no owner.
 - lease, `epoch` e fencing cercarão handoff, persistência e replay para evitar split-brain;
 - o owner será recuperado ou promovido a partir de `snapshot + update log`, usando protocolo inter-node próprio para forwarding e handoff.
 
+## Epoch-1 já entregue
+
+O branch atual já entrega a base operacional inicial da fase distribuída, sem
+ligar ainda um runtime multi-nó completo:
+
+- `pkg/storage` agora expõe contratos para snapshot distribuído, append log por documento, placement e lease, além de replay/recovery públicos em cima de `snapshot + update log`;
+- `pkg/storage/memory` e `pkg/storage/postgres` já implementam `DistributedStore` com snapshot, update log, placement e lease;
+- `pkg/ycluster` expõe tipos, resolver determinístico de shard, lookup storage-backed de owner e adapter de lease sobre `pkg/storage`;
+- `pkg/ynodeproto` expõe o framing binário versionado do protocolo inter-node;
+- `pkg/yprotocol.Provider` continua sendo o runtime local do owner futuro, preservando o modo single-process como referência;
+- o fluxo de recovery/replay já existe como helper público em `pkg/storage`, enquanto handoff, cutover e forwarding inter-node seguem como etapa posterior.
+
 As APIs de update abaixo estão disponíveis na camada pública e seguem validação de formato antes de executar as operações.
 
 ## API pública atual
@@ -356,7 +368,15 @@ API de payload awareness e estado local:
 - `func (r *SnapshotRecord) Clone() *SnapshotRecord`
 - `type SnapshotStore interface { SaveSnapshot(ctx context.Context, key DocumentKey, snapshot *yjsbridge.PersistedSnapshot) (*SnapshotRecord, error); LoadSnapshot(ctx context.Context, key DocumentKey) (*SnapshotRecord, error) }`
 - `ErrSnapshotNotFound`
+- `ErrPlacementNotFound`
+- `ErrLeaseNotFound`
 - `ErrInvalidDocumentKey`
+- `ErrInvalidShardID`
+- `ErrInvalidNodeID`
+- `ErrInvalidOwnerInfo`
+- `ErrInvalidUpdatePayload`
+- `ErrInvalidLeaseToken`
+- `ErrInvalidLeaseExpiry`
 - `ErrNilPersistedSnapshot`
 
 `DocumentKey.Validate` exige `DocumentID` não vazio. `Namespace` é opcional.
@@ -377,9 +397,20 @@ contratos-base que sustentam a próxima fase distribuída:
 - `type PlacementStore interface`
 - `type LeaseStore interface`
 - `type DistributedStore interface`
+- `type RecoveryResult struct { Snapshot *yjsbridge.PersistedSnapshot; Updates []*UpdateLogRecord; LastOffset UpdateOffset }`
+- `func ReplaySnapshot(ctx context.Context, base *yjsbridge.PersistedSnapshot, updates ...*UpdateLogRecord) (*yjsbridge.PersistedSnapshot, error)`
+- `func RecoverSnapshot(ctx context.Context, snapshots SnapshotStore, updates UpdateLogStore, key DocumentKey, after UpdateOffset, limit int) (*RecoveryResult, error)`
 
 Esses contratos ainda não substituem `SnapshotStore`; eles abrem o caminho para
 `snapshot + update log`, placement por shard e ownership com lease/fencing.
+No corte atual:
+
+- `UpdateLogStore` modela append/list/trim de updates V1 por `DocumentKey`, com `UpdateOffset` monotônico;
+- `PlacementStore` separa a resolução persistida `documento -> shard`;
+- `LeaseStore` separa ownership efêmero por shard via `OwnerInfo` + token opaco para renew/release;
+- `DistributedStore` agrega snapshot, log, placement e lease em um backend opcional completo;
+- `ReplaySnapshot` aplica um tail incremental de `UpdateLogRecord` sobre um snapshot base;
+- `RecoverSnapshot` carrega snapshot base, lista batches do `update log` e reconstrói o estado consolidado com `LastOffset` observável para recovery/checkpoint.
 
 ### `pkg/ynodeproto`
 
@@ -387,6 +418,7 @@ Pacote público inicial do protocolo binário inter-node, separado do
 `y-protocols` usado no perímetro com clientes.
 
 - `const CurrentVersion`
+- `const Version1`
 - `const HeaderSize`
 - `type Flags uint16`
 - `type MessageType uint8`
@@ -399,12 +431,21 @@ Pacote público inicial do protocolo binário inter-node, separado do
 - `func EncodeFrame(frame *Frame) ([]byte, error)`
 - `func DecodeFrame(src []byte) (*Frame, error)`
 - `func DecodeFramePrefix(src []byte) (*Frame, int, error)`
+- `var ErrUnsupportedVersion error`
+- `var ErrUnknownMessageType error`
+- `var ErrIncompleteHeader error`
+- `var ErrIncompletePayload error`
+- `var ErrTrailingBytes error`
 
 Escopo atual:
 
 - framing fixo e versionado;
-- enum de tipos de mensagem;
+- enum de tipos de mensagem para handshake, catch-up de documento, update de documento, awareness e ping/pong;
 - encode/decode estrito para frame único e decode por prefixo para stream concatenado.
+
+O pacote ainda não define o shape semântico dos payloads. Nesta fase ele existe
+para congelar o wire envelope do tráfego inter-node que, depois, carregará
+resolve/open/forward/recovery/handoff sem misturar esse wire com `y-protocols`.
 
 ### `pkg/ycluster`
 
@@ -427,21 +468,45 @@ Pacote público inicial do control plane distribuído.
 - `type StaticLocalNode`
 - `type PlacementOwnerLookup`
 - `func NewPlacementOwnerLookup(localNode NodeID, resolver ShardResolver, placements PlacementStore) (*PlacementOwnerLookup, error)`
+- `func StorageShardID(id ShardID) storage.ShardID`
+- `func StorageNodeID(id NodeID) storage.NodeID`
+- `func ParseStorageShardID(id storage.ShardID) (ShardID, error)`
+- `func ParseStorageNodeID(id storage.NodeID) (NodeID, error)`
+- `func LeaseFromStorageRecord(record *storage.LeaseRecord) (*Lease, error)`
+- `type StorageOwnerLookup`
+- `func NewStorageOwnerLookup(localNode NodeID, resolver ShardResolver, placements storage.PlacementStore, leases storage.LeaseStore) (*StorageOwnerLookup, error)`
+- `type StorageLeaseStore`
+- `func NewStorageLeaseStore(store storage.LeaseStore) (*StorageLeaseStore, error)`
 
 Escopo atual:
 
 - resolução determinística `DocumentKey -> shard`;
 - tipos estáveis para placement, lease e owner lookup;
-- lookup de owner em cima de `ShardResolver + PlacementStore`, ainda sem backend concreto nem transporte entre nós.
+- lookup de owner em cima de `ShardResolver + PlacementStore`, ainda sem transporte entre nós;
+- lookup storage-backed combinando `documento -> shard` e `shard -> lease owner` sobre `pkg/storage`;
+- adapter de lease do control plane sobre `storage.LeaseStore` para acquire/renew/release sem reimplementar backend;
+- separação explícita entre identidade local (`StaticLocalNode`), hashing de shard (`DeterministicShardResolver`) e consulta de owner (`PlacementOwnerLookup`/`StorageOwnerLookup`).
+
+Esse pacote é scaffolding de control plane: ele ainda não faz eleição,
+rebalanceamento, renovação de lease ou cutover, mas fixa os contratos que o
+runtime distribuído vai consumir para decidir localidade, roteamento e fencing.
 
 ## Stores disponíveis
 
 ### `pkg/storage/memory`
 
-- Implementação `memory.Store` da interface `SnapshotStore`.
+- Implementação `memory.Store` das interfaces `SnapshotStore` e `DistributedStore`.
 - `func New() *Store`
 - `func (s *Store) SaveSnapshot(ctx context.Context, key storage.DocumentKey, snapshot *yjsbridge.PersistedSnapshot) (*storage.SnapshotRecord, error)`
 - `func (s *Store) LoadSnapshot(ctx context.Context, key storage.DocumentKey) (*storage.SnapshotRecord, error)`
+- `func (s *Store) AppendUpdate(ctx context.Context, key storage.DocumentKey, update []byte) (*storage.UpdateLogRecord, error)`
+- `func (s *Store) ListUpdates(ctx context.Context, key storage.DocumentKey, after storage.UpdateOffset, limit int) ([]*storage.UpdateLogRecord, error)`
+- `func (s *Store) TrimUpdates(ctx context.Context, key storage.DocumentKey, through storage.UpdateOffset) error`
+- `func (s *Store) SavePlacement(ctx context.Context, placement storage.PlacementRecord) (*storage.PlacementRecord, error)`
+- `func (s *Store) LoadPlacement(ctx context.Context, key storage.DocumentKey) (*storage.PlacementRecord, error)`
+- `func (s *Store) SaveLease(ctx context.Context, lease storage.LeaseRecord) (*storage.LeaseRecord, error)`
+- `func (s *Store) LoadLease(ctx context.Context, shardID storage.ShardID) (*storage.LeaseRecord, error)`
+- `func (s *Store) ReleaseLease(ctx context.Context, shardID storage.ShardID, token string) error`
 
 Uso recomendado para:
 
@@ -451,11 +516,19 @@ Uso recomendado para:
 
 ### `pkg/storage/postgres`
 
-- Implementação `postgres.Store` da interface `SnapshotStore`.
+- Implementação `postgres.Store` das interfaces `SnapshotStore` e `DistributedStore`.
 - `type Config struct { ConnectionString, Schema, ApplicationName string; MinConns, MaxConns int32; SkipMigrations bool }`
 - `func New(ctx context.Context, cfg Config) (*Store, error)` com automigration por padrão.
 - `func (s *Store) SaveSnapshot(ctx context.Context, key storage.DocumentKey, snapshot *yjsbridge.PersistedSnapshot) (*storage.SnapshotRecord, error)`
 - `func (s *Store) LoadSnapshot(ctx context.Context, key storage.DocumentKey) (*storage.SnapshotRecord, error)`
+- `func (s *Store) AppendUpdate(ctx context.Context, key storage.DocumentKey, update []byte) (*storage.UpdateLogRecord, error)`
+- `func (s *Store) ListUpdates(ctx context.Context, key storage.DocumentKey, after storage.UpdateOffset, limit int) ([]*storage.UpdateLogRecord, error)`
+- `func (s *Store) TrimUpdates(ctx context.Context, key storage.DocumentKey, through storage.UpdateOffset) error`
+- `func (s *Store) SavePlacement(ctx context.Context, placement storage.PlacementRecord) (*storage.PlacementRecord, error)`
+- `func (s *Store) LoadPlacement(ctx context.Context, key storage.DocumentKey) (*storage.PlacementRecord, error)`
+- `func (s *Store) SaveLease(ctx context.Context, lease storage.LeaseRecord) (*storage.LeaseRecord, error)`
+- `func (s *Store) LoadLease(ctx context.Context, shardID storage.ShardID) (*storage.LeaseRecord, error)`
+- `func (s *Store) ReleaseLease(ctx context.Context, shardID storage.ShardID, token string) error`
 - `func (s *Store) Close()`
 - `func (s *Store) AutoMigrate(ctx context.Context) error`
 
@@ -650,6 +723,12 @@ frontend `vite` + `react` + `tailwindcss`, backend `gin`, WebSocket em
 `pkg/yhttp/gin` e persistência PostgreSQL, incluindo editor colaborativo com
 sync de conteúdo e awareness.
 
+O example `examples/provider-memory` é a referência local mais próxima do fluxo
+de recovery planejado: ele publica update e awareness, persiste snapshot
+explicitamente, reabre o documento em um novo provider e demonstra restore do
+documento sem reidratar presença efêmera. Na fase distribuída, esse restore por
+snapshot será complementado pelo replay do tail do `update log`.
+
 Smoke tests opt-in com Postgres efêmero em Docker:
 
 ```bash
@@ -680,7 +759,9 @@ throughput, latência média, `p50`, `p95`, `p99` e tempo de restore após resta
 - Em APIs agregadas, a validação preserva índice do payload relevante no erro (inclusive após prefixes vazios), e rejeita entradas vazias misturadas a V2 conforme contrato.
 - `pkg/yprotocol` e `pkg/yawareness` expõem os codecs do envelope `y-protocols`, o runtime in-process mínimo de sessão, o provider local por documento e o estado local de awareness.
 - `pkg/yhttp` adiciona a borda pública de transporte HTTP/WebSocket, hooks opcionais de observabilidade e os subpacotes `pkg/yhttp/gin`, `pkg/yhttp/echo`, `pkg/yhttp/chi` e `pkg/yhttp/prometheus` para adaptação direta aos frameworks suportados.
+- `pkg/storage`, `pkg/ycluster` e `pkg/ynodeproto` já expõem a base pública de epoch-1 para persistência distribuída, control plane e wire inter-node.
 - Ainda não há transporte distribuído, coordenação entre nós ou replicação horizontal entre processos.
+- Recovery operacional agora já cobre `snapshot + update log` via helpers públicos e stores concretos; handoff, cutover, append log por epoch e forwarding inter-node seguem como etapa posterior.
 - A próxima fase do roadmap adiciona owner único por room/documento/shard, `lease/epoch/fencing`, `snapshot + update log` e protocolo inter-node próprio, mantendo HTTP/WS acessível em qualquer nó.
 
 ## Referências do projeto

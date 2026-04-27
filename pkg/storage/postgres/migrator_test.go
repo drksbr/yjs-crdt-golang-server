@@ -62,8 +62,8 @@ func TestAutoMigrateUsesAdvisoryLock(t *testing.T) {
 	if err := row.Scan(&count); err != nil {
 		t.Fatalf("count schema_migrations query error: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("schema_migrations rows = %d, want 1", count)
+	if count != 2 {
+		t.Fatalf("schema_migrations rows = %d, want 2", count)
 	}
 }
 
@@ -85,15 +85,15 @@ func TestAutoMigrateIsIdempotent(t *testing.T) {
 		t.Fatalf("AutoMigrate() first call error = %v", err)
 	}
 	first := queryCount()
-	if first != 1 {
-		t.Fatalf("schema_migrations rows after first AutoMigrate = %d, want 1", first)
+	if first != 2 {
+		t.Fatalf("schema_migrations rows after first AutoMigrate = %d, want 2", first)
 	}
 
 	if err := store.AutoMigrate(ctx); err != nil {
 		t.Fatalf("AutoMigrate() second call error = %v", err)
 	}
 	second := queryCount()
-	if second != 1 {
-		t.Fatalf("schema_migrations rows after second AutoMigrate = %d, want 1", second)
+	if second != 2 {
+		t.Fatalf("schema_migrations rows after second AutoMigrate = %d, want 2", second)
 	}
 }

@@ -11,9 +11,13 @@ import (
 
 // Store mantém snapshots persistidos apenas em memória.
 type Store struct {
-	mu    sync.RWMutex
-	now   func() time.Time
-	items map[storage.DocumentKey]*storage.SnapshotRecord
+	mu         sync.RWMutex
+	now        func() time.Time
+	items      map[storage.DocumentKey]*storage.SnapshotRecord
+	updateLogs map[storage.DocumentKey][]*storage.UpdateLogRecord
+	updateNext map[storage.DocumentKey]storage.UpdateOffset
+	placements map[storage.DocumentKey]*storage.PlacementRecord
+	leases     map[storage.ShardID]*storage.LeaseRecord
 }
 
 var _ storage.SnapshotStore = (*Store)(nil)
@@ -21,8 +25,12 @@ var _ storage.SnapshotStore = (*Store)(nil)
 // New cria um store em memória pronto para uso.
 func New() *Store {
 	return &Store{
-		items: make(map[storage.DocumentKey]*storage.SnapshotRecord),
-		now:   func() time.Time { return time.Now().UTC() },
+		items:      make(map[storage.DocumentKey]*storage.SnapshotRecord),
+		updateLogs: make(map[storage.DocumentKey][]*storage.UpdateLogRecord),
+		updateNext: make(map[storage.DocumentKey]storage.UpdateOffset),
+		placements: make(map[storage.DocumentKey]*storage.PlacementRecord),
+		leases:     make(map[storage.ShardID]*storage.LeaseRecord),
+		now:        func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -80,6 +88,18 @@ func (s *Store) LoadSnapshot(ctx context.Context, key storage.DocumentKey) (*sto
 func (s *Store) ensureStoreInitializedLocked() {
 	if s.items == nil {
 		s.items = make(map[storage.DocumentKey]*storage.SnapshotRecord)
+	}
+	if s.updateLogs == nil {
+		s.updateLogs = make(map[storage.DocumentKey][]*storage.UpdateLogRecord)
+	}
+	if s.updateNext == nil {
+		s.updateNext = make(map[storage.DocumentKey]storage.UpdateOffset)
+	}
+	if s.placements == nil {
+		s.placements = make(map[storage.DocumentKey]*storage.PlacementRecord)
+	}
+	if s.leases == nil {
+		s.leases = make(map[storage.ShardID]*storage.LeaseRecord)
 	}
 	if s.now == nil {
 		s.now = func() time.Time { return time.Now().UTC() }

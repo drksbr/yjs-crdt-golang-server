@@ -104,6 +104,7 @@ Projeto em **Fase 3 (Meta técnica 9)**, com a **Fase 4 distribuída (Meta técn
 - Meta técnica 9 está em execução com foco em consolidar a API pública de update em `pkg/yjsbridge` em V1, além de snapshots V1 e persistência operacional, da exposição pública de sync/awareness em V1 (`pkg/yprotocol` e `pkg/yawareness`), do runtime in-process mínimo de protocolo em `pkg/yprotocol` e da camada mínima de provider acima de `Session`, ainda em escopo single-process.
 - Existe um ciclo funcional público com `pkg/yjsbridge` expondo `PersistedSnapshot` e utilitários de conversão/codificação.
 - A hidratação reversa de `PersistedSnapshot` está operacionalizada com stores persistentes em `pkg/storage` (memória e Postgres).
+- O branch atual já entrega o epoch-1 operacional da fase distribuída: contratos de `snapshot + update log`/placement/lease em `pkg/storage`, backends concretos em memória/Postgres, helpers públicos de replay/recovery, control plane storage-backed mínimo em `pkg/ycluster` e framing inter-node em `pkg/ynodeproto`.
 - O próximo ciclo passa a preparar a arquitetura distribuída: owner único por documento/shard, lease/epoch/fencing, modelo `snapshot + update log`, protocolo inter-node próprio e borda HTTP/WS aceita em qualquer nó com processamento do room restrito ao owner.
 
 ## Fase 1 — núcleo mínimo compatível
@@ -185,7 +186,7 @@ Capacidade de:
 
 ## Fase 4 — arquitetura distribuída por ownership
 
-Status: **planejada (Meta técnica 10)**.
+Status: **em execução inicial, com epoch-1 operacional já exposto (Meta técnica 10)**.
 
 ### Entregáveis
 - owner único por documento/shard lógico
@@ -203,6 +204,19 @@ Capacidade de:
 - aceitar clientes e requests HTTP/WS em qualquer nó sem duplicar processamento do room
 - recuperar ou promover owner com replay determinístico de `snapshot + update log`
 - impedir split-brain e escrita obsoleta via `epoch` monotônico e fencing
+
+### Epoch-1 já entregue
+
+Antes do runtime distribuído completo, o repositório já publicou os contratos
+que vão sustentar a próxima etapa:
+
+- `pkg/storage` já separa `SnapshotStore` do scaffolding distribuído (`UpdateLogStore`, `PlacementStore`, `LeaseStore`, `DistributedStore`) e dos registros `UpdateLogRecord`, `PlacementRecord`, `LeaseRecord` e `OwnerInfo`;
+- `pkg/storage` também já expõe `ReplaySnapshot` e `RecoverSnapshot` para reconstrução pública via `snapshot + update log`;
+- `pkg/storage/memory` e `pkg/storage/postgres` já materializam esses contratos distribuídos de snapshot, update log, placement e lease;
+- `pkg/ycluster` já expõe tipos estáveis de cluster, `DeterministicShardResolver`, `StaticLocalNode`, `PlacementOwnerLookup`, `StorageOwnerLookup`, `StorageLeaseStore` e interfaces mínimas de `Runtime`;
+- `pkg/ynodeproto` já expõe o framing binário versionado do wire inter-node, ainda sem payloads semânticos finalizados;
+- `pkg/yprotocol.Provider` continua sendo o runtime local de referência do futuro owner;
+- o recovery operacional atual já cobre replay incremental público em cima dos stores, enquanto handoff, cutover e forwarding inter-node permanecem como trabalho da próxima etapa.
 
 ---
 
@@ -364,8 +378,8 @@ Exemplos:
 2. Ampliar e endurecer a integração do lazy writer no fluxo de atualização.
 3. Concluir o mapa de lacunas de compatibilidade para V2 e conversões de formato.
 4. Formalizar a unidade de ownership (`DocumentKey`/room/shard) e a semântica de lease/`epoch`/fencing.
-5. Definir o modelo `snapshot + update log` para persistência incremental, replay e handoff.
-6. Definir o protocolo inter-node próprio e a separação entre wire de cliente (`y-protocols`) e wire interno do cluster.
+5. Materializar o modelo `snapshot + update log` acima dos contratos já expostos em `pkg/storage`, incluindo replay incremental, trim e compaction.
+6. Materializar o protocolo inter-node acima do framing já exposto em `pkg/ynodeproto` e separar o wire de cliente (`y-protocols`) do wire interno do cluster.
 7. Atualizar continuamente os documentos principais conforme novas divergências ou invariantes distribuídas forem observadas.
 
 ---
@@ -386,6 +400,8 @@ internal/
   ycompat/
 pkg/
   yjsbridge/
+  ycluster/
+  ynodeproto/
   yprotocol/
   yawareness/
   storage/
@@ -393,7 +409,7 @@ pkg/
     postgres/
 ```
 
-Pacotes públicos em `pkg/` já estão ativos para snapshots (`pkg/yjsbridge`), sync (`pkg/yprotocol`), awareness (`pkg/yawareness`) e storage (`pkg/storage`).
+Pacotes públicos em `pkg/` já estão ativos para snapshots (`pkg/yjsbridge`), sync (`pkg/yprotocol`), awareness (`pkg/yawareness`), storage (`pkg/storage`) e para o scaffolding inicial da fase distribuída (`pkg/ycluster` e `pkg/ynodeproto`).
 
 ## Decisões arquiteturais iniciais
 
@@ -408,6 +424,9 @@ Tratar content maps e attribution como etapa posterior.
 
 ### Decisão 4
 Manter a implementação preparada para uso futuro em servidor estilo YHub, com persistência operacional limitada em `pkg/storage` para `PersistedSnapshot`, exposição pública de sync/awareness em V1 e usando o provider local atual como embrião do futuro owner distribuído, sem amarrar o núcleo `internal/` a uma estratégia específica de coordenação multi-nó antes da hora.
+
+### Decisão 5
+Publicar cedo os contratos de persistência distribuída, control plane e framing inter-node, mesmo antes de haver replay/handoff completos, para congelar a superfície pública de epoch-1 sem quebrar o modo single-process já operacional.
 
 ## Riscos técnicos conhecidos
 

@@ -47,7 +47,13 @@ Projeto em **Meta técnica 9 / Fase 3 em consolidação**, com promoção da API
 - A API pública de persistência mínima já está disponível em `pkg/yjsbridge` para snapshots V1 (`PersistedSnapshot`, conversão, encode/decode de restore e persistência canônica).
 - A promoção da API pública de update já está refletida em `pkg/yjsbridge` (operações de merge/diff/intersect e derivados como state vector/content ids), mantendo `V2` explicitamente fora de escopo.
 - A camada de armazenamento operacional já está definida em `pkg/storage` (contratos: `SnapshotStore`, `DocumentKey`, `SnapshotRecord`, erros) com stores implementadas para memória e Postgres.
+- `pkg/storage` agora também expõe os contratos-base da persistência distribuída (`UpdateLogStore`, `PlacementStore`, `LeaseStore`, `DistributedStore`) e os registros públicos necessários para snapshot base, append log, placement e ownership efêmero.
+- `pkg/ycluster` agora expõe o scaffolding público de control plane com tipos estáveis, `DeterministicShardResolver`, `StaticLocalNode`, `PlacementOwnerLookup` e interfaces mínimas de `Runtime`.
+- `pkg/ynodeproto` agora expõe o framing binário versionado do protocolo inter-node, separado do `y-protocols` usado na borda com clientes.
 - Existem exemplos iniciais de integração em `examples/memory` e `examples/postgres` cobrindo save/load com a API pública.
+- `examples/provider-memory` já demonstra o recovery local por snapshot: persistência explícita, fechamento do provider e restore do documento em um novo runtime, ainda sem handoff/cutover distribuído.
+- `pkg/storage` já expõe `ReplaySnapshot` e `RecoverSnapshot`, e `pkg/storage/memory`/`pkg/storage/postgres` já materializam `snapshot + update log`/placement/lease como stores concretos.
+- `pkg/ycluster` já expõe adapters storage-backed para ownership (`StorageOwnerLookup`) e lease (`StorageLeaseStore`) em cima dos contratos públicos de `pkg/storage`.
 - As APIs públicas de inspeção por `single-update` já despacham V1 e rejeitam V2 de forma explícita.
 - O caminho de merge agora também possui variantes com `context` e agregação paralela na etapa de fusão.
 - Os caminhos públicos de `diff` e `intersect` agora também possuem variantes com `context`.
@@ -65,7 +71,7 @@ Projeto em **Meta técnica 9 / Fase 3 em consolidação**, com promoção da API
 - Novo corte funcional em V1 de snapshot binário persistido já existe: `PersistedSnapshot` com `PersistedSnapshotFromUpdate(s)` gera, em um passo, `UpdateV1` canônico persistível e `Snapshot` materializado em memória.
 - Há também corte funcional de hidratação reversa V1 (`restore`) para `PersistedSnapshot` com `EncodePersistedSnapshotV1`, `DecodePersistedSnapshotV1` e `DecodePersistedSnapshotV1Context`.
 - O ciclo de persistência operacional já está em funcionamento via stores; `pkg/yprotocol.Provider` passa a servir como runtime local do futuro owner distribuído.
-- O próximo bloco de esforço agora combina duas frentes: fechar lacunas de `merge/diff/intersect` e V2 no runtime local, e abrir a arquitetura distribuída com owner único por documento/shard, lease/epoch/fencing, `snapshot + update log`, protocolo inter-node próprio e aceite de HTTP/WS em qualquer nó.
+- O próximo bloco de esforço agora combina duas frentes: fechar lacunas de `merge/diff/intersect` e V2 no runtime local, e subir do epoch-1 já operacional para ownership completo por documento/shard, lease/epoch/fencing, protocolo inter-node semântico e aceite de HTTP/WS em qualquer nó com handoff/cutover seguros.
 
 ---
 
@@ -416,7 +422,7 @@ Permite que todos os nós aceitem tráfego de cliente, mas só um owner processe
 Alta na próxima fase
 
 ### Status esperado
-Primeiro grande bloco da Meta 10; deve reutilizar `pkg/yprotocol.Provider` como runtime local do owner, sem criar fanout multi-process ad hoc
+O scaffolding público inicial já existe em `pkg/ycluster` (`NodeID`, `ShardID`, `Placement`, `Lease`, `DeterministicShardResolver`, `PlacementOwnerLookup` e interfaces mínimas). O próximo passo é ligar esses contratos ao runtime real do owner, sem criar fanout multi-process ad hoc.
 
 ---
 
@@ -439,7 +445,7 @@ Sem `snapshot + update log`, mudança de owner e recuperação pós-falha ficam 
 Alta na próxima fase
 
 ### Status esperado
-Planejado para Meta 10 em conjunto com lease/`epoch`/fencing e protocolo inter-node próprio
+O scaffolding público inicial já existe em `pkg/storage` (`UpdateLogRecord`, `PlacementRecord`, `LeaseRecord`, `UpdateLogStore`, `PlacementStore`, `LeaseStore` e `DistributedStore`), e o branch atual já materializa append/list/trim concretos, replay/recovery público e backends em memória/Postgres. O próximo passo é conectar isso ao handoff, ao cutover e ao recovery autoritativo do owner com epoch/fencing.
 
 ---
 
@@ -462,9 +468,9 @@ O núcleo consolidado para Meta 9 já cobre:
 Os próximos passos práticos (Meta 9 -> Meta 10) ficam em:
 
 1. congelar `pkg/yprotocol.Provider` como runtime local do futuro owner distribuído
-2. definir owner único por documento/shard com lease, `epoch` e fencing
-3. definir `snapshot + update log` para replay, recovery e handoff
-4. definir protocolo inter-node próprio separado do `y-protocols`
+2. materializar owner único por documento/shard em cima do scaffolding já exposto em `pkg/ycluster`
+3. materializar `snapshot + update log` para replay, recovery e handoff em cima do scaffolding já exposto em `pkg/storage`
+4. materializar o protocolo inter-node em cima do framing já exposto em `pkg/ynodeproto`, separado do `y-protocols`
 5. adaptar a borda HTTP/WS para aceitar conexões em qualquer nó e encaminhar o room ao owner
 6. ampliar compatibilidade estrutural de `merge/diff/intersect`
 7. ampliar o uso do lazy writer além do corte já endurecido
@@ -479,9 +485,9 @@ Os próximos passos práticos (Meta 9 -> Meta 10) ficam em:
 
 O backlog imediato agora deve focar em:
 
-1. definir a unidade de ownership (`DocumentKey`/room/shard) e o contrato de lease/`epoch`/fencing
-2. definir o modelo `snapshot + update log` para hidratação, replay, restart e troca de owner
-3. definir o protocolo inter-node próprio para resolve/open/forward/handoff/recovery
+1. fechar a unidade de ownership (`DocumentKey`/room/shard) e o contrato operacional de lease/`epoch`/fencing sobre a superfície já publicada
+2. materializar o modelo `snapshot + update log` para hidratação, replay, restart e troca de owner
+3. materializar os payloads/fluxos do protocolo inter-node para resolve/open/forward/handoff/recovery
 4. tratar `pkg/yprotocol.Provider` como runtime local do owner e `pkg/yhttp` como borda pública em qualquer nó
 5. compatibilidade estrutural de `mergeUpdates`
 6. compatibilidade estrutural de `diffUpdate`

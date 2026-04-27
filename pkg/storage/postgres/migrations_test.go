@@ -18,6 +18,9 @@ func TestLoadMigrations(t *testing.T) {
 	if migrations[0].version != 1 {
 		t.Fatalf("migrations[0].version = %d, want 1", migrations[0].version)
 	}
+	if migrations[len(migrations)-1].version != 2 {
+		t.Fatalf("last migration version = %d, want 2", migrations[len(migrations)-1].version)
+	}
 	if !strings.Contains(migrations[0].sql, `"tenant_app".document_snapshots`) {
 		t.Fatalf("migration sql = %q, want quoted schema substitution", migrations[0].sql)
 	}

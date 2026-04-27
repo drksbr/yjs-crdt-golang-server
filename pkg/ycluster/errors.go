@@ -11,6 +11,8 @@ var (
 	ErrNilShardResolver = errors.New("ycluster: shard resolver obrigatorio")
 	// ErrNilPlacementStore sinaliza ausencia de placement store no lookup.
 	ErrNilPlacementStore = errors.New("ycluster: placement store obrigatorio")
+	// ErrNilLeaseStore sinaliza ausencia de lease store em wiring storage-backed.
+	ErrNilLeaseStore = errors.New("ycluster: lease store obrigatorio")
 	// ErrInvalidShardCount sinaliza espaco de shards vazio.
 	ErrInvalidShardCount = errors.New("ycluster: shard count invalido")
 	// ErrInvalidOwnerLookupRequest sinaliza request invalido para resolucao de owner.
