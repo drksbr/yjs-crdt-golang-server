@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -156,5 +157,141 @@ func TestStoreSaveLoadAndReleaseLease(t *testing.T) {
 	}
 	if _, err := store.LoadLease(ctx, lease.ShardID); !errors.Is(err, storage.ErrLeaseNotFound) {
 		t.Fatalf("LoadLease(after release) error = %v, want %v", err, storage.ErrLeaseNotFound)
+	}
+
+	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID:   lease.ShardID,
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-b"), Epoch: lease.Owner.Epoch},
+		Token:     "lease-b-stale",
+		ExpiresAt: time.Now().UTC().Add(90 * time.Second),
+	}); !errors.Is(err, storage.ErrLeaseStaleEpoch) {
+		t.Fatalf("SaveLease(stale after release) error = %v, want %v", err, storage.ErrLeaseStaleEpoch)
+	}
+
+	reacquired, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID:   lease.ShardID,
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-b"), Epoch: 5},
+		Token:     "lease-b",
+		ExpiresAt: time.Now().UTC().Add(2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("SaveLease(reacquire) unexpected error: %v", err)
+	}
+	if reacquired.Owner.Epoch != 5 {
+		t.Fatalf("SaveLease(reacquire).Owner.Epoch = %d, want 5", reacquired.Owner.Epoch)
+	}
+}
+
+func TestStoreSaveLeaseConcurrentFirstAcquireFencesConflicts(t *testing.T) {
+	store, _ := newTestStore(t, false)
+	ctx := context.Background()
+
+	const contenders = 8
+	type result struct {
+		token string
+		err   error
+	}
+
+	results := make(chan result, contenders)
+	start := make(chan struct{})
+
+	for i := 0; i < contenders; i++ {
+		i := i
+		go func() {
+			<-start
+			token := fmt.Sprintf("lease-%d", i)
+			_, err := store.SaveLease(ctx, storage.LeaseRecord{
+				ShardID:   storage.ShardID("shard-race"),
+				Owner:     storage.OwnerInfo{NodeID: storage.NodeID(fmt.Sprintf("node-%d", i)), Epoch: 1},
+				Token:     token,
+				ExpiresAt: time.Now().UTC().Add(time.Minute),
+			})
+			results <- result{token: token, err: err}
+		}()
+	}
+
+	close(start)
+
+	successes := 0
+	var winnerToken string
+	for i := 0; i < contenders; i++ {
+		result := <-results
+		switch {
+		case result.err == nil:
+			successes++
+			winnerToken = result.token
+		case errors.Is(result.err, storage.ErrLeaseConflict):
+			// expected for losing contenders racing on the first acquire
+		default:
+			t.Fatalf("SaveLease(concurrent contender %q) error = %v, want nil or %v", result.token, result.err, storage.ErrLeaseConflict)
+		}
+	}
+
+	if successes != 1 {
+		t.Fatalf("successful first acquires = %d, want 1", successes)
+	}
+
+	lease, err := store.LoadLease(ctx, storage.ShardID("shard-race"))
+	if err != nil {
+		t.Fatalf("LoadLease() unexpected error: %v", err)
+	}
+	if lease.Token != winnerToken {
+		t.Fatalf("LoadLease().Token = %q, want winner token %q", lease.Token, winnerToken)
+	}
+}
+
+func TestStoreSaveLeaseRejectsConflictAndStaleEpoch(t *testing.T) {
+	store, _ := newTestStore(t, false)
+	ctx := context.Background()
+
+	active, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID:   storage.ShardID("shard-fencing"),
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-a"), Epoch: 7},
+		Token:     "lease-a",
+		ExpiresAt: time.Now().UTC().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("SaveLease(active) unexpected error: %v", err)
+	}
+
+	renewed, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID:    active.ShardID,
+		Owner:      active.Owner,
+		Token:      active.Token,
+		AcquiredAt: active.AcquiredAt,
+		ExpiresAt:  time.Now().UTC().Add(2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("SaveLease(renew) unexpected error: %v", err)
+	}
+	if renewed.Owner.Epoch != 7 || renewed.Token != active.Token {
+		t.Fatalf("SaveLease(renew) = %#v, want epoch 7 token %q", renewed, active.Token)
+	}
+
+	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID:   active.ShardID,
+		Owner:     active.Owner,
+		Token:     "lease-conflict",
+		ExpiresAt: time.Now().UTC().Add(3 * time.Minute),
+	}); !errors.Is(err, storage.ErrLeaseConflict) {
+		t.Fatalf("SaveLease(conflict same epoch) error = %v, want %v", err, storage.ErrLeaseConflict)
+	}
+
+	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID:   active.ShardID,
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-b"), Epoch: 8},
+		Token:     "lease-b",
+		ExpiresAt: time.Now().UTC().Add(3 * time.Minute),
+	}); !errors.Is(err, storage.ErrLeaseConflict) {
+		t.Fatalf("SaveLease(conflict higher epoch) error = %v, want %v", err, storage.ErrLeaseConflict)
+	}
+
+	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID:   active.ShardID,
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-a"), Epoch: 6},
+		Token:     "lease-old",
+		ExpiresAt: time.Now().UTC().Add(3 * time.Minute),
+	}); !errors.Is(err, storage.ErrLeaseStaleEpoch) {
+		t.Fatalf("SaveLease(stale) error = %v, want %v", err, storage.ErrLeaseStaleEpoch)
 	}
 }

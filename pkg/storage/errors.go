@@ -9,6 +9,10 @@ var (
 	ErrPlacementNotFound = errors.New("storage: placement nao encontrado")
 	// ErrLeaseNotFound sinaliza ausência de lease persistida para o shard informado.
 	ErrLeaseNotFound = errors.New("storage: lease nao encontrada")
+	// ErrLeaseConflict sinaliza conflito de lease com o estado persistido atual do shard.
+	ErrLeaseConflict = errors.New("storage: lease em conflito")
+	// ErrLeaseStaleEpoch sinaliza epoch obsoleto frente a geracao persistida do shard.
+	ErrLeaseStaleEpoch = errors.New("storage: lease com epoch obsoleto")
 	// ErrInvalidDocumentKey sinaliza chave de documento inválida.
 	ErrInvalidDocumentKey = errors.New("storage: chave de documento invalida")
 	// ErrInvalidShardID sinaliza shard inválido.

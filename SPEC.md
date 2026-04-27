@@ -104,7 +104,7 @@ Projeto em **Fase 3 (Meta técnica 9)**, com a **Fase 4 distribuída (Meta técn
 - Meta técnica 9 está em execução com foco em consolidar a API pública de update em `pkg/yjsbridge` em V1, além de snapshots V1 e persistência operacional, da exposição pública de sync/awareness em V1 (`pkg/yprotocol` e `pkg/yawareness`), do runtime in-process mínimo de protocolo em `pkg/yprotocol` e da camada mínima de provider acima de `Session`, ainda em escopo single-process.
 - Existe um ciclo funcional público com `pkg/yjsbridge` expondo `PersistedSnapshot` e utilitários de conversão/codificação.
 - A hidratação reversa de `PersistedSnapshot` está operacionalizada com stores persistentes em `pkg/storage` (memória e Postgres).
-- O branch atual já entrega o epoch-3 operacional da fase distribuída: contratos de `snapshot + update log`/placement/lease em `pkg/storage`, backends concretos em memória/Postgres, helpers públicos de replay/recovery, control plane storage-backed mínimo em `pkg/ycluster`, mensagens inter-node tipadas em `pkg/ynodeproto`, bootstrap/recovery do owner local em `pkg/yprotocol.Provider`, borda owner-aware em `pkg/yhttp` e lifecycle básico de lease com `epoch` monotônico.
+- O branch atual já entrega o epoch-4 operacional da fase distribuída: contratos de `snapshot + update log`/placement/lease em `pkg/storage`, backends concretos em memória/Postgres, helpers públicos de replay/recovery, control plane storage-backed mínimo em `pkg/ycluster`, mensagens inter-node tipadas em `pkg/ynodeproto`, bootstrap/recovery do owner local em `pkg/yprotocol.Provider`, borda owner-aware em `pkg/yhttp` e lifecycle de lease endurecido com `epoch` monotônico, fencing por geração persistida e owner lookup dependente de lease ativa.
 - O próximo ciclo passa a preparar a arquitetura distribuída autoritativa: owner único por documento/shard com lease/epoch/fencing consistentes, forwarding edge->owner pelo wire inter-node, handoff e failover seguros.
 
 ## Fase 1 — núcleo mínimo compatível
@@ -214,8 +214,8 @@ que vão sustentar a próxima etapa:
 
 - `pkg/storage` já separa `SnapshotStore` do scaffolding distribuído (`UpdateLogStore`, `PlacementStore`, `LeaseStore`, `DistributedStore`) e dos registros `UpdateLogRecord`, `PlacementRecord`, `LeaseRecord` e `OwnerInfo`;
 - `pkg/storage` também já expõe `ReplaySnapshot`, `RecoverSnapshot`, `ReplayUpdateLog` e `CompactUpdateLog` para reconstrução pública via `snapshot + update log`;
-- `pkg/storage/memory` e `pkg/storage/postgres` já materializam esses contratos distribuídos de snapshot, update log, placement e lease;
-- `pkg/ycluster` já expõe tipos estáveis de cluster, `DeterministicShardResolver`, `StaticLocalNode`, `PlacementOwnerLookup`, `StorageOwnerLookup`, `StorageLeaseStore` e interfaces mínimas de `Runtime`;
+- `pkg/storage/memory` e `pkg/storage/postgres` já materializam esses contratos distribuídos de snapshot, update log, placement e lease, com `OwnerInfo.Epoch` obrigatório, `ErrLeaseConflict`/`ErrLeaseStaleEpoch` e preservação da última geração após release;
+- `pkg/ycluster` já expõe tipos estáveis de cluster, `DeterministicShardResolver`, `StaticLocalNode`, `PlacementOwnerLookup`, `StorageOwnerLookup`, `StorageLeaseStore` e interfaces mínimas de `Runtime`, resolvendo owner apenas a partir de lease ativa e válida;
 - `pkg/ynodeproto` já expõe o framing binário versionado do wire inter-node e os payloads tipados iniciais para handshake, sync, document update, awareness update e ping/pong;
 - `pkg/yprotocol.Provider` já atua como runtime local de referência do owner, com bootstrap/recovery via `snapshot + update log`;
 - `pkg/yhttp` já expõe `OwnerAwareServer` como borda pública HTTP/WebSocket para resolver owner antes do provider local;

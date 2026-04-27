@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"yjs-go-bridge/pkg/storage"
 )
 
 func TestAutoMigrateRequiresInitializedStore(t *testing.T) {
@@ -22,6 +24,10 @@ func TestAutoMigrateRequiresInitializedStore(t *testing.T) {
 func TestAutoMigrateUsesAdvisoryLock(t *testing.T) {
 	store, _ := newTestStore(t, true)
 	ctx := context.Background()
+	migrations, err := loadMigrations(store.schema)
+	if err != nil {
+		t.Fatalf("loadMigrations() unexpected error: %v", err)
+	}
 
 	lockConn, err := pgx.Connect(ctx, getPostgresTestDSN(t))
 	if err != nil {
@@ -62,14 +68,18 @@ func TestAutoMigrateUsesAdvisoryLock(t *testing.T) {
 	if err := row.Scan(&count); err != nil {
 		t.Fatalf("count schema_migrations query error: %v", err)
 	}
-	if count != 2 {
-		t.Fatalf("schema_migrations rows = %d, want 2", count)
+	if count != len(migrations) {
+		t.Fatalf("schema_migrations rows = %d, want %d", count, len(migrations))
 	}
 }
 
 func TestAutoMigrateIsIdempotent(t *testing.T) {
 	store, _ := newTestStore(t, true)
 	ctx := context.Background()
+	migrations, err := loadMigrations(store.schema)
+	if err != nil {
+		t.Fatalf("loadMigrations() unexpected error: %v", err)
+	}
 
 	queryCount := func() int {
 		var count int
@@ -85,15 +95,51 @@ func TestAutoMigrateIsIdempotent(t *testing.T) {
 		t.Fatalf("AutoMigrate() first call error = %v", err)
 	}
 	first := queryCount()
-	if first != 2 {
-		t.Fatalf("schema_migrations rows after first AutoMigrate = %d, want 2", first)
+	if first != len(migrations) {
+		t.Fatalf("schema_migrations rows after first AutoMigrate = %d, want %d", first, len(migrations))
 	}
 
 	if err := store.AutoMigrate(ctx); err != nil {
 		t.Fatalf("AutoMigrate() second call error = %v", err)
 	}
 	second := queryCount()
-	if second != 2 {
-		t.Fatalf("schema_migrations rows after second AutoMigrate = %d, want 2", second)
+	if second != len(migrations) {
+		t.Fatalf("schema_migrations rows after second AutoMigrate = %d, want %d", second, len(migrations))
+	}
+}
+
+func TestAutoMigrateUpgradesLeaseGenerationSeedConstraint(t *testing.T) {
+	store, _ := newTestStore(t, true)
+	ctx := context.Background()
+	schema := quoteIdentifier(store.schema)
+
+	if _, err := store.pool.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+schema); err != nil {
+		t.Fatalf("create schema unexpected error: %v", err)
+	}
+
+	migrations, err := loadMigrations(store.schema)
+	if err != nil {
+		t.Fatalf("loadMigrations() unexpected error: %v", err)
+	}
+	if len(migrations) < 4 {
+		t.Fatalf("len(migrations) = %d, want at least 4", len(migrations))
+	}
+	for _, migration := range migrations[:3] {
+		if err := store.applyMigration(ctx, schema, migration); err != nil {
+			t.Fatalf("applyMigration(%s) unexpected error: %v", migration.name, err)
+		}
+	}
+
+	if err := store.AutoMigrate(ctx); err != nil {
+		t.Fatalf("AutoMigrate() upgrade unexpected error: %v", err)
+	}
+
+	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID:   storage.ShardID("fresh-shard"),
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-a"), Epoch: 1},
+		Token:     "lease-a",
+		ExpiresAt: time.Now().UTC().Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("SaveLease() after v4 migration unexpected error: %v", err)
 	}
 }

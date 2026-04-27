@@ -3,6 +3,7 @@ package ycluster
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // StaticLocalNode expõe uma identidade local fixa para wiring simples do cluster.
@@ -28,6 +29,7 @@ type PlacementOwnerLookup struct {
 	localNodeID    NodeID
 	shardResolver  ShardResolver
 	placementStore PlacementStore
+	now            func() time.Time
 }
 
 // NewPlacementOwnerLookup constrói um lookup de owner com dependências explícitas.
@@ -45,10 +47,16 @@ func NewPlacementOwnerLookup(localNode NodeID, resolver ShardResolver, placement
 		localNodeID:    localNode,
 		shardResolver:  resolver,
 		placementStore: placements,
+		now: func() time.Time {
+			return time.Now().UTC()
+		},
 	}, nil
 }
 
 // LookupOwner resolve o owner atual do documento e informa se ele é local.
+//
+// Um placement sem lease ativa nao e suficiente para classificar ownership
+// local/remoto.
 func (l *PlacementOwnerLookup) LookupOwner(ctx context.Context, req OwnerLookupRequest) (*OwnerResolution, error) {
 	if l == nil {
 		return nil, ErrOwnerNotFound
@@ -78,10 +86,23 @@ func (l *PlacementOwnerLookup) LookupOwner(ctx context.Context, req OwnerLookupR
 	if placement.ShardID != shardID {
 		return nil, fmt.Errorf("%w: shard %s != %s", ErrInvalidPlacement, placement.ShardID, shardID)
 	}
+	if placement.Lease == nil {
+		return nil, ErrOwnerNotFound
+	}
+	if placement.Lease.ExpiredAt(l.nowTime()) {
+		return nil, ErrLeaseExpired
+	}
 
 	return &OwnerResolution{
 		DocumentKey: req.DocumentKey,
 		Placement:   *placement,
-		Local:       placement.NodeID == l.localNodeID,
+		Local:       placement.Lease.Holder == l.localNodeID,
 	}, nil
+}
+
+func (l *PlacementOwnerLookup) nowTime() time.Time {
+	if l == nil || l.now == nil {
+		return time.Now().UTC()
+	}
+	return l.now()
 }

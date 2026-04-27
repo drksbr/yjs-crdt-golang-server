@@ -290,7 +290,7 @@ func TestStoreDistributedErrors(t *testing.T) {
 	}
 	lease := storage.LeaseRecord{
 		ShardID:   storage.ShardID("shard-a"),
-		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-a")},
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-a"), Epoch: 1},
 		Token:     "lease-token",
 		ExpiresAt: time.Now().UTC().Add(time.Minute),
 	}
@@ -536,7 +536,7 @@ func TestNilStoreDistributedErrors(t *testing.T) {
 			run: func() error {
 				_, err := store.SaveLease(context.Background(), storage.LeaseRecord{
 					ShardID:   shardID,
-					Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-a")},
+					Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-a"), Epoch: 1},
 					Token:     "lease-token",
 					ExpiresAt: time.Now().UTC().Add(time.Minute),
 				})
@@ -607,7 +607,7 @@ func TestZeroValueStoreDistributedContracts(t *testing.T) {
 
 	lease, err := store.SaveLease(context.Background(), storage.LeaseRecord{
 		ShardID:   shardID,
-		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-a")},
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-a"), Epoch: 1},
 		Token:     "lease-token",
 		ExpiresAt: time.Unix(500, 0).UTC(),
 	})
@@ -652,8 +652,8 @@ func TestStoreConcurrentDistributedOperations(t *testing.T) {
 					return
 				}
 				lease := storage.LeaseRecord{
-					ShardID:   shardID,
-					Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-" + strconv.Itoa(worker))},
+					ShardID:   storage.ShardID("shard-" + strconv.Itoa(worker)),
+					Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-" + strconv.Itoa(worker)), Epoch: uint64(worker + 1)},
 					Token:     "lease-" + strconv.Itoa(worker),
 					ExpiresAt: time.Now().UTC().Add(time.Minute),
 				}
@@ -669,7 +669,7 @@ func TestStoreConcurrentDistributedOperations(t *testing.T) {
 					errCh <- err
 					return
 				}
-				if _, err := store.LoadLease(context.Background(), shardID); err != nil {
+				if _, err := store.LoadLease(context.Background(), lease.ShardID); err != nil {
 					errCh <- err
 					return
 				}
@@ -681,5 +681,93 @@ func TestStoreConcurrentDistributedOperations(t *testing.T) {
 	close(errCh)
 	for err := range errCh {
 		t.Errorf("erro concorrente: %v", err)
+	}
+}
+
+func TestStoreLeaseRejectsConflictAndPreservesGeneration(t *testing.T) {
+	t.Parallel()
+
+	store := New()
+	baseTime := time.Unix(700, 0).UTC()
+	store.now = sequenceClock(
+		baseTime,
+		baseTime.Add(10*time.Second),
+		baseTime.Add(20*time.Second),
+		baseTime.Add(30*time.Second),
+		baseTime.Add(40*time.Second),
+	)
+
+	shardID := storage.ShardID("shard-fencing")
+	active, err := store.SaveLease(context.Background(), storage.LeaseRecord{
+		ShardID:   shardID,
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-a"), Epoch: 3},
+		Token:     "lease-a",
+		ExpiresAt: baseTime.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("SaveLease(active) unexpected error: %v", err)
+	}
+
+	renewed, err := store.SaveLease(context.Background(), storage.LeaseRecord{
+		ShardID:   shardID,
+		Owner:     active.Owner,
+		Token:     active.Token,
+		ExpiresAt: baseTime.Add(2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("SaveLease(renew) unexpected error: %v", err)
+	}
+	if renewed.Owner.Epoch != 3 || renewed.Token != "lease-a" {
+		t.Fatalf("renewed = %#v, want epoch 3 token lease-a", renewed)
+	}
+	if !renewed.AcquiredAt.Equal(active.AcquiredAt) {
+		t.Fatalf("renewed.AcquiredAt = %v, want %v", renewed.AcquiredAt, active.AcquiredAt)
+	}
+
+	if _, err := store.SaveLease(context.Background(), storage.LeaseRecord{
+		ShardID:   shardID,
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-b"), Epoch: 4},
+		Token:     "lease-b",
+		ExpiresAt: baseTime.Add(3 * time.Minute),
+	}); !errors.Is(err, storage.ErrLeaseConflict) {
+		t.Fatalf("SaveLease(conflict) error = %v, want %v", err, storage.ErrLeaseConflict)
+	}
+
+	if _, err := store.SaveLease(context.Background(), storage.LeaseRecord{
+		ShardID:   shardID,
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-a"), Epoch: 2},
+		Token:     "lease-old",
+		ExpiresAt: baseTime.Add(3 * time.Minute),
+	}); !errors.Is(err, storage.ErrLeaseStaleEpoch) {
+		t.Fatalf("SaveLease(stale) error = %v, want %v", err, storage.ErrLeaseStaleEpoch)
+	}
+
+	if err := store.ReleaseLease(context.Background(), shardID, active.Token); err != nil {
+		t.Fatalf("ReleaseLease() unexpected error: %v", err)
+	}
+	if _, err := store.LoadLease(context.Background(), shardID); !errors.Is(err, storage.ErrLeaseNotFound) {
+		t.Fatalf("LoadLease(after release) error = %v, want %v", err, storage.ErrLeaseNotFound)
+	}
+
+	if _, err := store.SaveLease(context.Background(), storage.LeaseRecord{
+		ShardID:   shardID,
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-b"), Epoch: 3},
+		Token:     "lease-b",
+		ExpiresAt: baseTime.Add(4 * time.Minute),
+	}); !errors.Is(err, storage.ErrLeaseStaleEpoch) {
+		t.Fatalf("SaveLease(reacquire stale) error = %v, want %v", err, storage.ErrLeaseStaleEpoch)
+	}
+
+	reacquired, err := store.SaveLease(context.Background(), storage.LeaseRecord{
+		ShardID:   shardID,
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-b"), Epoch: 4},
+		Token:     "lease-b",
+		ExpiresAt: baseTime.Add(5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("SaveLease(reacquire) unexpected error: %v", err)
+	}
+	if reacquired.Owner.Epoch != 4 {
+		t.Fatalf("reacquired.Owner.Epoch = %d, want 4", reacquired.Owner.Epoch)
 	}
 }

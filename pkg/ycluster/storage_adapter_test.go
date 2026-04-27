@@ -241,6 +241,37 @@ func TestStorageOwnerLookupErrors(t *testing.T) {
 			t.Fatalf("LookupOwner() error = %v, want %v", err, ErrLeaseExpired)
 		}
 	})
+
+	t.Run("invalid_lease_epoch", func(t *testing.T) {
+		invalidLeaseStore := storageLeaseStoreStub{
+			loadLease: func(context.Context, storage.ShardID) (*storage.LeaseRecord, error) {
+				return &storage.LeaseRecord{
+					ShardID:    StorageShardID(shardID),
+					Owner:      storage.OwnerInfo{NodeID: storage.NodeID("node-a")},
+					Token:      "lease-no-epoch",
+					AcquiredAt: time.Unix(120, 0).UTC(),
+					ExpiresAt:  time.Unix(130, 0).UTC(),
+				}, nil
+			},
+		}
+		lookup, err := NewStorageOwnerLookup("node-a", resolver, store, invalidLeaseStore)
+		if err != nil {
+			t.Fatalf("NewStorageOwnerLookup() unexpected error: %v", err)
+		}
+		if _, err := store.SavePlacement(context.Background(), storage.PlacementRecord{
+			Key:     key,
+			ShardID: StorageShardID(shardID),
+			Version: 4,
+		}); err != nil {
+			t.Fatalf("SavePlacement() unexpected error: %v", err)
+		}
+		lookup.now = func() time.Time { return time.Unix(121, 0).UTC() }
+
+		_, err = lookup.LookupOwner(context.Background(), OwnerLookupRequest{DocumentKey: key})
+		if !errors.Is(err, ErrInvalidLease) {
+			t.Fatalf("LookupOwner() error = %v, want %v", err, ErrInvalidLease)
+		}
+	})
 }
 
 func TestStorageLeaseStore(t *testing.T) {
@@ -412,4 +443,31 @@ func TestStorageLeaseStoreErrors(t *testing.T) {
 	if err := leases.ReleaseLease(context.Background(), Lease{}); !errors.Is(err, ErrInvalidLease) {
 		t.Fatalf("ReleaseLease() error = %v, want %v", err, ErrInvalidLease)
 	}
+}
+
+type storageLeaseStoreStub struct {
+	saveLease    func(ctx context.Context, lease storage.LeaseRecord) (*storage.LeaseRecord, error)
+	loadLease    func(ctx context.Context, shardID storage.ShardID) (*storage.LeaseRecord, error)
+	releaseLease func(ctx context.Context, shardID storage.ShardID, token string) error
+}
+
+func (s storageLeaseStoreStub) SaveLease(ctx context.Context, lease storage.LeaseRecord) (*storage.LeaseRecord, error) {
+	if s.saveLease == nil {
+		return nil, storage.ErrLeaseNotFound
+	}
+	return s.saveLease(ctx, lease)
+}
+
+func (s storageLeaseStoreStub) LoadLease(ctx context.Context, shardID storage.ShardID) (*storage.LeaseRecord, error) {
+	if s.loadLease == nil {
+		return nil, storage.ErrLeaseNotFound
+	}
+	return s.loadLease(ctx, shardID)
+}
+
+func (s storageLeaseStoreStub) ReleaseLease(ctx context.Context, shardID storage.ShardID, token string) error {
+	if s.releaseLease == nil {
+		return storage.ErrLeaseNotFound
+	}
+	return s.releaseLease(ctx, shardID, token)
 }

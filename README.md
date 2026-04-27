@@ -29,11 +29,13 @@ borda owner-aware que só materializa o room quando o owner resolvido é local.
 - o tráfego inter-node já tem mensagens tipadas e versionadas acima de `pkg/ynodeproto.MessageType`;
 - o owner local já pode ser reidratado a partir de snapshot base + replay do tail do `update log`, com awareness mantido como estado efêmero fora do recovery durável;
 - o lifecycle de lease no control plane já sobe `epoch` monotônico: acquire inicial em `1`, renew preserva `epoch/token` e takeover após expiração incrementa o epoch;
+- ownership agora só é considerado resolvido quando existe lease ativa e válida; placement isolado não classifica mais owner local/remoto;
+- os backends de `pkg/storage` agora cercam `SaveLease` com `ErrLeaseConflict`/`ErrLeaseStaleEpoch` e preservam a última geração do shard mesmo após `ReleaseLease`;
 - a resposta owner-aware remota já devolve `epoch` do owner junto dos metadados de roteamento;
 - lease, `epoch` e fencing continuam sendo o próximo fechamento crítico para handoff, failover e prevenção de split-brain;
 - o wire interno permanece separado do `y-protocols`, que continua restrito à borda cliente.
 
-## Epochs 1-3 já entregues
+## Epochs 1-4 já entregues
 
 O branch atual já entrega a base operacional inicial e o segundo corte de
 integração da fase distribuída, ainda sem ligar um runtime multi-nó completo:
@@ -41,11 +43,12 @@ integração da fase distribuída, ainda sem ligar um runtime multi-nó completo
 - `pkg/storage` agora expõe contratos para snapshot distribuído, append log por documento, placement e lease, além de replay/recovery públicos em cima de `snapshot + update log`;
 - `pkg/storage` já expõe `RecoverSnapshot`, `ReplayUpdateLog` e `CompactUpdateLog` para bootstrap, catch-up e checkpoint/compaction do runtime autoritativo;
 - `pkg/storage/memory` e `pkg/storage/postgres` já implementam `DistributedStore` com snapshot, update log, placement e lease;
-- `pkg/ycluster` expõe tipos, resolver determinístico de shard, lookup storage-backed de owner e adapter de lease sobre `pkg/storage`;
+- `pkg/storage` agora trata `OwnerInfo.Epoch` como obrigatório e endurece o lifecycle de lease com fencing por geração persistida;
+- `pkg/ycluster` expõe tipos, resolver determinístico de shard, lookups de owner e adapter de lease sobre `pkg/storage`, sempre exigindo lease ativa e epoch válida para classificar ownership;
 - `pkg/ynodeproto` agora expõe o framing binário versionado e os payloads tipados do protocolo inter-node (`handshake`, `document-sync-*`, `document-update`, `awareness-update`, `ping/pong`);
 - `pkg/yprotocol.Provider` já trata `snapshot + update log` como bootstrap/recovery do owner local, registrando updates no log e compactando o tail em `Persist`;
 - `pkg/yhttp` já expõe `OwnerAwareServer`, que resolve owner antes do provider local e responde com metadados retryable ou hook customizado quando o owner é remoto;
-- `pkg/ycluster.StorageLeaseStore` já endurece o lifecycle básico de ownership com `epoch` monotônico em lease ativa, renew preservando `token`/`epoch` e takeover pós-expiração incrementando o epoch persistido;
+- `pkg/ycluster.StorageLeaseStore` já endurece o lifecycle básico de ownership com `epoch` monotônico em lease ativa, renew preservando `token`/`epoch`, takeover pós-expiração incrementando o epoch persistido e release preservando a geração anterior;
 - `examples/owner-aware-http-edge` e os novos testes de integração cobrem o wiring owner-aware, o replay via `snapshot + update log` e o recovery do provider;
 - handoff, cutover, forwarding inter-node e fencing autoritativo ainda seguem como etapa posterior.
 
@@ -380,6 +383,8 @@ API de payload awareness e estado local:
 - `ErrSnapshotNotFound`
 - `ErrPlacementNotFound`
 - `ErrLeaseNotFound`
+- `ErrLeaseConflict`
+- `ErrLeaseStaleEpoch`
 - `ErrInvalidDocumentKey`
 - `ErrInvalidShardID`
 - `ErrInvalidNodeID`
@@ -422,12 +427,19 @@ No corte atual:
 
 - `UpdateLogStore` modela append/list/trim de updates V1 por `DocumentKey`, com `UpdateOffset` monotônico;
 - `PlacementStore` separa a resolução persistida `documento -> shard`;
-- `LeaseStore` separa ownership efêmero por shard via `OwnerInfo` + token opaco para renew/release;
+- `LeaseStore` separa ownership efêmero por shard via `OwnerInfo` + token opaco para renew/release, com `OwnerInfo.Epoch` obrigatório;
 - `DistributedStore` agrega snapshot, log, placement e lease em um backend opcional completo;
 - `ReplaySnapshot` aplica um tail incremental de `UpdateLogRecord` sobre um snapshot base;
 - `ReplayUpdateLog` pagina o tail persistido e devolve `Through` para o runtime reaproveitar como high-water mark de recovery/checkpoint;
 - `RecoverSnapshot` carrega snapshot base, lista batches do `update log` e reconstrói o estado consolidado com `LastOffset` observável para recovery/checkpoint;
 - `CompactUpdateLog` persiste um novo snapshot consolidado e poda o log até o offset aplicado.
+
+Semântica atual de lease/fencing:
+
+- renew reaproveita `Owner.Epoch` e `Token`;
+- takeover só é aceito com epoch estritamente maior que a geração ativa ou última geração conhecida;
+- backends retornam `ErrLeaseConflict` para concorrência contra lease ativa incompatível e `ErrLeaseStaleEpoch` para epochs obsoletos;
+- `ReleaseLease` remove a lease ativa, mas preserva a última geração do shard para impedir reacquire com epoch reciclado.
 
 No corte atual, `pkg/yprotocol.Provider` já usa esses helpers para bootstrap e
 recovery do owner local: snapshot base + replay do tail do log para recuperar o
@@ -508,7 +520,7 @@ Escopo atual:
 
 - resolução determinística `DocumentKey -> shard`;
 - tipos estáveis para placement, lease e owner lookup;
-- lookup de owner em cima de `ShardResolver + PlacementStore`, ainda sem transporte entre nós;
+- lookup de owner em cima de `ShardResolver + PlacementStore`, exigindo lease ativa para classificar local/remoto;
 - lookup storage-backed combinando `documento -> shard` e `shard -> lease owner` sobre `pkg/storage`;
 - adapter de lease do control plane sobre `storage.LeaseStore` para acquire/renew/release sem reimplementar backend;
 - separação explícita entre identidade local (`StaticLocalNode`), hashing de shard (`DeterministicShardResolver`) e consulta de owner (`PlacementOwnerLookup`/`StorageOwnerLookup`).

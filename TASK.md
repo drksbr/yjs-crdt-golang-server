@@ -61,6 +61,8 @@ Neste momento o repositório já possui:
 - `pkg/storage` agora também já expõe helpers públicos de replay/recovery (`ReplaySnapshot`, `RecoverSnapshot`) para reconstrução via `snapshot + update log`
 - `pkg/ycluster` agora expõe o scaffolding público de control plane com tipos estáveis de `NodeID`/`ShardID`/`Placement`/`Lease`, `DeterministicShardResolver`, `StaticLocalNode`, `PlacementOwnerLookup` e interfaces mínimas de `Runtime`
 - `pkg/ycluster` agora também já expõe adapters storage-backed com `StorageOwnerLookup`, `StorageLeaseStore` e conversões `storage <-> cluster`
+- `pkg/storage/memory` e `pkg/storage/postgres` agora cercam leases por geração persistida, com `OwnerInfo.Epoch` obrigatório, `ErrLeaseConflict`/`ErrLeaseStaleEpoch` e preservação da última geração após release
+- `pkg/ycluster` agora só resolve ownership a partir de lease ativa e válida; placement sozinho não classifica mais owner local/remoto
 - `pkg/ynodeproto` agora expõe o framing binário versionado do protocolo inter-node com `Header`, `Frame`, `MessageType`, `Encode/DecodeFrame` e decode por prefixo
 - `pkg/storage/memory` e `pkg/storage/postgres` já implementam stores operacionais de snapshots com persistência canônica em V1
 - `pkg/storage/memory` e `pkg/storage/postgres` agora também já implementam `DistributedStore` com update log, placement e lease
@@ -82,9 +84,9 @@ A próxima fase aberta no roadmap é a **Meta técnica 10 / Fase 4**, que introd
 
 ### Corte provável do próximo epoch
 
-- formalizar ownership autoritativo por `DocumentKey`/room/shard com lease/epoch/fencing consistente entre `pkg/storage` e `pkg/ycluster`;
 - ligar `pkg/ynodeproto` ao forwarding real entre edge e owner via um forwarder concreto plugado em `yhttp.OwnerAwareServerConfig.OnRemoteOwner`, cobrindo open/sync/update/awareness em caminho remoto;
 - estender o wire inter-node com `clientID` no handshake e mensagens roteadas de `query-awareness` e `close/disconnect`, para espelhar o runtime já existente do provider local;
+- propagar `epoch`/fencing para o caminho autoritativo de `apply`, append log, persistência e respostas de handoff/cutover, para além do lifecycle de lease já endurecido;
 - fechar failover/handoff do owner em cima do bootstrap já implementado por `snapshot + update log`.
 
 ---
@@ -194,8 +196,8 @@ Nesta etapa, a aceitação é:
 - [x] Expor adapters storage-backed em `pkg/ycluster` para lookup de owner e lease em cima de `pkg/storage`
 - [x] Expor framing binário inicial do protocolo inter-node em `pkg/ynodeproto`, separado do wire `y-protocols` de cliente
 - [x] Endurecer o lifecycle básico de lease em `pkg/ycluster` com `epoch` monotônico no acquire/renew/takeover e propagação desse epoch na resolução de owner
-- [ ] Formalizar `DocumentKey`/room/shard como unidade de ownership, lease e roteamento
-- [ ] Garantir owner único por documento/shard com lease renovável, expiração detectável e revogação observável
+- [x] Formalizar `DocumentKey`/room/shard como unidade de ownership, lease e roteamento
+- [x] Garantir owner único por documento/shard com lease renovável, expiração detectável e revogação observável
 - [ ] Introduzir `epoch` monotônico e fencing token em toda operação autoritativa (`apply`, persistência, append log, handoff e recovery)
 - [x] Materializar `snapshot + update log` como fonte de hidratação, replay e recuperação do runtime local do owner sobre os contratos já expostos em `pkg/storage`, com bootstrap do provider a partir de snapshot base + tail do log
 - [ ] Persistir snapshot base e update log append-only por epoch, com replay determinístico e checkpoint/compaction planejados

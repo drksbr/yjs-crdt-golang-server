@@ -18,6 +18,7 @@ type Store struct {
 	updateNext map[storage.DocumentKey]storage.UpdateOffset
 	placements map[storage.DocumentKey]*storage.PlacementRecord
 	leases     map[storage.ShardID]*storage.LeaseRecord
+	leaseLast  map[storage.ShardID]uint64
 }
 
 var _ storage.SnapshotStore = (*Store)(nil)
@@ -30,6 +31,7 @@ func New() *Store {
 		updateNext: make(map[storage.DocumentKey]storage.UpdateOffset),
 		placements: make(map[storage.DocumentKey]*storage.PlacementRecord),
 		leases:     make(map[storage.ShardID]*storage.LeaseRecord),
+		leaseLast:  make(map[storage.ShardID]uint64),
 		now:        func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -100,6 +102,9 @@ func (s *Store) ensureStoreInitializedLocked() {
 	}
 	if s.leases == nil {
 		s.leases = make(map[storage.ShardID]*storage.LeaseRecord)
+	}
+	if s.leaseLast == nil {
+		s.leaseLast = make(map[storage.ShardID]uint64)
 	}
 	if s.now == nil {
 		s.now = func() time.Time { return time.Now().UTC() }

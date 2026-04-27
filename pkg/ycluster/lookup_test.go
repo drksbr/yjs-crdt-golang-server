@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"yjs-go-bridge/pkg/storage"
 )
@@ -78,12 +79,25 @@ func TestPlacementOwnerLookupLookupOwner(t *testing.T) {
 			if incoming != shardID {
 				t.Fatalf("LoadPlacement() shard = %v, want %v", incoming, shardID)
 			}
-			return &Placement{ShardID: shardID, NodeID: "node-a", Version: 3}, nil
+			return &Placement{
+				ShardID: shardID,
+				NodeID:  "node-a",
+				Lease: &Lease{
+					ShardID:    shardID,
+					Holder:     "node-a",
+					Epoch:      4,
+					Token:      "lease-node-a",
+					AcquiredAt: time.Unix(100, 0).UTC(),
+					ExpiresAt:  time.Unix(130, 0).UTC(),
+				},
+				Version: 3,
+			}, nil
 		},
 	})
 	if err != nil {
 		t.Fatalf("NewPlacementOwnerLookup() unexpected error: %v", err)
 	}
+	lookup.now = func() time.Time { return time.Unix(110, 0).UTC() }
 
 	resolution, err := lookup.LookupOwner(nil, OwnerLookupRequest{DocumentKey: key})
 	if err != nil {
@@ -97,6 +111,9 @@ func TestPlacementOwnerLookupLookupOwner(t *testing.T) {
 	}
 	if resolution.Placement.NodeID != "node-a" {
 		t.Fatalf("LookupOwner().Placement.NodeID = %q, want %q", resolution.Placement.NodeID, "node-a")
+	}
+	if resolution.Placement.Lease == nil || resolution.Placement.Lease.Epoch != 4 {
+		t.Fatalf("LookupOwner().Placement.Lease = %#v, want epoch 4", resolution.Placement.Lease)
 	}
 }
 
@@ -125,6 +142,18 @@ func TestPlacementOwnerLookupLookupOwnerErrors(t *testing.T) {
 		t.Fatalf("LookupOwner() error = %v, want %v", err, ErrPlacementNotFound)
 	}
 
+	missingLeaseLookup, err := NewPlacementOwnerLookup("node-a", resolver, placementStoreStub{
+		loadPlacement: func(context.Context, ShardID) (*Placement, error) {
+			return &Placement{ShardID: shardID, NodeID: "node-a", Version: 1}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPlacementOwnerLookup() unexpected error: %v", err)
+	}
+	if _, err := missingLeaseLookup.LookupOwner(context.Background(), OwnerLookupRequest{DocumentKey: key}); !errors.Is(err, ErrOwnerNotFound) {
+		t.Fatalf("LookupOwner() missing lease error = %v, want %v", err, ErrOwnerNotFound)
+	}
+
 	mismatchLookup, err := NewPlacementOwnerLookup("node-a", resolver, placementStoreStub{
 		loadPlacement: func(context.Context, ShardID) (*Placement, error) {
 			return &Placement{ShardID: shardID + 1, NodeID: "node-b", Version: 1}, nil
@@ -135,6 +164,54 @@ func TestPlacementOwnerLookupLookupOwnerErrors(t *testing.T) {
 	}
 	if _, err := mismatchLookup.LookupOwner(context.Background(), OwnerLookupRequest{DocumentKey: key}); !errors.Is(err, ErrInvalidPlacement) {
 		t.Fatalf("LookupOwner() mismatch error = %v, want %v", err, ErrInvalidPlacement)
+	}
+
+	invalidLeaseLookup, err := NewPlacementOwnerLookup("node-a", resolver, placementStoreStub{
+		loadPlacement: func(context.Context, ShardID) (*Placement, error) {
+			return &Placement{
+				ShardID: shardID,
+				NodeID:  "node-a",
+				Lease: &Lease{
+					ShardID:    shardID,
+					Holder:     "node-a",
+					Token:      "lease-node-a",
+					AcquiredAt: time.Unix(100, 0).UTC(),
+					ExpiresAt:  time.Unix(130, 0).UTC(),
+				},
+				Version: 1,
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPlacementOwnerLookup() unexpected error: %v", err)
+	}
+	if _, err := invalidLeaseLookup.LookupOwner(context.Background(), OwnerLookupRequest{DocumentKey: key}); !errors.Is(err, ErrInvalidPlacement) {
+		t.Fatalf("LookupOwner() invalid lease error = %v, want %v", err, ErrInvalidPlacement)
+	}
+
+	expiredLeaseLookup, err := NewPlacementOwnerLookup("node-a", resolver, placementStoreStub{
+		loadPlacement: func(context.Context, ShardID) (*Placement, error) {
+			return &Placement{
+				ShardID: shardID,
+				NodeID:  "node-a",
+				Lease: &Lease{
+					ShardID:    shardID,
+					Holder:     "node-a",
+					Epoch:      2,
+					Token:      "lease-node-a",
+					AcquiredAt: time.Unix(100, 0).UTC(),
+					ExpiresAt:  time.Unix(130, 0).UTC(),
+				},
+				Version: 1,
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPlacementOwnerLookup() unexpected error: %v", err)
+	}
+	expiredLeaseLookup.now = func() time.Time { return time.Unix(131, 0).UTC() }
+	if _, err := expiredLeaseLookup.LookupOwner(context.Background(), OwnerLookupRequest{DocumentKey: key}); !errors.Is(err, ErrLeaseExpired) {
+		t.Fatalf("LookupOwner() expired lease error = %v, want %v", err, ErrLeaseExpired)
 	}
 
 	if _, err := lookup.LookupOwner(context.Background(), OwnerLookupRequest{}); !errors.Is(err, ErrInvalidOwnerLookupRequest) {

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"yjs-go-bridge/pkg/storage"
 )
 
@@ -238,12 +240,58 @@ func (s *Store) SaveLease(ctx context.Context, lease storage.LeaseRecord) (*stor
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	now := time.Now().UTC()
+	if lease.AcquiredAt.IsZero() {
+		lease.AcquiredAt = now
+	}
 	if err := lease.Validate(); err != nil {
 		return nil, err
 	}
+	opTime := lease.AcquiredAt
 	pool, err := s.requirePool()
 	if err != nil {
 		return nil, err
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+
+	if err := s.ensureLeaseGenerationLockTx(ctx, tx, lease.ShardID); err != nil {
+		return nil, err
+	}
+
+	current, lastEpoch, err := s.loadLeaseStateTx(ctx, tx, lease.ShardID)
+	if err != nil {
+		return nil, err
+	}
+
+	switch {
+	case current == nil:
+		if lastEpoch > 0 && lease.Owner.Epoch <= lastEpoch {
+			return nil, fmt.Errorf("%w: shard %s current=%d incoming=%d", storage.ErrLeaseStaleEpoch, lease.ShardID, lastEpoch, lease.Owner.Epoch)
+		}
+	case sameLeaseRecord(current, &lease):
+		// renew/update of the same active generation keeps the original start time.
+		lease.AcquiredAt = current.AcquiredAt
+		acquiredAt := normalizeTime(lease.AcquiredAt)
+		opTime = acquiredAt
+	case current.ExpiresAt.After(opTime):
+		if lease.Owner.Epoch <= current.Owner.Epoch {
+			return nil, fmt.Errorf("%w: shard %s current=%d incoming=%d", storage.ErrLeaseStaleEpoch, lease.ShardID, current.Owner.Epoch, lease.Owner.Epoch)
+		}
+		return nil, fmt.Errorf("%w: shard %s token %q", storage.ErrLeaseConflict, lease.ShardID, current.Token)
+	default:
+		if lastEpoch < current.Owner.Epoch {
+			lastEpoch = current.Owner.Epoch
+		}
+		if lease.Owner.Epoch <= lastEpoch {
+			return nil, fmt.Errorf("%w: shard %s current=%d incoming=%d", storage.ErrLeaseStaleEpoch, lease.ShardID, lastEpoch, lease.Owner.Epoch)
+		}
 	}
 
 	epoch, err := uint64ToInt64("owner epoch", lease.Owner.Epoch)
@@ -263,12 +311,18 @@ RETURNING owner_epoch, acquired_at, expires_at
 	var storedEpoch int64
 	var storedAcquiredAt time.Time
 	var storedExpiresAt time.Time
-	if err := pool.QueryRow(ctx, query, lease.ShardID, lease.Owner.NodeID, epoch, lease.Token, acquiredAt, lease.ExpiresAt).Scan(&storedEpoch, &storedAcquiredAt, &storedExpiresAt); err != nil {
+	if err := tx.QueryRow(ctx, query, lease.ShardID, lease.Owner.NodeID, epoch, lease.Token, acquiredAt, lease.ExpiresAt).Scan(&storedEpoch, &storedAcquiredAt, &storedExpiresAt); err != nil {
 		return nil, err
 	}
 
 	normalizedEpoch, err := int64ToUint64("owner epoch", storedEpoch)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.upsertLeaseGenerationTx(ctx, tx, lease.ShardID, normalizedEpoch); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 
@@ -346,15 +400,34 @@ func (s *Store) ReleaseLease(ctx context.Context, shardID storage.ShardID, token
 		return err
 	}
 
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+
+	current, _, err := s.loadLeaseStateTx(ctx, tx, shardID)
+	if err != nil {
+		return err
+	}
+	if current == nil || current.Token != token {
+		return storage.ErrLeaseNotFound
+	}
+	if err := s.upsertLeaseGenerationTx(ctx, tx, shardID, current.Owner.Epoch); err != nil {
+		return err
+	}
+
 	query := fmt.Sprintf(`DELETE FROM %s.shard_leases WHERE shard_id = $1 AND token = $2`, quoteIdentifier(s.schema))
-	tag, err := pool.Exec(ctx, query, shardID, token)
+	tag, err := tx.Exec(ctx, query, shardID, token)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
 		return storage.ErrLeaseNotFound
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func normalizeTime(ts time.Time) time.Time {
@@ -362,6 +435,100 @@ func normalizeTime(ts time.Time) time.Time {
 		return time.Now().UTC()
 	}
 	return ts.UTC()
+}
+
+func (s *Store) loadLeaseStateTx(ctx context.Context, tx pgx.Tx, shardID storage.ShardID) (*storage.LeaseRecord, uint64, error) {
+	generationQuery := fmt.Sprintf(`
+SELECT last_epoch
+FROM %s.shard_lease_generations
+WHERE shard_id = $1
+FOR UPDATE
+`, quoteIdentifier(s.schema))
+
+	var lastEpochInt int64
+	err := tx.QueryRow(ctx, generationQuery, shardID).Scan(&lastEpochInt)
+	lastEpoch := uint64(0)
+	switch {
+	case err == nil:
+		lastEpoch, err = int64ToUint64("lease generation", lastEpochInt)
+		if err != nil {
+			return nil, 0, err
+		}
+	case isNoRows(err):
+		err = nil
+	default:
+		return nil, 0, err
+	}
+
+	leaseQuery := fmt.Sprintf(`
+SELECT owner_node_id, owner_epoch, token, acquired_at, expires_at
+FROM %s.shard_leases
+WHERE shard_id = $1
+FOR UPDATE
+`, quoteIdentifier(s.schema))
+
+	var nodeID string
+	var epoch int64
+	var token string
+	var acquiredAt time.Time
+	var expiresAt time.Time
+	err = tx.QueryRow(ctx, leaseQuery, shardID).Scan(&nodeID, &epoch, &token, &acquiredAt, &expiresAt)
+	switch {
+	case isNoRows(err):
+		return nil, lastEpoch, nil
+	case err != nil:
+		return nil, 0, err
+	}
+
+	normalizedEpoch, err := int64ToUint64("owner epoch", epoch)
+	if err != nil {
+		return nil, 0, err
+	}
+	return &storage.LeaseRecord{
+		ShardID: shardID,
+		Owner: storage.OwnerInfo{
+			NodeID: storage.NodeID(nodeID),
+			Epoch:  normalizedEpoch,
+		},
+		Token:      token,
+		AcquiredAt: acquiredAt,
+		ExpiresAt:  expiresAt,
+	}, lastEpoch, nil
+}
+
+func (s *Store) ensureLeaseGenerationLockTx(ctx context.Context, tx pgx.Tx, shardID storage.ShardID) error {
+	query := fmt.Sprintf(`
+INSERT INTO %s.shard_lease_generations(shard_id, last_epoch, updated_at)
+VALUES ($1, 0, now())
+ON CONFLICT (shard_id)
+DO NOTHING
+`, quoteIdentifier(s.schema))
+	_, err := tx.Exec(ctx, query, shardID)
+	return err
+}
+
+func (s *Store) upsertLeaseGenerationTx(ctx context.Context, tx pgx.Tx, shardID storage.ShardID, epoch uint64) error {
+	epochInt, err := uint64ToInt64("lease generation", epoch)
+	if err != nil {
+		return err
+	}
+	query := fmt.Sprintf(`
+INSERT INTO %s.shard_lease_generations(shard_id, last_epoch, updated_at)
+VALUES ($1, $2, now())
+ON CONFLICT (shard_id)
+DO UPDATE SET last_epoch = GREATEST(%s.shard_lease_generations.last_epoch, EXCLUDED.last_epoch), updated_at = now()
+`, quoteIdentifier(s.schema), quoteIdentifier(s.schema))
+	_, err = tx.Exec(ctx, query, shardID, epochInt)
+	return err
+}
+
+func sameLeaseRecord(current, next *storage.LeaseRecord) bool {
+	if current == nil || next == nil {
+		return false
+	}
+	return current.ShardID == next.ShardID &&
+		current.Owner == next.Owner &&
+		current.Token == next.Token
 }
 
 func offsetToInt64(offset storage.UpdateOffset) (int64, error) {

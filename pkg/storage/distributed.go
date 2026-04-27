@@ -103,8 +103,8 @@ func (r *PlacementRecord) Clone() *PlacementRecord {
 
 // OwnerInfo descreve a identidade estável de quem detém uma lease.
 //
-// Epoch é opcional e permite distinguir reincarnações do mesmo nó quando a
-// camada de coordenação expõe uma geração monotônica.
+// Epoch é obrigatório e representa a geração monotônica do owner para aquele
+// shard. Ele funciona como base de fencing entre renew, release e takeover.
 type OwnerInfo struct {
 	NodeID NodeID
 	Epoch  uint64
@@ -115,6 +115,9 @@ func (o OwnerInfo) Validate() error {
 	if err := o.NodeID.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidOwnerInfo, err)
 	}
+	if o.Epoch == 0 {
+		return fmt.Errorf("%w: epoch obrigatorio", ErrInvalidOwnerInfo)
+	}
 	return nil
 }
 
@@ -122,6 +125,11 @@ func (o OwnerInfo) Validate() error {
 //
 // Token é opaco para o pacote e deve ser reutilizado por quem salvar ou liberar
 // a lease para permitir semânticas de fencing e renovação na implementação.
+//
+// O contrato esperado é:
+// - renew reaproveita `Owner.Epoch` e `Token`;
+// - takeover usa epoch estritamente maior que a geração anterior;
+// - implementações devem rejeitar `SaveLease` conflitante ou com epoch obsoleto.
 type LeaseRecord struct {
 	ShardID    ShardID
 	Owner      OwnerInfo
@@ -197,10 +205,11 @@ type PlacementStore interface {
 
 // LeaseStore define o contrato de ownership temporário por shard.
 type LeaseStore interface {
-	// SaveLease grava ou renova a lease informada para o shard.
+	// SaveLease grava, renova ou substitui a lease informada para o shard.
 	//
 	// Implementações podem normalizar Token, AcquiredAt e ExpiresAt antes de
-	// retornar o registro persistido.
+	// retornar o registro persistido, mas devem rejeitar renew/takeover com
+	// epoch obsoleto ou token conflitante.
 	SaveLease(ctx context.Context, lease LeaseRecord) (*LeaseRecord, error)
 
 	// LoadLease recupera a lease atual do shard.
@@ -208,7 +217,10 @@ type LeaseStore interface {
 	// Retorna ErrLeaseNotFound quando não houver ownership persistido.
 	LoadLease(ctx context.Context, shardID ShardID) (*LeaseRecord, error)
 
-	// ReleaseLease remove explicitamente a lease do shard identificada pelo token.
+	// ReleaseLease remove explicitamente a lease ativa do shard identificada pelo token.
+	//
+	// Implementações devem preservar a última geração (`Owner.Epoch`) do shard
+	// para que um acquire posterior continue monotônico.
 	ReleaseLease(ctx context.Context, shardID ShardID, token string) error
 }
 

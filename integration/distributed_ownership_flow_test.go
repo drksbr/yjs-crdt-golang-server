@@ -54,6 +54,7 @@ func TestDistributedOwnerFailoverRecoversSnapshotTailAndEpoch(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
+	leaseExpiry := now.Add(750 * time.Millisecond)
 	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
 		ShardID: ycluster.StorageShardID(shardID),
 		Owner: storage.OwnerInfo{
@@ -62,7 +63,7 @@ func TestDistributedOwnerFailoverRecoversSnapshotTailAndEpoch(t *testing.T) {
 		},
 		Token:      "lease-node-a-epoch-1",
 		AcquiredAt: now.Add(-15 * time.Second),
-		ExpiresAt:  now.Add(2 * time.Minute),
+		ExpiresAt:  leaseExpiry,
 	}); err != nil {
 		t.Fatalf("SaveLease(node-a active) unexpected error: %v", err)
 	}
@@ -124,17 +125,9 @@ func TestDistributedOwnerFailoverRecoversSnapshotTailAndEpoch(t *testing.T) {
 		t.Fatalf("ownerAConn.Close() unexpected error: %v", err)
 	}
 
-	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
-		ShardID: ycluster.StorageShardID(shardID),
-		Owner: storage.OwnerInfo{
-			NodeID: ycluster.StorageNodeID("node-a"),
-			Epoch:  1,
-		},
-		Token:      "lease-node-a-epoch-1",
-		AcquiredAt: now.Add(-5 * time.Minute),
-		ExpiresAt:  now.Add(-time.Minute),
-	}); err != nil {
-		t.Fatalf("SaveLease(node-a expired) unexpected error: %v", err)
+	wait := time.Until(leaseExpiry) + 20*time.Millisecond
+	if wait > 0 {
+		time.Sleep(wait)
 	}
 	if _, err := nodeALookup.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key}); !errors.Is(err, ycluster.ErrLeaseExpired) {
 		t.Fatalf("LookupOwner(node-a expired) error = %v, want %v", err, ycluster.ErrLeaseExpired)

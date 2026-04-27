@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -145,7 +146,12 @@ func TestOwnerInfoValidate(t *testing.T) {
 		},
 		{
 			name:    "invalid_node",
-			owner:   OwnerInfo{},
+			owner:   OwnerInfo{Epoch: 1},
+			wantErr: ErrInvalidOwnerInfo,
+		},
+		{
+			name:    "invalid_epoch",
+			owner:   OwnerInfo{NodeID: NodeID("node-a")},
 			wantErr: ErrInvalidOwnerInfo,
 		},
 	}
@@ -230,6 +236,38 @@ func TestUpdateLogRecordValidateAndClone(t *testing.T) {
 
 	if got := (*UpdateLogRecord)(nil).Clone(); got != nil {
 		t.Fatalf("(*UpdateLogRecord)(nil).Clone() = %#v, want nil", got)
+	}
+}
+
+func TestLeaseStoreErrorSentinels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		err     error
+		wantErr error
+	}{
+		{
+			name:    "conflict",
+			err:     fmt.Errorf("%w: shard %s token %q", ErrLeaseConflict, ShardID("shard-a"), "lease-token"),
+			wantErr: ErrLeaseConflict,
+		},
+		{
+			name:    "stale_epoch",
+			err:     fmt.Errorf("%w: shard %s current=8 incoming=7", ErrLeaseStaleEpoch, ShardID("shard-a")),
+			wantErr: ErrLeaseStaleEpoch,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if !errors.Is(tt.err, tt.wantErr) {
+				t.Fatalf("errors.Is(%v, %v) = false, want true", tt.err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -327,7 +365,7 @@ func TestLeaseRecordValidateAndClone(t *testing.T) {
 		{
 			name: "invalid_shard",
 			record: LeaseRecord{
-				Owner:     OwnerInfo{NodeID: NodeID("node-a")},
+				Owner:     OwnerInfo{NodeID: NodeID("node-a"), Epoch: 1},
 				Token:     "lease-token",
 				ExpiresAt: baseTime.Add(time.Second),
 			},
@@ -337,6 +375,7 @@ func TestLeaseRecordValidateAndClone(t *testing.T) {
 			name: "invalid_owner",
 			record: LeaseRecord{
 				ShardID:   ShardID("shard-a"),
+				Owner:     OwnerInfo{NodeID: NodeID("node-a")},
 				Token:     "lease-token",
 				ExpiresAt: baseTime.Add(time.Second),
 			},
@@ -346,7 +385,7 @@ func TestLeaseRecordValidateAndClone(t *testing.T) {
 			name: "missing_token",
 			record: LeaseRecord{
 				ShardID:   ShardID("shard-a"),
-				Owner:     OwnerInfo{NodeID: NodeID("node-a")},
+				Owner:     OwnerInfo{NodeID: NodeID("node-a"), Epoch: 1},
 				ExpiresAt: baseTime.Add(time.Second),
 			},
 			wantErr: ErrInvalidLeaseToken,
@@ -355,7 +394,7 @@ func TestLeaseRecordValidateAndClone(t *testing.T) {
 			name: "missing_expiry",
 			record: LeaseRecord{
 				ShardID: ShardID("shard-a"),
-				Owner:   OwnerInfo{NodeID: NodeID("node-a")},
+				Owner:   OwnerInfo{NodeID: NodeID("node-a"), Epoch: 1},
 				Token:   "lease-token",
 			},
 			wantErr: ErrInvalidLeaseExpiry,
@@ -364,7 +403,7 @@ func TestLeaseRecordValidateAndClone(t *testing.T) {
 			name: "expiry_not_after_acquire",
 			record: LeaseRecord{
 				ShardID:    ShardID("shard-a"),
-				Owner:      OwnerInfo{NodeID: NodeID("node-a")},
+				Owner:      OwnerInfo{NodeID: NodeID("node-a"), Epoch: 1},
 				Token:      "lease-token",
 				AcquiredAt: baseTime,
 				ExpiresAt:  baseTime,

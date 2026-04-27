@@ -169,7 +169,7 @@ func TestClusterControlPlaneTracksStorageBackedOwnerHandoff(t *testing.T) {
 	acquiredA, err := leases.AcquireLease(ctx, ycluster.LeaseRequest{
 		ShardID: shardID,
 		Holder:  "node-a",
-		TTL:     2 * time.Minute,
+		TTL:     750 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("AcquireLease(node-a) unexpected error: %v", err)
@@ -197,17 +197,9 @@ func TestClusterControlPlaneTracksStorageBackedOwnerHandoff(t *testing.T) {
 		t.Fatal("LookupOwner(node-b).Local = true, want false")
 	}
 
-	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
-		ShardID: ycluster.StorageShardID(shardID),
-		Owner: storage.OwnerInfo{
-			NodeID: ycluster.StorageNodeID("node-a"),
-			Epoch:  acquiredA.Epoch,
-		},
-		Token:      acquiredA.Token,
-		AcquiredAt: time.Now().UTC().Add(-2 * time.Minute),
-		ExpiresAt:  time.Now().UTC().Add(-time.Minute),
-	}); err != nil {
-		t.Fatalf("SaveLease(node-a expired) unexpected error: %v", err)
+	wait := time.Until(acquiredA.ExpiresAt) + 20*time.Millisecond
+	if wait > 0 {
+		time.Sleep(wait)
 	}
 	if _, err := nodeALookup.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key}); !errors.Is(err, ycluster.ErrLeaseExpired) {
 		t.Fatalf("LookupOwner(node-a after expiry) error = %v, want %v", err, ycluster.ErrLeaseExpired)

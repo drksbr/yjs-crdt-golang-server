@@ -182,17 +182,74 @@ func (s *Store) SaveLease(ctx context.Context, lease storage.LeaseRecord) (*stor
 	}
 
 	record := lease.Clone()
+	now := s.nowTime()
 	if record.AcquiredAt.IsZero() {
-		record.AcquiredAt = s.nowTime()
+		record.AcquiredAt = now
 	}
 	if err := record.Validate(); err != nil {
 		return nil, err
 	}
+	opTime := record.AcquiredAt
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.ensureStoreInitializedLocked()
+	current := s.leases[record.ShardID]
+	lastEpoch := s.leaseLast[record.ShardID]
+
+	switch {
+	case current == nil:
+		if record.Owner.Epoch <= lastEpoch {
+			return nil, fmt.Errorf(
+				"%w: shard %s current=%d incoming=%d",
+				storage.ErrLeaseStaleEpoch,
+				record.ShardID,
+				lastEpoch,
+				record.Owner.Epoch,
+			)
+		}
+	case sameLeaseRecord(current, record):
+		// Renewals keep the original generation start time.
+		record.AcquiredAt = current.AcquiredAt
+	case current.ExpiresAt.After(opTime):
+		if record.Owner.Epoch <= current.Owner.Epoch {
+			return nil, fmt.Errorf(
+				"%w: shard %s current=%d incoming=%d",
+				storage.ErrLeaseStaleEpoch,
+				record.ShardID,
+				current.Owner.Epoch,
+				record.Owner.Epoch,
+			)
+		}
+		return nil, fmt.Errorf(
+			"%w: shard %s token %q",
+			storage.ErrLeaseConflict,
+			record.ShardID,
+			current.Token,
+		)
+	default:
+		if record.Owner.Epoch <= current.Owner.Epoch || record.Owner.Epoch <= lastEpoch {
+			currentEpoch := current.Owner.Epoch
+			if lastEpoch > currentEpoch {
+				currentEpoch = lastEpoch
+			}
+			return nil, fmt.Errorf(
+				"%w: shard %s current=%d incoming=%d",
+				storage.ErrLeaseStaleEpoch,
+				record.ShardID,
+				currentEpoch,
+				record.Owner.Epoch,
+			)
+		}
+	}
+	if !record.ExpiresAt.After(record.AcquiredAt) {
+		return nil, fmt.Errorf("%w: expiresAt deve ser apos acquiredAt", storage.ErrInvalidLeaseExpiry)
+	}
+
+	if record.Owner.Epoch > lastEpoch {
+		s.leaseLast[record.ShardID] = record.Owner.Epoch
+	}
 	s.leases[record.ShardID] = record
 	return record.Clone(), nil
 }
@@ -237,13 +294,26 @@ func (s *Store) ReleaseLease(ctx context.Context, shardID storage.ShardID, token
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.ensureStoreInitializedLocked()
 	record, ok := s.leases[shardID]
 	if !ok || record.Token != token {
 		return storage.ErrLeaseNotFound
 	}
 
+	if record.Owner.Epoch > s.leaseLast[shardID] {
+		s.leaseLast[shardID] = record.Owner.Epoch
+	}
 	delete(s.leases, shardID)
 	return nil
+}
+
+func sameLeaseRecord(current, next *storage.LeaseRecord) bool {
+	if current == nil || next == nil {
+		return false
+	}
+	return current.ShardID == next.ShardID &&
+		current.Owner == next.Owner &&
+		current.Token == next.Token
 }
 
 func validateLeaseToken(token string) error {
