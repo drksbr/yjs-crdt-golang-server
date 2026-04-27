@@ -73,29 +73,50 @@ func TestHTTPServerInvokesMetricsHooks(t *testing.T) {
 }
 
 type recordingMetrics struct {
-	mu           sync.Mutex
-	opened       int
-	closed       int
-	frameReads   int
-	frameWrites  map[string]int
-	handleCalls  int
-	persistCalls int
-	errorStages  []string
+	mu                          sync.Mutex
+	opened                      int
+	closed                      int
+	frameReads                  int
+	frameWrites                 map[string]int
+	handleCalls                 int
+	persistCalls                int
+	errorStages                 []string
+	ownerLookupResults          map[string]int
+	routeDecisions              map[string]int
+	remoteOwnerConnectionsOpen  map[string]int
+	remoteOwnerConnectionsClose map[string]int
+	remoteOwnerHandshakes       map[recordingRemoteOwnerHandshakeKey]int
+	remoteOwnerMessages         map[recordingRemoteOwnerMessageKey]int
+	remoteOwnerCloses           map[recordingRemoteOwnerCloseKey]int
 }
 
 type recordingMetricsSnapshot struct {
-	opened       int
-	closed       int
-	frameReads   int
-	frameWrites  map[string]int
-	handleCalls  int
-	persistCalls int
-	errorStages  []string
+	opened                      int
+	closed                      int
+	frameReads                  int
+	frameWrites                 map[string]int
+	handleCalls                 int
+	persistCalls                int
+	errorStages                 []string
+	ownerLookupResults          map[string]int
+	routeDecisions              map[string]int
+	remoteOwnerConnectionsOpen  map[string]int
+	remoteOwnerConnectionsClose map[string]int
+	remoteOwnerHandshakes       map[recordingRemoteOwnerHandshakeKey]int
+	remoteOwnerMessages         map[recordingRemoteOwnerMessageKey]int
+	remoteOwnerCloses           map[recordingRemoteOwnerCloseKey]int
 }
 
 func newRecordingMetrics() *recordingMetrics {
 	return &recordingMetrics{
-		frameWrites: make(map[string]int),
+		frameWrites:                 make(map[string]int),
+		ownerLookupResults:          make(map[string]int),
+		routeDecisions:              make(map[string]int),
+		remoteOwnerConnectionsOpen:  make(map[string]int),
+		remoteOwnerConnectionsClose: make(map[string]int),
+		remoteOwnerHandshakes:       make(map[recordingRemoteOwnerHandshakeKey]int),
+		remoteOwnerMessages:         make(map[recordingRemoteOwnerMessageKey]int),
+		remoteOwnerCloses:           make(map[recordingRemoteOwnerCloseKey]int),
 	}
 }
 
@@ -141,6 +162,58 @@ func (r *recordingMetrics) Error(_ Request, stage string, _ error) {
 	r.errorStages = append(r.errorStages, stage)
 }
 
+func (r *recordingMetrics) OwnerLookup(_ Request, _ time.Duration, result string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ownerLookupResults[result]++
+}
+
+func (r *recordingMetrics) RouteDecision(_ Request, decision string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.routeDecisions[decision]++
+}
+
+func (r *recordingMetrics) RemoteOwnerConnectionOpened(_ Request, role string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.remoteOwnerConnectionsOpen[role]++
+}
+
+func (r *recordingMetrics) RemoteOwnerConnectionClosed(_ Request, role string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.remoteOwnerConnectionsClose[role]++
+}
+
+func (r *recordingMetrics) RemoteOwnerHandshake(_ Request, role string, _ time.Duration, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.remoteOwnerHandshakes[recordingRemoteOwnerHandshakeKey{
+		role:   role,
+		result: recordingResultLabel(err),
+	}]++
+}
+
+func (r *recordingMetrics) RemoteOwnerMessage(_ Request, role string, direction string, kind string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.remoteOwnerMessages[recordingRemoteOwnerMessageKey{
+		role:      role,
+		direction: direction,
+		kind:      kind,
+	}]++
+}
+
+func (r *recordingMetrics) RemoteOwnerClose(_ Request, role string, reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.remoteOwnerCloses[recordingRemoteOwnerCloseKey{
+		role:   role,
+		reason: reason,
+	}]++
+}
+
 func (r *recordingMetrics) snapshot() recordingMetricsSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -149,19 +222,77 @@ func (r *recordingMetrics) snapshot() recordingMetricsSnapshot {
 	for kind, total := range r.frameWrites {
 		frameWrites[kind] = total
 	}
+	ownerLookupResults := make(map[string]int, len(r.ownerLookupResults))
+	for result, total := range r.ownerLookupResults {
+		ownerLookupResults[result] = total
+	}
+	routeDecisions := make(map[string]int, len(r.routeDecisions))
+	for decision, total := range r.routeDecisions {
+		routeDecisions[decision] = total
+	}
+	remoteOwnerConnectionsOpen := make(map[string]int, len(r.remoteOwnerConnectionsOpen))
+	for role, total := range r.remoteOwnerConnectionsOpen {
+		remoteOwnerConnectionsOpen[role] = total
+	}
+	remoteOwnerConnectionsClose := make(map[string]int, len(r.remoteOwnerConnectionsClose))
+	for role, total := range r.remoteOwnerConnectionsClose {
+		remoteOwnerConnectionsClose[role] = total
+	}
+	remoteOwnerHandshakes := make(map[recordingRemoteOwnerHandshakeKey]int, len(r.remoteOwnerHandshakes))
+	for key, total := range r.remoteOwnerHandshakes {
+		remoteOwnerHandshakes[key] = total
+	}
+	remoteOwnerMessages := make(map[recordingRemoteOwnerMessageKey]int, len(r.remoteOwnerMessages))
+	for key, total := range r.remoteOwnerMessages {
+		remoteOwnerMessages[key] = total
+	}
+	remoteOwnerCloses := make(map[recordingRemoteOwnerCloseKey]int, len(r.remoteOwnerCloses))
+	for key, total := range r.remoteOwnerCloses {
+		remoteOwnerCloses[key] = total
+	}
 
 	errorStages := make([]string, len(r.errorStages))
 	copy(errorStages, r.errorStages)
 
 	return recordingMetricsSnapshot{
-		opened:       r.opened,
-		closed:       r.closed,
-		frameReads:   r.frameReads,
-		frameWrites:  frameWrites,
-		handleCalls:  r.handleCalls,
-		persistCalls: r.persistCalls,
-		errorStages:  errorStages,
+		opened:                      r.opened,
+		closed:                      r.closed,
+		frameReads:                  r.frameReads,
+		frameWrites:                 frameWrites,
+		handleCalls:                 r.handleCalls,
+		persistCalls:                r.persistCalls,
+		errorStages:                 errorStages,
+		ownerLookupResults:          ownerLookupResults,
+		routeDecisions:              routeDecisions,
+		remoteOwnerConnectionsOpen:  remoteOwnerConnectionsOpen,
+		remoteOwnerConnectionsClose: remoteOwnerConnectionsClose,
+		remoteOwnerHandshakes:       remoteOwnerHandshakes,
+		remoteOwnerMessages:         remoteOwnerMessages,
+		remoteOwnerCloses:           remoteOwnerCloses,
 	}
+}
+
+type recordingRemoteOwnerHandshakeKey struct {
+	role   string
+	result string
+}
+
+type recordingRemoteOwnerMessageKey struct {
+	role      string
+	direction string
+	kind      string
+}
+
+type recordingRemoteOwnerCloseKey struct {
+	role   string
+	reason string
+}
+
+func recordingResultLabel(err error) string {
+	if err != nil {
+		return "error"
+	}
+	return "ok"
 }
 
 func newHTTPTestServerWithHandler(t *testing.T, handler http.Handler) *httptest.Server {
@@ -172,6 +303,20 @@ func newHTTPTestServerWithHandler(t *testing.T, handler http.Handler) *httptest.
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+func newLocalHTTPServerWithMetrics(t *testing.T, store storage.SnapshotStore, metrics Metrics) *Server {
+	t.Helper()
+
+	handler, err := NewServer(ServerConfig{
+		Provider:       yprotocol.NewProvider(yprotocol.ProviderConfig{Store: store}),
+		ResolveRequest: resolveTestRequest,
+		Metrics:        metrics,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() unexpected error: %v", err)
+	}
+	return handler
 }
 
 func testDocumentKey(documentID string) storage.DocumentKey {

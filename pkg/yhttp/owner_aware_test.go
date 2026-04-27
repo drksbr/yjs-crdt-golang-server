@@ -253,6 +253,127 @@ func TestOwnerAwareServerInvokesRemoteOwnerHook(t *testing.T) {
 	}
 }
 
+func TestOwnerAwareServerRecordsLookupAndRouteMetrics(t *testing.T) {
+	t.Parallel()
+
+	t.Run("local", func(t *testing.T) {
+		recorder := newRecordingMetrics()
+		local := newLocalHTTPServerWithMetrics(t, nil, recorder)
+		lookup := ownerLookupFunc(func(_ context.Context, req ycluster.OwnerLookupRequest) (*ycluster.OwnerResolution, error) {
+			return &ycluster.OwnerResolution{
+				DocumentKey: req.DocumentKey,
+				Placement: ycluster.Placement{
+					ShardID: 1,
+					NodeID:  "node-local-metrics",
+				},
+				Local: true,
+			}, nil
+		})
+
+		handler, err := NewOwnerAwareServer(OwnerAwareServerConfig{
+			Local:       local,
+			OwnerLookup: lookup,
+		})
+		if err != nil {
+			t.Fatalf("NewOwnerAwareServer() unexpected error: %v", err)
+		}
+
+		srv := newHTTPTestServerWithHandler(t, handler)
+		conn := dialWS(t, srv.URL+"/ws?doc=room-owner-local-metrics&client=711&conn=left")
+		if err := conn.Close(websocket.StatusNormalClosure, "done"); err != nil {
+			t.Fatalf("conn.Close() unexpected error: %v", err)
+		}
+
+		waitForCondition(t, 2*time.Second, func() bool {
+			snapshot := recorder.snapshot()
+			return snapshot.ownerLookupResults[ownerLookupResultLocal] == 1 &&
+				snapshot.routeDecisions[routeDecisionLocal] == 1
+		})
+	})
+
+	t.Run("remote metadata", func(t *testing.T) {
+		recorder := newRecordingMetrics()
+		local := newLocalHTTPServerWithMetrics(t, nil, recorder)
+		lookup := ownerLookupFunc(func(_ context.Context, req ycluster.OwnerLookupRequest) (*ycluster.OwnerResolution, error) {
+			return &ycluster.OwnerResolution{
+				DocumentKey: req.DocumentKey,
+				Placement: ycluster.Placement{
+					ShardID: 2,
+					NodeID:  "node-remote-metadata",
+				},
+				Local: false,
+			}, nil
+		})
+
+		handler, err := NewOwnerAwareServer(OwnerAwareServerConfig{
+			Local:       local,
+			OwnerLookup: lookup,
+		})
+		if err != nil {
+			t.Fatalf("NewOwnerAwareServer() unexpected error: %v", err)
+		}
+
+		srv := newHTTPTestServerWithHandler(t, handler)
+		resp, err := http.Get(srv.URL + "/ws?doc=room-owner-remote-metrics&client=712")
+		if err != nil {
+			t.Fatalf("http.Get() unexpected error: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("resp.StatusCode = %d, want %d", resp.StatusCode, http.StatusConflict)
+		}
+
+		waitForCondition(t, 2*time.Second, func() bool {
+			snapshot := recorder.snapshot()
+			return snapshot.ownerLookupResults[ownerLookupResultRemote] == 1 &&
+				snapshot.routeDecisions[routeDecisionRemoteHTTPMetadata] == 1
+		})
+	})
+
+	t.Run("remote hook http", func(t *testing.T) {
+		recorder := newRecordingMetrics()
+		local := newLocalHTTPServerWithMetrics(t, nil, recorder)
+		lookup := ownerLookupFunc(func(_ context.Context, req ycluster.OwnerLookupRequest) (*ycluster.OwnerResolution, error) {
+			return &ycluster.OwnerResolution{
+				DocumentKey: req.DocumentKey,
+				Placement: ycluster.Placement{
+					ShardID: 3,
+					NodeID:  "node-remote-hook-metrics",
+				},
+				Local: false,
+			}, nil
+		})
+
+		handler, err := NewOwnerAwareServer(OwnerAwareServerConfig{
+			Local:       local,
+			OwnerLookup: lookup,
+			OnRemoteOwner: func(w http.ResponseWriter, _ *http.Request, _ Request, _ ycluster.OwnerResolution) bool {
+				w.WriteHeader(http.StatusAccepted)
+				return true
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewOwnerAwareServer() unexpected error: %v", err)
+		}
+
+		srv := newHTTPTestServerWithHandler(t, handler)
+		resp, err := http.Get(srv.URL + "/ws?doc=room-owner-hook-metrics&client=713")
+		if err != nil {
+			t.Fatalf("http.Get() unexpected error: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("resp.StatusCode = %d, want %d", resp.StatusCode, http.StatusAccepted)
+		}
+
+		waitForCondition(t, 2*time.Second, func() bool {
+			snapshot := recorder.snapshot()
+			return snapshot.ownerLookupResults[ownerLookupResultRemote] == 1 &&
+				snapshot.routeDecisions[routeDecisionRemoteHTTPHandler] == 1
+		})
+	})
+}
+
 func TestOwnerAwareServerRemoteForwarderFallsBackToHTTPMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -466,6 +587,142 @@ func TestOwnerAwareServerRemoteForwarderBridgesWebSocketFrames(t *testing.T) {
 	case <-stream.closeCh:
 	case <-time.After(testIOTimeout):
 		t.Fatal("remote stream was not closed after client disconnect")
+	}
+}
+
+func TestOwnerAwareServerRemoteForwarderRecordsMetrics(t *testing.T) {
+	t.Parallel()
+
+	recorder := newRecordingMetrics()
+	local := newLocalHTTPServerWithMetrics(t, nil, recorder)
+	lookup := ownerLookupFunc(func(_ context.Context, req ycluster.OwnerLookupRequest) (*ycluster.OwnerResolution, error) {
+		return &ycluster.OwnerResolution{
+			DocumentKey: req.DocumentKey,
+			Placement: ycluster.Placement{
+				ShardID: 12,
+				NodeID:  "node-remote-metrics",
+				Lease: &ycluster.Lease{
+					ShardID: 12,
+					Holder:  "node-remote-metrics",
+					Epoch:   33,
+				},
+			},
+			Local: false,
+		}, nil
+	})
+
+	stream := newFakeRemoteOwnerStream()
+	dialer := &fakeRemoteOwnerDialer{
+		requests: make(chan RemoteOwnerDialRequest, 1),
+		stream:   stream,
+	}
+	forwardRemoteOwner, err := NewRemoteOwnerForwardHandler(RemoteOwnerForwardConfig{
+		LocalNodeID: "node-edge-metrics",
+		Dialer:      dialer,
+		Metrics:     recorder,
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteOwnerForwardHandler() unexpected error: %v", err)
+	}
+
+	handler, err := NewOwnerAwareServer(OwnerAwareServerConfig{
+		Local:         local,
+		OwnerLookup:   lookup,
+		OnRemoteOwner: forwardRemoteOwner,
+	})
+	if err != nil {
+		t.Fatalf("NewOwnerAwareServer() unexpected error: %v", err)
+	}
+
+	srv := newHTTPTestServerWithHandler(t, handler)
+	conn := dialWS(t, srv.URL+"/ws?doc=room-owner-forward-metrics&client=714&conn=edge-metrics")
+
+	select {
+	case <-dialer.requests:
+	case <-time.After(testIOTimeout):
+		t.Fatal("DialRemoteOwner() was not called")
+	}
+	if _, ok := readRemoteStreamMessage(t, stream).(*ynodeproto.Handshake); !ok {
+		t.Fatal("expected handshake to be forwarded to remote owner")
+	}
+
+	update := []byte{0x09, 0x08, 0x07}
+	writeBinary(t, conn, yprotocol.EncodeProtocolSyncUpdate(update))
+	if _, ok := readRemoteStreamMessage(t, stream).(*ynodeproto.DocumentUpdate); !ok {
+		t.Fatal("expected document update to be forwarded to remote owner")
+	}
+
+	stream.pushReceive(&ynodeproto.DocumentUpdate{
+		DocumentKey:  testDocumentKey("room-owner-forward-metrics"),
+		ConnectionID: "owner-metrics",
+		Epoch:        33,
+		UpdateV1:     []byte{0x05, 0x04},
+	})
+	_ = readBinary(t, conn)
+
+	if err := conn.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Fatalf("conn.Close() unexpected error: %v", err)
+	}
+	if _, ok := readRemoteStreamMessage(t, stream).(*ynodeproto.Disconnect); !ok {
+		t.Fatal("expected disconnect to be forwarded to remote owner")
+	}
+	select {
+	case <-stream.closeCh:
+	case <-time.After(testIOTimeout):
+		t.Fatal("remote stream was not closed after disconnect")
+	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		snapshot := recorder.snapshot()
+		return snapshot.routeDecisions[routeDecisionRemoteForwardWS] == 1 &&
+			snapshot.remoteOwnerConnectionsOpen[remoteOwnerMetricsRoleEdge] == 1 &&
+			snapshot.remoteOwnerConnectionsClose[remoteOwnerMetricsRoleEdge] == 1 &&
+			snapshot.remoteOwnerCloses[recordingRemoteOwnerCloseKey{
+				role:   remoteOwnerMetricsRoleEdge,
+				reason: "client_closed",
+			}] == 1
+	})
+
+	snapshot := recorder.snapshot()
+	if snapshot.ownerLookupResults[ownerLookupResultRemote] != 1 {
+		t.Fatalf("ownerLookupResults[remote] = %d, want 1", snapshot.ownerLookupResults[ownerLookupResultRemote])
+	}
+	if snapshot.remoteOwnerHandshakes[recordingRemoteOwnerHandshakeKey{
+		role:   remoteOwnerMetricsRoleEdge,
+		result: "ok",
+	}] != 1 {
+		t.Fatalf("remoteOwnerHandshakes[edge ok] = %d, want 1", snapshot.remoteOwnerHandshakes[recordingRemoteOwnerHandshakeKey{
+			role:   remoteOwnerMetricsRoleEdge,
+			result: "ok",
+		}])
+	}
+	if snapshot.remoteOwnerMessages[recordingRemoteOwnerMessageKey{
+		role:      remoteOwnerMetricsRoleEdge,
+		direction: remoteOwnerMetricsDirectionOut,
+		kind:      "handshake",
+	}] != 1 {
+		t.Fatal("missing edge handshake metric")
+	}
+	if snapshot.remoteOwnerMessages[recordingRemoteOwnerMessageKey{
+		role:      remoteOwnerMetricsRoleEdge,
+		direction: remoteOwnerMetricsDirectionOut,
+		kind:      "document_update",
+	}] != 1 {
+		t.Fatal("missing edge outbound document_update metric")
+	}
+	if snapshot.remoteOwnerMessages[recordingRemoteOwnerMessageKey{
+		role:      remoteOwnerMetricsRoleEdge,
+		direction: remoteOwnerMetricsDirectionIn,
+		kind:      "document_update",
+	}] != 1 {
+		t.Fatal("missing edge inbound document_update metric")
+	}
+	if snapshot.remoteOwnerMessages[recordingRemoteOwnerMessageKey{
+		role:      remoteOwnerMetricsRoleEdge,
+		direction: remoteOwnerMetricsDirectionOut,
+		kind:      "disconnect",
+	}] != 1 {
+		t.Fatal("missing edge disconnect metric")
 	}
 }
 

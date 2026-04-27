@@ -90,33 +90,48 @@ func (e *RemoteOwnerEndpoint) ServeStream(ctx context.Context, stream NodeMessag
 		ctx = context.Background()
 	}
 
+	handshakeStart := time.Now()
 	handshake, err := e.receiveHandshake(ctx, stream)
 	if err != nil {
+		observeRemoteOwnerHandshake(e.local.metrics, Request{}, remoteOwnerMetricsRoleOwner, time.Since(handshakeStart), err)
 		return err
 	}
 
 	req := requestFromHandshake(handshake)
+	observeRemoteOwnerMessage(e.local.metrics, req, remoteOwnerMetricsRoleOwner, remoteOwnerMetricsDirectionIn, nodeMessageMetricKind(handshake))
 	connection, err := e.local.provider.Open(ctx, req.DocumentKey, req.ConnectionID, req.ClientID)
 	if err != nil {
+		observeRemoteOwnerHandshake(e.local.metrics, req, remoteOwnerMetricsRoleOwner, time.Since(handshakeStart), err)
 		return err
 	}
 
 	closeClient := false
+	closeReason := "stream_closed"
+	remoteConnectionOpened := false
 	e.local.metrics.ConnectionOpened(req)
 	defer func() {
-		e.cleanupRemoteOwnerStream(req, handshake.Epoch, connection, stream, closeClient)
+		e.cleanupRemoteOwnerStream(req, handshake.Epoch, connection, stream, closeClient, remoteConnectionOpened, closeReason)
 	}()
 
 	if err := e.sendHandshakeAck(ctx, stream, handshake); err != nil {
+		observeRemoteOwnerHandshake(e.local.metrics, req, remoteOwnerMetricsRoleOwner, time.Since(handshakeStart), err)
 		closeClient = true
+		closeReason = "handshake_error"
 		return err
 	}
+	observeRemoteOwnerHandshake(e.local.metrics, req, remoteOwnerMetricsRoleOwner, time.Since(handshakeStart), nil)
+	observeRemoteOwnerConnectionOpened(e.local.metrics, req, remoteOwnerMetricsRoleOwner)
+	observeRemoteOwnerMessage(e.local.metrics, req, remoteOwnerMetricsRoleOwner, remoteOwnerMetricsDirectionOut, "handshake_ack")
+	remoteConnectionOpened = true
 
 	peer := e.local.registry.add(req.DocumentKey, req.ConnectionID, &remoteStreamPeer{
 		stream:       stream,
 		documentKey:  req.DocumentKey,
 		connectionID: req.ConnectionID,
 		epoch:        handshake.Epoch,
+		onDeliver: func(message ynodeproto.Message) {
+			observeRemoteOwnerMessage(e.local.metrics, req, remoteOwnerMetricsRoleOwner, remoteOwnerMetricsDirectionOut, nodeMessageMetricKind(message))
+		},
 	})
 	defer e.local.registry.remove(req.DocumentKey, req.ConnectionID)
 
@@ -124,18 +139,23 @@ func (e *RemoteOwnerEndpoint) ServeStream(ctx context.Context, stream NodeMessag
 		message, recvErr := stream.Receive(ctx)
 		if recvErr != nil {
 			if isIgnorableNodeStreamError(recvErr) {
+				closeReason = "stream_closed"
 				return nil
 			}
 			closeClient = true
+			closeReason = "stream_error"
 			return recvErr
 		}
+		observeRemoteOwnerMessage(e.local.metrics, req, remoteOwnerMetricsRoleOwner, remoteOwnerMetricsDirectionIn, nodeMessageMetricKind(message))
 
-		stop, handleErr := e.handleRemoteOwnerMessage(ctx, req, handshake.Epoch, connection, peer, stream, message)
+		stop, messageCloseReason, handleErr := e.handleRemoteOwnerMessage(ctx, req, handshake.Epoch, connection, peer, stream, message)
 		if handleErr != nil {
 			closeClient = true
+			closeReason = normalizeRemoteOwnerCloseReason(messageCloseReason, "handler_error")
 			return handleErr
 		}
 		if stop {
+			closeReason = normalizeRemoteOwnerCloseReason(messageCloseReason, "stream_closed")
 			return nil
 		}
 	}
@@ -196,35 +216,39 @@ func (e *RemoteOwnerEndpoint) handleRemoteOwnerMessage(
 	peer roomPeer,
 	stream NodeMessageStream,
 	message ynodeproto.Message,
-) (bool, error) {
+) (bool, string, error) {
 	switch message := message.(type) {
 	case *ynodeproto.Ping:
 		writeCtx, cancel := context.WithTimeout(ctx, e.local.writeTimeout)
 		defer cancel()
-		return false, stream.Send(writeCtx, &ynodeproto.Pong{Nonce: message.Nonce})
+		if err := stream.Send(writeCtx, &ynodeproto.Pong{Nonce: message.Nonce}); err != nil {
+			return false, "pong_error", err
+		}
+		observeRemoteOwnerMessage(e.local.metrics, req, remoteOwnerMetricsRoleOwner, remoteOwnerMetricsDirectionOut, "pong")
+		return false, "", nil
 	case *ynodeproto.Pong:
-		return false, nil
+		return false, "", nil
 	case *ynodeproto.Disconnect:
 		if err := validateRemoteOwnerRoute(req, epoch, message); err != nil {
-			return false, err
+			return false, "route_mismatch", err
 		}
-		return true, nil
+		return true, "disconnect", nil
 	case *ynodeproto.Close:
 		if err := validateRemoteOwnerRoute(req, epoch, message); err != nil {
-			return false, err
+			return false, "route_mismatch", err
 		}
-		return true, nil
+		return true, "close", nil
 	case *ynodeproto.Handshake, *ynodeproto.HandshakeAck:
-		return false, fmt.Errorf("yhttp: mensagem de handshake inesperada apos inicializacao: %T", message)
+		return false, "unexpected_handshake", fmt.Errorf("yhttp: mensagem de handshake inesperada apos inicializacao: %T", message)
 	}
 
 	if err := validateRemoteOwnerRoute(req, epoch, message); err != nil {
-		return false, err
+		return false, "route_mismatch", err
 	}
 
 	payload, err := ownerMessageToProtocolPayload(message)
 	if err != nil {
-		return false, err
+		return false, "decode_error", err
 	}
 	e.local.metrics.FrameRead(req, len(payload))
 
@@ -234,21 +258,21 @@ func (e *RemoteOwnerEndpoint) handleRemoteOwnerMessage(
 	if err != nil {
 		e.local.metrics.Error(req, "remote_owner_handle", err)
 		e.local.report(nil, req, err)
-		return false, err
+		return false, "handle_error", err
 	}
 
 	if len(result.Direct) > 0 {
 		if err := e.writeRemoteDirect(ctx, req, epoch, peer, stream, message, result.Direct); err != nil {
 			e.local.metrics.Error(req, "remote_owner_write_direct", err)
 			e.local.report(nil, req, err)
-			return false, err
+			return false, "write_direct_error", err
 		}
 		e.local.metrics.FrameWritten(req, "remote_owner_direct", len(result.Direct))
 	}
 	if len(result.Broadcast) > 0 {
 		e.local.fanout(nil, req, result.Broadcast)
 	}
-	return false, nil
+	return false, "", nil
 }
 
 func (e *RemoteOwnerEndpoint) writeRemoteDirect(
@@ -272,6 +296,7 @@ func (e *RemoteOwnerEndpoint) writeRemoteDirect(
 			if err != nil {
 				return err
 			}
+			observeRemoteOwnerMessage(e.local.metrics, req, remoteOwnerMetricsRoleOwner, remoteOwnerMetricsDirectionOut, nodeMessageMetricKind(direct))
 		}
 		return nil
 	}
@@ -284,8 +309,14 @@ func (e *RemoteOwnerEndpoint) cleanupRemoteOwnerStream(
 	connection *yprotocol.Connection,
 	stream NodeMessageStream,
 	closeClient bool,
+	remoteConnectionOpened bool,
+	closeReason string,
 ) {
 	defer e.local.metrics.ConnectionClosed(req)
+	if remoteConnectionOpened {
+		defer observeRemoteOwnerConnectionClosed(e.local.metrics, req, remoteOwnerMetricsRoleOwner)
+		defer observeRemoteOwnerClose(e.local.metrics, req, remoteOwnerMetricsRoleOwner, closeReason)
+	}
 
 	if closeClient {
 		e.sendRemoteOwnerClose(req, epoch, stream)
@@ -331,7 +362,16 @@ func (e *RemoteOwnerEndpoint) sendRemoteOwnerClose(req Request, epoch uint64, st
 	}); err != nil && !isIgnorableNodeStreamError(err) {
 		e.local.metrics.Error(req, "remote_owner_send_close", err)
 		e.local.report(nil, req, err)
+	} else if err == nil {
+		observeRemoteOwnerMessage(e.local.metrics, req, remoteOwnerMetricsRoleOwner, remoteOwnerMetricsDirectionOut, "close")
 	}
+}
+
+func normalizeRemoteOwnerCloseReason(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func validateRemoteOwnerRoute(req Request, epoch uint64, message ynodeproto.Message) error {

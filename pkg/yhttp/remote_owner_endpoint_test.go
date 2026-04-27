@@ -16,7 +16,8 @@ import (
 func TestRemoteOwnerEndpointSharesRoomWithLocalWebSocketPeers(t *testing.T) {
 	t.Parallel()
 
-	local := newLocalHTTPServer(t, nil)
+	recorder := newRecordingMetrics()
+	local := newLocalHTTPServerWithMetrics(t, nil, recorder)
 	endpoint, err := NewRemoteOwnerEndpoint(RemoteOwnerEndpointConfig{
 		Local:       local,
 		LocalNodeID: "node-owner",
@@ -169,6 +170,83 @@ func TestRemoteOwnerEndpointSharesRoomWithLocalWebSocketPeers(t *testing.T) {
 	case <-stream.closeCh:
 	case <-time.After(testIOTimeout):
 		t.Fatal("remote stream was not closed after disconnect")
+	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		snapshot := recorder.snapshot()
+		return snapshot.remoteOwnerConnectionsOpen[remoteOwnerMetricsRoleOwner] == 1 &&
+			snapshot.remoteOwnerConnectionsClose[remoteOwnerMetricsRoleOwner] == 1 &&
+			snapshot.remoteOwnerCloses[recordingRemoteOwnerCloseKey{
+				role:   remoteOwnerMetricsRoleOwner,
+				reason: "disconnect",
+			}] == 1
+	})
+
+	snapshot := recorder.snapshot()
+	if snapshot.remoteOwnerHandshakes[recordingRemoteOwnerHandshakeKey{
+		role:   remoteOwnerMetricsRoleOwner,
+		result: "ok",
+	}] != 1 {
+		t.Fatalf("remoteOwnerHandshakes[owner ok] = %d, want 1", snapshot.remoteOwnerHandshakes[recordingRemoteOwnerHandshakeKey{
+			role:   remoteOwnerMetricsRoleOwner,
+			result: "ok",
+		}])
+	}
+	if snapshot.remoteOwnerMessages[recordingRemoteOwnerMessageKey{
+		role:      remoteOwnerMetricsRoleOwner,
+		direction: remoteOwnerMetricsDirectionIn,
+		kind:      "handshake",
+	}] != 1 {
+		t.Fatal("missing owner inbound handshake metric")
+	}
+	if snapshot.remoteOwnerMessages[recordingRemoteOwnerMessageKey{
+		role:      remoteOwnerMetricsRoleOwner,
+		direction: remoteOwnerMetricsDirectionOut,
+		kind:      "handshake_ack",
+	}] != 1 {
+		t.Fatal("missing owner outbound handshake_ack metric")
+	}
+	if snapshot.remoteOwnerMessages[recordingRemoteOwnerMessageKey{
+		role:      remoteOwnerMetricsRoleOwner,
+		direction: remoteOwnerMetricsDirectionIn,
+		kind:      "document_update",
+	}] != 1 {
+		t.Fatal("missing owner inbound document_update metric")
+	}
+	if snapshot.remoteOwnerMessages[recordingRemoteOwnerMessageKey{
+		role:      remoteOwnerMetricsRoleOwner,
+		direction: remoteOwnerMetricsDirectionIn,
+		kind:      "awareness_update",
+	}] != 1 {
+		t.Fatal("missing owner inbound awareness_update metric")
+	}
+	if snapshot.remoteOwnerMessages[recordingRemoteOwnerMessageKey{
+		role:      remoteOwnerMetricsRoleOwner,
+		direction: remoteOwnerMetricsDirectionOut,
+		kind:      "awareness_update",
+	}] != 1 {
+		t.Fatal("missing owner outbound awareness_update metric")
+	}
+	if snapshot.remoteOwnerMessages[recordingRemoteOwnerMessageKey{
+		role:      remoteOwnerMetricsRoleOwner,
+		direction: remoteOwnerMetricsDirectionIn,
+		kind:      "query_awareness_request",
+	}] != 1 {
+		t.Fatal("missing owner inbound query_awareness_request metric")
+	}
+	if snapshot.remoteOwnerMessages[recordingRemoteOwnerMessageKey{
+		role:      remoteOwnerMetricsRoleOwner,
+		direction: remoteOwnerMetricsDirectionOut,
+		kind:      "query_awareness_response",
+	}] != 1 {
+		t.Fatal("missing owner outbound query_awareness_response metric")
+	}
+	if snapshot.remoteOwnerMessages[recordingRemoteOwnerMessageKey{
+		role:      remoteOwnerMetricsRoleOwner,
+		direction: remoteOwnerMetricsDirectionIn,
+		kind:      "disconnect",
+	}] != 1 {
+		t.Fatal("missing owner inbound disconnect metric")
 	}
 }
 

@@ -34,6 +34,7 @@ type remoteStreamPeer struct {
 	documentKey  storage.DocumentKey
 	connectionID string
 	epoch        uint64
+	onDeliver    func(ynodeproto.Message)
 
 	writeMu sync.Mutex
 }
@@ -50,6 +51,9 @@ func (p *remoteStreamPeer) deliver(ctx context.Context, payload []byte) error {
 	for _, message := range messages {
 		if err := p.stream.Send(ctx, message); err != nil {
 			return err
+		}
+		if p.onDeliver != nil {
+			p.onDeliver(message)
 		}
 	}
 	return nil

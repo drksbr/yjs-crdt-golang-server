@@ -15,6 +15,18 @@ import (
 const (
 	defaultOwnerRetryAfter = time.Second
 	remoteOwnerStatusCode  = http.StatusConflict
+
+	ownerLookupResultLocal       = "local"
+	ownerLookupResultRemote      = "remote"
+	ownerLookupResultNotFound    = "not_found"
+	ownerLookupResultInvalid     = "invalid"
+	ownerLookupResultUnavailable = "unavailable"
+	ownerLookupResultError       = "error"
+
+	routeDecisionLocal              = "local"
+	routeDecisionRemoteForwardWS    = "remote_forward_ws"
+	routeDecisionRemoteHTTPMetadata = "remote_http_metadata"
+	routeDecisionRemoteHTTPHandler  = "remote_http_handler"
 )
 
 // RemoteOwnerHandler permite customizar o comportamento quando o owner
@@ -86,21 +98,27 @@ func (s *OwnerAwareServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	lookupStart := time.Now()
 	resolution, err := s.ownerLookup.LookupOwner(r.Context(), ycluster.OwnerLookupRequest{
 		DocumentKey: req.DocumentKey,
 	})
+	lookupDuration := time.Since(lookupStart)
 	if err != nil {
+		observeOwnerLookup(s.metrics, req, lookupDuration, ownerLookupResultFromLookupError(err))
 		s.metrics.Error(req, "lookup_owner", err)
 		s.writeLookupError(w, err)
 		return
 	}
 	if resolution == nil {
 		err = ycluster.ErrOwnerNotFound
+		observeOwnerLookup(s.metrics, req, lookupDuration, ownerLookupResultNotFound)
 		s.metrics.Error(req, "lookup_owner", err)
 		s.writeLookupError(w, err)
 		return
 	}
+	observeOwnerLookup(s.metrics, req, lookupDuration, ownerLookupResultFromResolution(*resolution))
 	if resolution.Local {
+		observeRouteDecision(s.metrics, req, routeDecisionLocal)
 		s.local.serveResolvedHTTP(w, r, req)
 		return
 	}
@@ -109,8 +127,10 @@ func (s *OwnerAwareServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.onRemoteOwner != nil && s.onRemoteOwner(w, r, req, *resolution) {
+		observeRouteDecision(s.metrics, req, routeDecisionFromRemoteOwnerHandler(r))
 		return
 	}
+	observeRouteDecision(s.metrics, req, routeDecisionRemoteHTTPMetadata)
 	s.writeRemoteOwnerResponse(w, req, *resolution)
 }
 
@@ -190,6 +210,35 @@ func statusFromOwnerLookupError(err error) int {
 	default:
 		return http.StatusInternalServerError
 	}
+}
+
+func ownerLookupResultFromResolution(resolution ycluster.OwnerResolution) string {
+	if resolution.Local {
+		return ownerLookupResultLocal
+	}
+	return ownerLookupResultRemote
+}
+
+func ownerLookupResultFromLookupError(err error) string {
+	switch {
+	case errors.Is(err, ycluster.ErrInvalidOwnerLookupRequest), errors.Is(err, storage.ErrInvalidDocumentKey):
+		return ownerLookupResultInvalid
+	case errors.Is(err, ycluster.ErrOwnerNotFound), errors.Is(err, ycluster.ErrPlacementNotFound):
+		return ownerLookupResultNotFound
+	case errors.Is(err, ycluster.ErrLeaseExpired),
+		errors.Is(err, ycluster.ErrInvalidPlacement),
+		errors.Is(err, ycluster.ErrInvalidLease):
+		return ownerLookupResultUnavailable
+	default:
+		return ownerLookupResultError
+	}
+}
+
+func routeDecisionFromRemoteOwnerHandler(r *http.Request) string {
+	if isWebSocketUpgrade(r) {
+		return routeDecisionRemoteForwardWS
+	}
+	return routeDecisionRemoteHTTPHandler
 }
 
 type remoteOwnerResponse struct {

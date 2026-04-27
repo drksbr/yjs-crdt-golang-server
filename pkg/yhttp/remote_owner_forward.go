@@ -17,6 +17,8 @@ import (
 
 const remoteOwnerDialErrorStatusCode = http.StatusBadGateway
 
+var errRemoteOwnerClosed = errors.New("yhttp: owner remoto encerrou a conexao")
+
 // RemoteOwnerDialRequest descreve o contexto necessário para abrir um stream
 // com o owner remoto resolvido.
 type RemoteOwnerDialRequest struct {
@@ -127,22 +129,30 @@ func (f *remoteOwnerForwarder) handle(w http.ResponseWriter, r *http.Request, re
 		return true
 	}
 	socket.SetReadLimit(f.readLimitBytes)
+	handshakeStart := time.Now()
 	if err := f.sendHandshake(r.Context(), req, stream, epoch); err != nil {
+		observeRemoteOwnerHandshake(f.metrics, req, remoteOwnerMetricsRoleEdge, time.Since(handshakeStart), err)
 		f.metrics.Error(req, "remote_owner_handshake", err)
 		f.report(r, req, err)
 		_ = socket.Close(websocket.StatusGoingAway, "falha ao inicializar owner remoto")
 		f.closeStream(r, req, stream)
 		return true
 	}
+	observeRemoteOwnerHandshake(f.metrics, req, remoteOwnerMetricsRoleEdge, time.Since(handshakeStart), nil)
+	observeRemoteOwnerMessage(f.metrics, req, remoteOwnerMetricsRoleEdge, remoteOwnerMetricsDirectionOut, "handshake")
 
 	f.metrics.ConnectionOpened(req)
-	defer f.cleanup(r, req, socket, stream, epoch)
+	observeRemoteOwnerConnectionOpened(f.metrics, req, remoteOwnerMetricsRoleEdge)
+	closeReason := "client_closed"
+	defer func() {
+		f.cleanup(r, req, socket, stream, epoch, closeReason)
+	}()
 
-	f.bridge(r, req, socket, stream, epoch)
+	closeReason = f.bridge(r, req, socket, stream, epoch)
 	return true
 }
 
-func (f *remoteOwnerForwarder) bridge(r *http.Request, req Request, socket *websocket.Conn, stream NodeMessageStream, epoch uint64) {
+func (f *remoteOwnerForwarder) bridge(r *http.Request, req Request, socket *websocket.Conn, stream NodeMessageStream, epoch uint64) string {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
@@ -158,13 +168,22 @@ func (f *remoteOwnerForwarder) bridge(r *http.Request, req Request, socket *webs
 	cancel()
 
 	if firstErr != nil {
-		if closeErr := socket.Close(websocket.StatusGoingAway, "falha ao encaminhar para owner remoto"); closeErr != nil && !isIgnorableTransportError(closeErr) {
+		closeReason := "bridge_error"
+		closeMessage := "falha ao encaminhar para owner remoto"
+		if errors.Is(firstErr, errRemoteOwnerClosed) {
+			closeReason = "remote_close"
+			closeMessage = "owner remoto encerrou a conexao"
+		}
+		if closeErr := socket.Close(websocket.StatusGoingAway, closeMessage); closeErr != nil && !isIgnorableTransportError(closeErr) {
 			f.metrics.Error(req, "remote_owner_close_client", closeErr)
 			f.report(r, req, closeErr)
 		}
+		<-errCh
+		return closeReason
 	}
 
 	<-errCh
+	return "client_closed"
 }
 
 func (f *remoteOwnerForwarder) pipeClientToRemote(ctx context.Context, req Request, socket *websocket.Conn, stream NodeMessageStream, epoch uint64) error {
@@ -205,6 +224,11 @@ func (f *remoteOwnerForwarder) pipeClientToRemote(ctx context.Context, req Reque
 			f.report(nil, req, err)
 			return err
 		}
+		if kinds, metricErr := protocolPayloadMetricKindsForOwner(payload); metricErr == nil {
+			for _, kind := range kinds {
+				observeRemoteOwnerMessage(f.metrics, req, remoteOwnerMetricsRoleEdge, remoteOwnerMetricsDirectionOut, kind)
+			}
+		}
 		f.metrics.FrameWritten(req, "remote_owner_upstream", len(payload))
 	}
 }
@@ -220,6 +244,7 @@ func (f *remoteOwnerForwarder) pipeRemoteToClient(ctx context.Context, req Reque
 			f.report(nil, req, err)
 			return err
 		}
+		observeRemoteOwnerMessage(f.metrics, req, remoteOwnerMetricsRoleEdge, remoteOwnerMetricsDirectionIn, nodeMessageMetricKind(message))
 		payload, closeClient, err := remoteMessageToProtocolPayload(message)
 		if err != nil {
 			f.metrics.Error(req, "remote_owner_decode_upstream", err)
@@ -227,12 +252,7 @@ func (f *remoteOwnerForwarder) pipeRemoteToClient(ctx context.Context, req Reque
 			return err
 		}
 		if closeClient {
-			if closeErr := socket.Close(websocket.StatusGoingAway, "owner remoto encerrou a conexao"); closeErr != nil && !isIgnorableTransportError(closeErr) {
-				f.metrics.Error(req, "remote_owner_close_client", closeErr)
-				f.report(nil, req, closeErr)
-				return closeErr
-			}
-			return nil
+			return errRemoteOwnerClosed
 		}
 		if len(payload) == 0 {
 			continue
@@ -253,8 +273,10 @@ func (f *remoteOwnerForwarder) pipeRemoteToClient(ctx context.Context, req Reque
 	}
 }
 
-func (f *remoteOwnerForwarder) cleanup(r *http.Request, req Request, socket *websocket.Conn, stream NodeMessageStream, epoch uint64) {
+func (f *remoteOwnerForwarder) cleanup(r *http.Request, req Request, socket *websocket.Conn, stream NodeMessageStream, epoch uint64, closeReason string) {
 	defer f.metrics.ConnectionClosed(req)
+	defer observeRemoteOwnerConnectionClosed(f.metrics, req, remoteOwnerMetricsRoleEdge)
+	defer observeRemoteOwnerClose(f.metrics, req, remoteOwnerMetricsRoleEdge, closeReason)
 
 	f.sendDisconnect(req, stream, epoch)
 	f.closeStream(r, req, stream)
@@ -293,6 +315,8 @@ func (f *remoteOwnerForwarder) sendDisconnect(req Request, stream NodeMessageStr
 	}); err != nil && !isIgnorableRemoteOwnerStreamError(err) {
 		f.metrics.Error(req, "remote_owner_disconnect", err)
 		f.report(nil, req, err)
+	} else if err == nil {
+		observeRemoteOwnerMessage(f.metrics, req, remoteOwnerMetricsRoleEdge, remoteOwnerMetricsDirectionOut, "disconnect")
 	}
 }
 

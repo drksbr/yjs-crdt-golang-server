@@ -17,27 +17,39 @@ const (
 
 // Config define o namespace e o registro Prometheus usados pelo adapter.
 type Config struct {
-	Namespace             string
-	Subsystem             string
-	Registerer            prometheuslib.Registerer
-	HandleDurationBuckets []float64
-	PersistDurationBucket []float64
+	Namespace                   string
+	Subsystem                   string
+	Registerer                  prometheuslib.Registerer
+	HandleDurationBuckets       []float64
+	PersistDurationBucket       []float64
+	OwnerLookupDurationBuckets  []float64
+	RemoteOwnerHandshakeBuckets []float64
 }
 
 // Metrics implementa `yhttp.Metrics` com coletores Prometheus.
 type Metrics struct {
-	connectionsOpened prometheuslib.Counter
-	connectionsActive prometheuslib.Gauge
-	framesRead        prometheuslib.Counter
-	framesWritten     *prometheuslib.CounterVec
-	bytesRead         prometheuslib.Counter
-	bytesWritten      *prometheuslib.CounterVec
-	handleDuration    *prometheuslib.HistogramVec
-	persistDuration   *prometheuslib.HistogramVec
-	errors            *prometheuslib.CounterVec
+	connectionsOpened         prometheuslib.Counter
+	connectionsActive         prometheuslib.Gauge
+	framesRead                prometheuslib.Counter
+	framesWritten             *prometheuslib.CounterVec
+	bytesRead                 prometheuslib.Counter
+	bytesWritten              *prometheuslib.CounterVec
+	handleDuration            *prometheuslib.HistogramVec
+	persistDuration           *prometheuslib.HistogramVec
+	errors                    *prometheuslib.CounterVec
+	ownerLookupDuration       *prometheuslib.HistogramVec
+	routeDecisions            *prometheuslib.CounterVec
+	remoteOwnerConnections    *prometheuslib.CounterVec
+	remoteOwnerConnectionsAct *prometheuslib.GaugeVec
+	remoteOwnerHandshake      *prometheuslib.HistogramVec
+	remoteOwnerMessages       *prometheuslib.CounterVec
+	remoteOwnerCloses         *prometheuslib.CounterVec
 }
 
 var _ yhttp.Metrics = (*Metrics)(nil)
+var _ yhttp.OwnerLookupMetrics = (*Metrics)(nil)
+var _ yhttp.RouteDecisionMetrics = (*Metrics)(nil)
+var _ yhttp.RemoteOwnerMetrics = (*Metrics)(nil)
 
 // New constrói e registra um conjunto de métricas para `pkg/yhttp`.
 func New(cfg Config) (*Metrics, error) {
@@ -59,6 +71,14 @@ func New(cfg Config) (*Metrics, error) {
 	persistBuckets := cfg.PersistDurationBucket
 	if len(persistBuckets) == 0 {
 		persistBuckets = prometheuslib.DefBuckets
+	}
+	ownerLookupBuckets := cfg.OwnerLookupDurationBuckets
+	if len(ownerLookupBuckets) == 0 {
+		ownerLookupBuckets = prometheuslib.DefBuckets
+	}
+	remoteOwnerHandshakeBuckets := cfg.RemoteOwnerHandshakeBuckets
+	if len(remoteOwnerHandshakeBuckets) == 0 {
+		remoteOwnerHandshakeBuckets = prometheuslib.DefBuckets
 	}
 
 	metrics := &Metrics{
@@ -118,6 +138,50 @@ func New(cfg Config) (*Metrics, error) {
 			Name:      "errors_total",
 			Help:      "Total de erros observados pela borda yhttp, rotulados por estagio.",
 		}, []string{"stage"}),
+		ownerLookupDuration: prometheuslib.NewHistogramVec(prometheuslib.HistogramOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "owner_lookup_duration_seconds",
+			Help:      "Duracao da resolucao de owner na borda owner-aware.",
+			Buckets:   ownerLookupBuckets,
+		}, []string{"result"}),
+		routeDecisions: prometheuslib.NewCounterVec(prometheuslib.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "route_decisions_total",
+			Help:      "Total de decisoes de roteamento da borda owner-aware.",
+		}, []string{"decision"}),
+		remoteOwnerConnections: prometheuslib.NewCounterVec(prometheuslib.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "remote_owner_connections_opened_total",
+			Help:      "Total de streams remotos edge/owner abertos para relay inter-node.",
+		}, []string{"role"}),
+		remoteOwnerConnectionsAct: prometheuslib.NewGaugeVec(prometheuslib.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "remote_owner_connections_active",
+			Help:      "Numero atual de streams remotos edge/owner ativos no relay inter-node.",
+		}, []string{"role"}),
+		remoteOwnerHandshake: prometheuslib.NewHistogramVec(prometheuslib.HistogramOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "remote_owner_handshake_duration_seconds",
+			Help:      "Duracao do handshake inicial entre edge e owner remoto.",
+			Buckets:   remoteOwnerHandshakeBuckets,
+		}, []string{"role", "result"}),
+		remoteOwnerMessages: prometheuslib.NewCounterVec(prometheuslib.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "remote_owner_messages_total",
+			Help:      "Total de mensagens tipadas trafegadas no relay inter-node.",
+		}, []string{"role", "direction", "kind"}),
+		remoteOwnerCloses: prometheuslib.NewCounterVec(prometheuslib.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "remote_owner_closes_total",
+			Help:      "Total de encerramentos observados no relay inter-node.",
+		}, []string{"role", "reason"}),
 	}
 
 	registerer := cfg.Registerer
@@ -135,6 +199,13 @@ func New(cfg Config) (*Metrics, error) {
 		metrics.handleDuration,
 		metrics.persistDuration,
 		metrics.errors,
+		metrics.ownerLookupDuration,
+		metrics.routeDecisions,
+		metrics.remoteOwnerConnections,
+		metrics.remoteOwnerConnectionsAct,
+		metrics.remoteOwnerHandshake,
+		metrics.remoteOwnerMessages,
+		metrics.remoteOwnerCloses,
 	}
 	for _, collector := range collectors {
 		if err := registerer.Register(collector); err != nil {
@@ -185,6 +256,50 @@ func (m *Metrics) Error(_ yhttp.Request, stage string, err error) {
 		return
 	}
 	m.errors.WithLabelValues(normalizeLabel(stage, "unknown")).Inc()
+}
+
+// OwnerLookup observa a duracao e o resultado da resolucao de owner.
+func (m *Metrics) OwnerLookup(_ yhttp.Request, duration time.Duration, result string) {
+	m.ownerLookupDuration.WithLabelValues(normalizeLabel(result, "unknown")).Observe(duration.Seconds())
+}
+
+// RouteDecision incrementa o contador da decisao final de roteamento.
+func (m *Metrics) RouteDecision(_ yhttp.Request, decision string) {
+	m.routeDecisions.WithLabelValues(normalizeLabel(decision, "unknown")).Inc()
+}
+
+// RemoteOwnerConnectionOpened contabiliza a abertura de um stream remoto.
+func (m *Metrics) RemoteOwnerConnectionOpened(_ yhttp.Request, role string) {
+	label := normalizeLabel(role, "unknown")
+	m.remoteOwnerConnections.WithLabelValues(label).Inc()
+	m.remoteOwnerConnectionsAct.WithLabelValues(label).Inc()
+}
+
+// RemoteOwnerConnectionClosed contabiliza o fechamento de um stream remoto.
+func (m *Metrics) RemoteOwnerConnectionClosed(_ yhttp.Request, role string) {
+	m.remoteOwnerConnectionsAct.WithLabelValues(normalizeLabel(role, "unknown")).Dec()
+}
+
+// RemoteOwnerHandshake observa a duracao do handshake inicial do relay.
+func (m *Metrics) RemoteOwnerHandshake(_ yhttp.Request, role string, duration time.Duration, err error) {
+	m.remoteOwnerHandshake.WithLabelValues(normalizeLabel(role, "unknown"), resultLabel(err)).Observe(duration.Seconds())
+}
+
+// RemoteOwnerMessage contabiliza mensagens tipadas trafegadas pelo relay.
+func (m *Metrics) RemoteOwnerMessage(_ yhttp.Request, role string, direction string, kind string) {
+	m.remoteOwnerMessages.WithLabelValues(
+		normalizeLabel(role, "unknown"),
+		normalizeLabel(direction, "unknown"),
+		normalizeLabel(kind, "unknown"),
+	).Inc()
+}
+
+// RemoteOwnerClose contabiliza o motivo observado no encerramento do relay.
+func (m *Metrics) RemoteOwnerClose(_ yhttp.Request, role string, reason string) {
+	m.remoteOwnerCloses.WithLabelValues(
+		normalizeLabel(role, "unknown"),
+		normalizeLabel(reason, "unknown"),
+	).Inc()
 }
 
 func normalizeBytes(value int) int {
