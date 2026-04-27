@@ -163,7 +163,7 @@ func mergeOverlappingStructLists(client uint32, left, right []ytypes.Struct) ([]
 			block = refs[*index]
 		}
 		if block != nil && block.ID().Clock < nextExpected && block.EndClock() > nextExpected {
-			diff := block.ID().Clock + block.Length() - nextExpected
+			diff := nextExpected - block.ID().Clock
 			sliced, err := sliceStructV1(block, diff)
 			if err != nil {
 				return nil, err

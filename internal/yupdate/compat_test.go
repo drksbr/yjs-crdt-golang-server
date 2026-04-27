@@ -143,22 +143,14 @@ func TestMergeUpdatesV1SlicesOverlappingJSONStructs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeV1(merged) unexpected error: %v", err)
 	}
-	if len(decoded.Structs) != 3 {
-		t.Fatalf("len(Structs) = %d, want 3", len(decoded.Structs))
+	if len(decoded.Structs) != 2 {
+		t.Fatalf("len(Structs) = %d, want 2", len(decoded.Structs))
 	}
 
-	itemSkip, ok := decoded.Structs[1].(ytypes.Skip)
-	if !ok {
-		t.Fatalf("Structs[1] type = %T, want ytypes.Skip", decoded.Structs[1])
-	}
-	if itemSkip.ID().Clock != 3 || itemSkip.Length() != 1 {
-		t.Fatalf("Structs[1] = %#v, want skip at clock 3 len 1", itemSkip)
-	}
-
-	item := decoded.Structs[2].(*ytypes.Item)
+	item := decoded.Structs[1].(*ytypes.Item)
 	content := item.Content.(ParsedContent)
-	if item.ID().Clock != 4 || content.Length() != 1 || !slices.Equal(content.JSON, []string{`"e"`}) {
-		t.Fatalf("merged JSON tail = id=%+v content=%#v, want clock 4 and JSON [\"e\"]", item.ID(), content)
+	if item.ID().Clock != 3 || content.Length() != 2 || !slices.Equal(content.JSON, []string{`"d"`, `"e"`}) {
+		t.Fatalf("merged JSON tail = id=%+v content=%#v, want clock 3 and JSON [\"d\",\"e\"]", item.ID(), content)
 	}
 }
 

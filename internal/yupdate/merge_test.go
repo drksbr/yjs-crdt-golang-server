@@ -243,8 +243,8 @@ func TestMergeUpdatesV1OverlappingItemAfterDeletedGapUsesJsOffset(t *testing.T) 
 		t.Fatalf("DecodeV1(merged) unexpected error: %v", err)
 	}
 
-	if len(decoded.Structs) != 3 {
-		t.Fatalf("len(Structs) = %d, want 3", len(decoded.Structs))
+	if len(decoded.Structs) != 2 {
+		t.Fatalf("len(Structs) = %d, want 2", len(decoded.Structs))
 	}
 
 	deleted, ok := decoded.Structs[0].(*ytypes.Item)
@@ -256,21 +256,13 @@ func TestMergeUpdatesV1OverlappingItemAfterDeletedGapUsesJsOffset(t *testing.T) 
 		t.Fatalf("Structs[0] = %#v, want deleted item at clock 0 len 6", decoded.Structs[0])
 	}
 
-	skip, ok := decoded.Structs[1].(ytypes.Skip)
+	item, ok := decoded.Structs[1].(*ytypes.Item)
 	if !ok {
-		t.Fatalf("Structs[1] type = %T, want ytypes.Skip", decoded.Structs[1])
-	}
-	if skip.ID().Clock != 6 || skip.Length() != 2 {
-		t.Fatalf("Structs[1] = %#v, want Skip at clock 6 len 2", skip)
-	}
-
-	item, ok := decoded.Structs[2].(*ytypes.Item)
-	if !ok {
-		t.Fatalf("Structs[2] type = %T, want *ytypes.Item", decoded.Structs[2])
+		t.Fatalf("Structs[1] type = %T, want *ytypes.Item", decoded.Structs[1])
 	}
 	content := item.Content.(ParsedContent)
-	if item.ID().Clock != 8 || content.Text != "d" {
-		t.Fatalf("Structs[2] = id=%+v content=%#v, want item at clock 8 text \"d\"", item.ID(), content)
+	if item.ID().Clock != 6 || content.Text != "bcd" {
+		t.Fatalf("Structs[1] = id=%+v content=%#v, want item at clock 6 text \"bcd\"", item.ID(), content)
 	}
 }
 

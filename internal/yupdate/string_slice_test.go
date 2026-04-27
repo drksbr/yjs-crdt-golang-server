@@ -94,25 +94,17 @@ func TestMergeUpdatesV1ReplacesBrokenSurrogateBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeV1(merged) unexpected error: %v", err)
 	}
-	if len(decoded.Structs) != 3 {
-		t.Fatalf("len(Structs) = %d, want 3", len(decoded.Structs))
+	if len(decoded.Structs) != 2 {
+		t.Fatalf("len(Structs) = %d, want 2", len(decoded.Structs))
 	}
 
-	skip, ok := decoded.Structs[1].(ytypes.Skip)
+	item, ok := decoded.Structs[1].(*ytypes.Item)
 	if !ok {
-		t.Fatalf("Structs[1] type = %T, want ytypes.Skip", decoded.Structs[1])
-	}
-	if skip.ID().Clock != 2 || skip.Length() != 1 {
-		t.Fatalf("Structs[1] = %#v, want skip at clock 2 len 1", skip)
-	}
-
-	item, ok := decoded.Structs[2].(*ytypes.Item)
-	if !ok {
-		t.Fatalf("Structs[2] type = %T, want *ytypes.Item", decoded.Structs[2])
+		t.Fatalf("Structs[1] type = %T, want *ytypes.Item", decoded.Structs[1])
 	}
 	content := item.Content.(ParsedContent)
-	if item.ID().Clock != 3 || content.Text != "a" || content.Length() != 1 {
-		t.Fatalf("merged item = id=%+v content=%#v, want clock=3 text=%q len=1", item.ID(), content, "a")
+	if item.ID().Clock != 2 || content.Text != "\uFFFDa" || content.Length() != 2 {
+		t.Fatalf("merged item = id=%+v content=%#v, want clock=2 text=%q len=2", item.ID(), content, "\uFFFDa")
 	}
 }
 
