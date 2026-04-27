@@ -36,14 +36,27 @@ type ResolveRequestFunc func(r *http.Request) (Request, error)
 // podem mais ser refletidos na resposta HTTP original.
 type ErrorHandler func(r *http.Request, req Request, err error)
 
+// AuthorityLossHandler assume um websocket ja aceito quando a sessao local
+// perde autoridade sobre o documento.
+//
+// O handler recebe o epoch autoritativo que estava ativo na conexao local e
+// passa a ser responsavel por manter ou encerrar o socket do cliente.
+type AuthorityLossHandler func(
+	r *http.Request,
+	req Request,
+	socket *websocket.Conn,
+	previousEpoch uint64,
+) error
+
 // ServerConfig define a configuração do handler HTTP/WebSocket.
 type ServerConfig struct {
-	Provider       *yprotocol.Provider
-	ResolveRequest ResolveRequestFunc
-	AcceptOptions  *websocket.AcceptOptions
-	ReadLimitBytes int64
-	WriteTimeout   time.Duration
-	PersistTimeout time.Duration
-	Metrics        Metrics
-	OnError        ErrorHandler
+	Provider                      *yprotocol.Provider
+	ResolveRequest                ResolveRequestFunc
+	AcceptOptions                 *websocket.AcceptOptions
+	ReadLimitBytes                int64
+	WriteTimeout                  time.Duration
+	PersistTimeout                time.Duration
+	AuthorityRevalidationInterval time.Duration
+	Metrics                       Metrics
+	OnError                       ErrorHandler
 }

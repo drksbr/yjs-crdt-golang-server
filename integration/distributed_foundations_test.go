@@ -40,16 +40,19 @@ func TestDistributedRecoveryReplaysTrimmedTailFromCheckpoint(t *testing.T) {
 	checkpointOffset := offsets[1]
 
 	checkpointSnapshot := mustPersistedSnapshotFromUpdates(t, updates[:2]...)
-	if _, err := store.SaveSnapshot(ctx, key, checkpointSnapshot); err != nil {
-		t.Fatalf("SaveSnapshot() unexpected error: %v", err)
+	if _, err := store.SaveSnapshotCheckpoint(ctx, key, checkpointSnapshot, checkpointOffset); err != nil {
+		t.Fatalf("SaveSnapshotCheckpoint() unexpected error: %v", err)
 	}
 	if err := store.TrimUpdates(ctx, key, checkpointOffset); err != nil {
 		t.Fatalf("TrimUpdates() unexpected error: %v", err)
 	}
 
-	recovered, err := storage.RecoverSnapshot(ctx, store, store, key, checkpointOffset, 1)
+	recovered, err := storage.RecoverSnapshot(ctx, store, store, key, 0, 1)
 	if err != nil {
 		t.Fatalf("RecoverSnapshot() unexpected error: %v", err)
+	}
+	if recovered.CheckpointThrough != checkpointOffset {
+		t.Fatalf("recovered.CheckpointThrough = %d, want %d", recovered.CheckpointThrough, checkpointOffset)
 	}
 	if !bytes.Equal(recovered.Snapshot.UpdateV1, expected) {
 		t.Fatalf("recovered.Snapshot.UpdateV1 = %x, want %x", recovered.Snapshot.UpdateV1, expected)
@@ -106,13 +109,16 @@ func TestDistributedRecoverySeparatesDocumentsAcrossSharedStore(t *testing.T) {
 	appendUpdates(t, ctx, store, rightKey, rightUpdates[1])
 
 	leftSnapshot := mustPersistedSnapshotFromUpdates(t, leftUpdates[0])
-	if _, err := store.SaveSnapshot(ctx, leftKey, leftSnapshot); err != nil {
-		t.Fatalf("SaveSnapshot(left) unexpected error: %v", err)
+	if _, err := store.SaveSnapshotCheckpoint(ctx, leftKey, leftSnapshot, leftOffsets[0]); err != nil {
+		t.Fatalf("SaveSnapshotCheckpoint(left) unexpected error: %v", err)
 	}
 
-	leftRecovered, err := storage.RecoverSnapshot(ctx, store, store, leftKey, leftOffsets[0], 1)
+	leftRecovered, err := storage.RecoverSnapshot(ctx, store, store, leftKey, 0, 1)
 	if err != nil {
 		t.Fatalf("RecoverSnapshot(left) unexpected error: %v", err)
+	}
+	if leftRecovered.CheckpointThrough != leftOffsets[0] {
+		t.Fatalf("leftRecovered.CheckpointThrough = %d, want %d", leftRecovered.CheckpointThrough, leftOffsets[0])
 	}
 	if !bytes.Equal(leftRecovered.Snapshot.UpdateV1, leftExpected) {
 		t.Fatalf("leftRecovered = %x, want %x", leftRecovered.Snapshot.UpdateV1, leftExpected)

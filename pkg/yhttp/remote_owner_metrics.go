@@ -13,6 +13,13 @@ const (
 
 	remoteOwnerMetricsDirectionIn  = "in"
 	remoteOwnerMetricsDirectionOut = "out"
+
+	authorityRevalidationRoleLocal = "local"
+	authorityRevalidationRoleOwner = "owner"
+
+	ownershipStateLocal  = "local"
+	ownershipStateRemote = "remote"
+	ownershipStateClosed = "closed"
 )
 
 func nodeMessageMetricKind(message ynodeproto.Message) string {

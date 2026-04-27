@@ -31,16 +31,19 @@ func TestProviderRecoveryLoadsRecoveredSnapshotFromCheckpointAndTail(t *testing.
 
 	offsets := appendUpdates(t, ctx, store, key, updates...)
 	checkpoint := mustPersistedSnapshotFromUpdates(t, updates[:2]...)
-	if _, err := store.SaveSnapshot(ctx, key, checkpoint); err != nil {
-		t.Fatalf("SaveSnapshot(checkpoint) unexpected error: %v", err)
+	if _, err := store.SaveSnapshotCheckpoint(ctx, key, checkpoint, offsets[1]); err != nil {
+		t.Fatalf("SaveSnapshotCheckpoint(checkpoint) unexpected error: %v", err)
 	}
 	if err := store.TrimUpdates(ctx, key, offsets[1]); err != nil {
 		t.Fatalf("TrimUpdates(checkpoint) unexpected error: %v", err)
 	}
 
-	recovered, err := storage.RecoverSnapshot(ctx, store, store, key, offsets[1], 1)
+	recovered, err := storage.RecoverSnapshot(ctx, store, store, key, 0, 1)
 	if err != nil {
 		t.Fatalf("RecoverSnapshot() unexpected error: %v", err)
+	}
+	if recovered.CheckpointThrough != offsets[1] {
+		t.Fatalf("recovered.CheckpointThrough = %d, want %d", recovered.CheckpointThrough, offsets[1])
 	}
 	if len(recovered.Updates) != 2 {
 		t.Fatalf("len(recovered.Updates) = %d, want 2", len(recovered.Updates))
@@ -77,6 +80,9 @@ func TestProviderRecoveryLoadsRecoveredSnapshotFromCheckpointAndTail(t *testing.
 	}
 	if !bytes.Equal(record.Snapshot.UpdateV1, expected) {
 		t.Fatalf("record.Snapshot.UpdateV1 = %x, want %x", record.Snapshot.UpdateV1, expected)
+	}
+	if record.Through != offsets[3] {
+		t.Fatalf("record.Through = %d, want %d", record.Through, offsets[3])
 	}
 }
 

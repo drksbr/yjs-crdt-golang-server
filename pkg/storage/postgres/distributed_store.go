@@ -13,6 +13,7 @@ import (
 )
 
 var _ storage.DistributedStore = (*Store)(nil)
+var _ storage.AuthoritativeUpdateLogStore = (*Store)(nil)
 
 func (s *Store) AppendUpdate(ctx context.Context, key storage.DocumentKey, update []byte) (*storage.UpdateLogRecord, error) {
 	if err := ctx.Err(); err != nil {
@@ -37,19 +38,24 @@ WITH allocated AS (
 	DO UPDATE SET next_offset = heads.next_offset + 1
 	RETURNING next_offset - 1 AS log_offset
 )
-INSERT INTO %s.document_update_logs(namespace, document_id, log_offset, update_v1, stored_at)
-SELECT $1, $2, allocated.log_offset, $3, now()
+INSERT INTO %s.document_update_logs(namespace, document_id, log_offset, update_v1, owner_epoch, stored_at)
+SELECT $1, $2, allocated.log_offset, $3, 0, now()
 FROM allocated
-RETURNING log_offset, stored_at
+RETURNING log_offset, owner_epoch, stored_at
 `, quoteIdentifier(s.schema), quoteIdentifier(s.schema))
 
 	var offset int64
+	var epoch int64
 	var storedAt time.Time
-	if err := pool.QueryRow(ctx, query, key.Namespace, key.DocumentID, update).Scan(&offset, &storedAt); err != nil {
+	if err := pool.QueryRow(ctx, query, key.Namespace, key.DocumentID, update).Scan(&offset, &epoch, &storedAt); err != nil {
 		return nil, err
 	}
 
 	logOffset, err := int64ToOffset(offset)
+	if err != nil {
+		return nil, err
+	}
+	epochValue, err := int64ToUint64("owner epoch", epoch)
 	if err != nil {
 		return nil, err
 	}
@@ -58,6 +64,61 @@ RETURNING log_offset, stored_at
 		Key:      key,
 		Offset:   logOffset,
 		UpdateV1: append([]byte(nil), update...),
+		Epoch:    epochValue,
+		StoredAt: storedAt,
+	}, nil
+}
+
+// AppendUpdateAuthoritative adiciona um update V1 ao fim do log do documento,
+// exigindo que o placement + lease persistidos ainda correspondam ao fence.
+func (s *Store) AppendUpdateAuthoritative(
+	ctx context.Context,
+	key storage.DocumentKey,
+	update []byte,
+	fence storage.AuthorityFence,
+) (*storage.UpdateLogRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := key.Validate(); err != nil {
+		return nil, err
+	}
+	if len(update) == 0 {
+		return nil, storage.ErrInvalidUpdatePayload
+	}
+	if err := fence.Validate(); err != nil {
+		return nil, err
+	}
+	pool, err := s.requirePool()
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+
+	if err := s.validateAuthorityTx(ctx, tx, key, fence, time.Now().UTC()); err != nil {
+		return nil, err
+	}
+
+	logOffset, storedAt, err := s.appendUpdateTx(ctx, tx, key, update, fence.Owner.Epoch)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return &storage.UpdateLogRecord{
+		Key:      key,
+		Offset:   logOffset,
+		UpdateV1: append([]byte(nil), update...),
+		Epoch:    fence.Owner.Epoch,
 		StoredAt: storedAt,
 	}, nil
 }
@@ -80,7 +141,7 @@ func (s *Store) ListUpdates(ctx context.Context, key storage.DocumentKey, after 
 	}
 
 	query := fmt.Sprintf(`
-SELECT log_offset, update_v1, stored_at
+SELECT log_offset, update_v1, owner_epoch, stored_at
 FROM %s.document_update_logs
 WHERE namespace = $1 AND document_id = $2 AND log_offset > $3
 ORDER BY log_offset ASC
@@ -102,12 +163,17 @@ ORDER BY log_offset ASC
 	for rows.Next() {
 		var offset int64
 		var payload []byte
+		var epoch int64
 		var storedAt time.Time
-		if err := rows.Scan(&offset, &payload, &storedAt); err != nil {
+		if err := rows.Scan(&offset, &payload, &epoch, &storedAt); err != nil {
 			return nil, err
 		}
 
 		logOffset, err := int64ToOffset(offset)
+		if err != nil {
+			return nil, err
+		}
+		epochValue, err := int64ToUint64("owner epoch", epoch)
 		if err != nil {
 			return nil, err
 		}
@@ -116,6 +182,7 @@ ORDER BY log_offset ASC
 			Key:      key,
 			Offset:   logOffset,
 			UpdateV1: append([]byte(nil), payload...),
+			Epoch:    epochValue,
 			StoredAt: storedAt,
 		})
 	}
@@ -148,6 +215,46 @@ WHERE namespace = $1 AND document_id = $2 AND log_offset <= $3
 `, quoteIdentifier(s.schema))
 	_, err = pool.Exec(ctx, query, key.Namespace, key.DocumentID, throughOffset)
 	return err
+}
+
+// TrimUpdatesAuthoritative remove registros com offset <= through, exigindo
+// que o placement + lease persistidos ainda correspondam ao fence.
+func (s *Store) TrimUpdatesAuthoritative(
+	ctx context.Context,
+	key storage.DocumentKey,
+	through storage.UpdateOffset,
+	fence storage.AuthorityFence,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := key.Validate(); err != nil {
+		return err
+	}
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	pool, err := s.requirePool()
+	if err != nil {
+		return err
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+
+	if err := s.validateAuthorityTx(ctx, tx, key, fence, time.Now().UTC()); err != nil {
+		return err
+	}
+
+	if err := s.trimUpdatesTx(ctx, tx, key, through); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) SavePlacement(ctx context.Context, placement storage.PlacementRecord) (*storage.PlacementRecord, error) {
@@ -555,4 +662,113 @@ func int64ToUint64(name string, value int64) (uint64, error) {
 		return 0, fmt.Errorf("postgres: %s negativo no banco: %d", name, value)
 	}
 	return uint64(value), nil
+}
+
+func (s *Store) appendUpdateTx(ctx context.Context, tx pgx.Tx, key storage.DocumentKey, update []byte, epoch uint64) (storage.UpdateOffset, time.Time, error) {
+	epochValue, err := uint64ToInt64("owner epoch", epoch)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+
+	query := fmt.Sprintf(`
+WITH allocated AS (
+	INSERT INTO %s.document_update_log_heads AS heads (namespace, document_id, next_offset)
+	VALUES ($1, $2, 2)
+	ON CONFLICT (namespace, document_id)
+	DO UPDATE SET next_offset = heads.next_offset + 1
+	RETURNING next_offset - 1 AS log_offset
+)
+INSERT INTO %s.document_update_logs(namespace, document_id, log_offset, update_v1, owner_epoch, stored_at)
+SELECT $1, $2, allocated.log_offset, $3, $4, now()
+FROM allocated
+RETURNING log_offset, stored_at
+`, quoteIdentifier(s.schema), quoteIdentifier(s.schema))
+
+	var offset int64
+	var storedAt time.Time
+	if err := tx.QueryRow(ctx, query, key.Namespace, key.DocumentID, update, epochValue).Scan(&offset, &storedAt); err != nil {
+		return 0, time.Time{}, err
+	}
+
+	logOffset, err := int64ToOffset(offset)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	return logOffset, storedAt, nil
+}
+
+func (s *Store) trimUpdatesTx(ctx context.Context, tx pgx.Tx, key storage.DocumentKey, through storage.UpdateOffset) error {
+	throughOffset, err := offsetToInt64(through)
+	if err != nil {
+		return err
+	}
+
+	query := fmt.Sprintf(`
+DELETE FROM %s.document_update_logs
+WHERE namespace = $1 AND document_id = $2 AND log_offset <= $3
+`, quoteIdentifier(s.schema))
+	_, err = tx.Exec(ctx, query, key.Namespace, key.DocumentID, throughOffset)
+	return err
+}
+
+func (s *Store) validateAuthorityTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	key storage.DocumentKey,
+	fence storage.AuthorityFence,
+	now time.Time,
+) error {
+	placementQuery := fmt.Sprintf(`
+SELECT shard_id
+FROM %s.document_placements
+WHERE namespace = $1 AND document_id = $2
+FOR UPDATE
+`, quoteIdentifier(s.schema))
+
+	var placementShardID string
+	if err := tx.QueryRow(ctx, placementQuery, key.Namespace, key.DocumentID).Scan(&placementShardID); err != nil {
+		if isNoRows(err) {
+			return fmt.Errorf("%w: placement ausente para %s/%s", storage.ErrAuthorityLost, key.Namespace, key.DocumentID)
+		}
+		return err
+	}
+	if storage.ShardID(placementShardID) != fence.ShardID {
+		return fmt.Errorf(
+			"%w: placement shard %s != fence shard %s para %s/%s",
+			storage.ErrAuthorityLost,
+			placementShardID,
+			fence.ShardID,
+			key.Namespace,
+			key.DocumentID,
+		)
+	}
+
+	if err := s.ensureLeaseGenerationLockTx(ctx, tx, fence.ShardID); err != nil {
+		return err
+	}
+	lease, _, err := s.loadLeaseStateTx(ctx, tx, fence.ShardID)
+	if err != nil {
+		return err
+	}
+	if lease == nil {
+		return fmt.Errorf("%w: lease ausente para shard %s", storage.ErrAuthorityLost, fence.ShardID)
+	}
+	if lease.Owner != fence.Owner {
+		return fmt.Errorf(
+			"%w: owner atual %s/%d != fence %s/%d para shard %s",
+			storage.ErrAuthorityLost,
+			lease.Owner.NodeID,
+			lease.Owner.Epoch,
+			fence.Owner.NodeID,
+			fence.Owner.Epoch,
+			fence.ShardID,
+		)
+	}
+	if lease.Token != fence.Token {
+		return fmt.Errorf("%w: token atual nao corresponde ao fence do shard %s", storage.ErrAuthorityLost, fence.ShardID)
+	}
+	if !lease.ExpiresAt.After(now) {
+		return fmt.Errorf("%w: lease expirada para shard %s", storage.ErrAuthorityLost, fence.ShardID)
+	}
+	return nil
 }

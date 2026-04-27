@@ -183,6 +183,7 @@ func TestUpdateLogRecordValidateAndClone(t *testing.T) {
 				Key:      DocumentKey{Namespace: "tenant-a", DocumentID: "doc-1"},
 				Offset:   7,
 				UpdateV1: []byte{0x01, 0x02, 0x03},
+				Epoch:    4,
 				StoredAt: time.Unix(200, 0).UTC(),
 			},
 			wantErr: nil,
@@ -220,6 +221,7 @@ func TestUpdateLogRecordValidateAndClone(t *testing.T) {
 		Key:      DocumentKey{Namespace: "tenant-a", DocumentID: "doc-9"},
 		Offset:   11,
 		UpdateV1: []byte{0x0a, 0x0b},
+		Epoch:    9,
 		StoredAt: time.Unix(220, 0).UTC(),
 	}
 	clone := record.Clone()
@@ -228,6 +230,9 @@ func TestUpdateLogRecordValidateAndClone(t *testing.T) {
 	}
 	if !bytes.Equal(clone.UpdateV1, record.UpdateV1) {
 		t.Fatalf("Clone().UpdateV1 = %v, want %v", clone.UpdateV1, record.UpdateV1)
+	}
+	if clone.Epoch != record.Epoch {
+		t.Fatalf("Clone().Epoch = %d, want %d", clone.Epoch, record.Epoch)
 	}
 	clone.UpdateV1[0] = 0xff
 	if record.UpdateV1[0] == 0xff {
@@ -445,5 +450,96 @@ func TestLeaseRecordValidateAndClone(t *testing.T) {
 
 	if got := (*LeaseRecord)(nil).Clone(); got != nil {
 		t.Fatalf("(*LeaseRecord)(nil).Clone() = %#v, want nil", got)
+	}
+}
+
+func TestAuthorityFenceValidateAndClone(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		fence   AuthorityFence
+		wantErr error
+	}{
+		{
+			name: "valid",
+			fence: AuthorityFence{
+				ShardID: ShardID("7"),
+				Owner: OwnerInfo{
+					NodeID: NodeID("node-a"),
+					Epoch:  3,
+				},
+				Token: "lease-a",
+			},
+		},
+		{
+			name: "missing shard",
+			fence: AuthorityFence{
+				Owner: OwnerInfo{
+					NodeID: NodeID("node-a"),
+					Epoch:  3,
+				},
+				Token: "lease-a",
+			},
+			wantErr: ErrInvalidShardID,
+		},
+		{
+			name: "invalid owner",
+			fence: AuthorityFence{
+				ShardID: ShardID("7"),
+				Owner: OwnerInfo{
+					NodeID: NodeID("node-a"),
+				},
+				Token: "lease-a",
+			},
+			wantErr: ErrInvalidOwnerInfo,
+		},
+		{
+			name: "missing token",
+			fence: AuthorityFence{
+				ShardID: ShardID("7"),
+				Owner: OwnerInfo{
+					NodeID: NodeID("node-a"),
+					Epoch:  3,
+				},
+			},
+			wantErr: ErrInvalidLeaseToken,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.fence.Validate()
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+
+	fence := &AuthorityFence{
+		ShardID: ShardID("11"),
+		Owner: OwnerInfo{
+			NodeID: NodeID("node-b"),
+			Epoch:  8,
+		},
+		Token: "lease-b",
+	}
+	clone := fence.Clone()
+	if clone == nil {
+		t.Fatal("Clone() = nil, want non-nil")
+	}
+	if *clone != *fence {
+		t.Fatalf("Clone() = %#v, want %#v", clone, fence)
+	}
+	clone.Token = "other"
+	if fence.Token == clone.Token {
+		t.Fatal("Clone() compartilhou token do fence")
+	}
+
+	if got := (*AuthorityFence)(nil).Clone(); got != nil {
+		t.Fatalf("(*AuthorityFence)(nil).Clone() = %#v, want nil", got)
 	}
 }

@@ -102,27 +102,43 @@ func (e *RemoteOwnerEndpoint) ServeStream(ctx context.Context, stream NodeMessag
 	connection, err := e.local.provider.Open(ctx, req.DocumentKey, req.ConnectionID, req.ClientID)
 	if err != nil {
 		observeRemoteOwnerHandshake(e.local.metrics, req, remoteOwnerMetricsRoleOwner, time.Since(handshakeStart), err)
+		if isAuthorityLostRetryableError(err) {
+			signal := remoteOwnerCloseSignalFromError(err, "open_error")
+			e.sendRemoteOwnerClose(req, handshake.Epoch, stream, signal)
+			if closeErr := stream.Close(); closeErr != nil && !isIgnorableNodeStreamError(closeErr) {
+				e.local.metrics.Error(req, "remote_owner_close_stream", closeErr)
+				e.local.report(nil, req, closeErr)
+			}
+			return nil
+		}
 		return err
 	}
 
 	closeClient := false
+	closeSignal := remoteOwnerCloseSignal{}
 	closeReason := "stream_closed"
 	remoteConnectionOpened := false
 	e.local.metrics.ConnectionOpened(req)
 	defer func() {
-		e.cleanupRemoteOwnerStream(req, handshake.Epoch, connection, stream, closeClient, remoteConnectionOpened, closeReason)
+		e.cleanupRemoteOwnerStream(req, handshake.Epoch, connection, stream, closeClient, closeSignal, remoteConnectionOpened, closeReason)
 	}()
 
 	if err := e.sendHandshakeAck(ctx, stream, handshake); err != nil {
 		observeRemoteOwnerHandshake(e.local.metrics, req, remoteOwnerMetricsRoleOwner, time.Since(handshakeStart), err)
 		closeClient = true
-		closeReason = "handshake_error"
+		closeSignal = remoteOwnerCloseSignalFromError(err, "handshake_error")
+		closeReason = closeSignal.metricReason("handshake_error")
 		return err
 	}
 	observeRemoteOwnerHandshake(e.local.metrics, req, remoteOwnerMetricsRoleOwner, time.Since(handshakeStart), nil)
 	observeRemoteOwnerConnectionOpened(e.local.metrics, req, remoteOwnerMetricsRoleOwner)
 	observeRemoteOwnerMessage(e.local.metrics, req, remoteOwnerMetricsRoleOwner, remoteOwnerMetricsDirectionOut, "handshake_ack")
 	remoteConnectionOpened = true
+
+	sessionCtx, cancelSession := context.WithCancel(ctx)
+	defer cancelSession()
+	revalidateCh := e.startAuthorityRevalidator(sessionCtx, req, connection, cancelSession)
+	defer drainRemoteOwnerCloseSignal(revalidateCh)
 
 	peer := e.local.registry.add(req.DocumentKey, req.ConnectionID, &remoteStreamPeer{
 		stream:       stream,
@@ -136,14 +152,21 @@ func (e *RemoteOwnerEndpoint) ServeStream(ctx context.Context, stream NodeMessag
 	defer e.local.registry.remove(req.DocumentKey, req.ConnectionID)
 
 	for {
-		message, recvErr := stream.Receive(ctx)
+		message, recvErr := stream.Receive(sessionCtx)
 		if recvErr != nil {
+			if signal, ok := drainRemoteOwnerCloseSignal(revalidateCh); ok {
+				closeClient = true
+				closeSignal = signal
+				closeReason = signal.metricReason("revalidate_authority")
+				return nil
+			}
 			if isIgnorableNodeStreamError(recvErr) {
 				closeReason = "stream_closed"
 				return nil
 			}
 			closeClient = true
-			closeReason = "stream_error"
+			closeSignal = remoteOwnerCloseSignalFromError(recvErr, "stream_error")
+			closeReason = closeSignal.metricReason("stream_error")
 			return recvErr
 		}
 		observeRemoteOwnerMessage(e.local.metrics, req, remoteOwnerMetricsRoleOwner, remoteOwnerMetricsDirectionIn, nodeMessageMetricKind(message))
@@ -151,7 +174,11 @@ func (e *RemoteOwnerEndpoint) ServeStream(ctx context.Context, stream NodeMessag
 		stop, messageCloseReason, handleErr := e.handleRemoteOwnerMessage(ctx, req, handshake.Epoch, connection, peer, stream, message)
 		if handleErr != nil {
 			closeClient = true
-			closeReason = normalizeRemoteOwnerCloseReason(messageCloseReason, "handler_error")
+			closeSignal = remoteOwnerCloseSignalFromError(handleErr, messageCloseReason)
+			closeReason = closeSignal.metricReason("handler_error")
+			if isAuthorityLostRetryableError(handleErr) {
+				return nil
+			}
 			return handleErr
 		}
 		if stop {
@@ -256,9 +283,11 @@ func (e *RemoteOwnerEndpoint) handleRemoteOwnerMessage(
 	result, err := connection.HandleEncodedMessages(payload)
 	e.local.metrics.Handle(req, time.Since(handleStart), err)
 	if err != nil {
-		e.local.metrics.Error(req, "remote_owner_handle", err)
-		e.local.report(nil, req, err)
-		return false, "handle_error", err
+		if !isAuthorityLostRetryableError(err) {
+			e.local.metrics.Error(req, "remote_owner_handle", err)
+			e.local.report(nil, req, err)
+		}
+		return false, remoteOwnerCloseSignalFromError(err, "handle_error").metricReason("handle_error"), err
 	}
 
 	if len(result.Direct) > 0 {
@@ -309,6 +338,7 @@ func (e *RemoteOwnerEndpoint) cleanupRemoteOwnerStream(
 	connection *yprotocol.Connection,
 	stream NodeMessageStream,
 	closeClient bool,
+	closeSignal remoteOwnerCloseSignal,
 	remoteConnectionOpened bool,
 	closeReason string,
 ) {
@@ -319,10 +349,10 @@ func (e *RemoteOwnerEndpoint) cleanupRemoteOwnerStream(
 	}
 
 	if closeClient {
-		e.sendRemoteOwnerClose(req, epoch, stream)
+		e.sendRemoteOwnerClose(req, epoch, stream, closeSignal)
 	}
 
-	if req.PersistOnClose {
+	if req.PersistOnClose && !connection.AuthorityLost() {
 		ctx, cancel := context.WithTimeout(context.Background(), e.local.persistTimeout)
 		persistStart := time.Now()
 		_, err := connection.Persist(ctx)
@@ -348,7 +378,67 @@ func (e *RemoteOwnerEndpoint) cleanupRemoteOwnerStream(
 	}
 }
 
-func (e *RemoteOwnerEndpoint) sendRemoteOwnerClose(req Request, epoch uint64, stream NodeMessageStream) {
+func (e *RemoteOwnerEndpoint) startAuthorityRevalidator(
+	ctx context.Context,
+	req Request,
+	connection *yprotocol.Connection,
+	cancelSession context.CancelFunc,
+) <-chan remoteOwnerCloseSignal {
+	signals := make(chan remoteOwnerCloseSignal, 1)
+	if e == nil || e.local == nil || connection == nil || e.local.authorityRevalidationInterval <= 0 {
+		return signals
+	}
+
+	go func() {
+		ticker := time.NewTicker(e.local.authorityRevalidationInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				checkCtx, cancel := context.WithTimeout(context.Background(), e.local.writeTimeout)
+				start := time.Now()
+				err := connection.RevalidateAuthority(checkCtx)
+				cancel()
+				duration := time.Since(start)
+				switch {
+				case err == nil, errors.Is(err, yprotocol.ErrConnectionClosed):
+					if err == nil {
+						observeAuthorityRevalidation(e.local.metrics, req, authorityRevalidationRoleOwner, duration, nil)
+					}
+					continue
+				case isAuthorityLostRetryableError(err):
+					observeAuthorityRevalidation(e.local.metrics, req, authorityRevalidationRoleOwner, duration, err)
+					e.local.metrics.Error(req, "remote_owner_revalidate_authority", err)
+					e.local.report(nil, req, err)
+					select {
+					case signals <- remoteOwnerCloseSignalFromError(err, "revalidate_authority"):
+					default:
+					}
+					if cancelSession != nil {
+						cancelSession()
+					}
+					return
+				default:
+					observeAuthorityRevalidation(e.local.metrics, req, authorityRevalidationRoleOwner, duration, err)
+					e.local.metrics.Error(req, "remote_owner_revalidate_authority", err)
+					e.local.report(nil, req, err)
+				}
+			}
+		}
+	}()
+
+	return signals
+}
+
+func (e *RemoteOwnerEndpoint) sendRemoteOwnerClose(
+	req Request,
+	epoch uint64,
+	stream NodeMessageStream,
+	signal remoteOwnerCloseSignal,
+) {
 	if stream == nil || epoch == 0 || req.DocumentKey.DocumentID == "" || strings.TrimSpace(req.ConnectionID) == "" {
 		return
 	}
@@ -359,6 +449,8 @@ func (e *RemoteOwnerEndpoint) sendRemoteOwnerClose(req Request, epoch uint64, st
 		DocumentKey:  req.DocumentKey,
 		ConnectionID: req.ConnectionID,
 		Epoch:        epoch,
+		Retryable:    signal.retryable,
+		Reason:       signal.metricReason("close"),
 	}); err != nil && !isIgnorableNodeStreamError(err) {
 		e.local.metrics.Error(req, "remote_owner_send_close", err)
 		e.local.report(nil, req, err)

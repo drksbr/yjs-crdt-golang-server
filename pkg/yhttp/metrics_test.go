@@ -36,6 +36,8 @@ func TestHTTPServerInvokesMetricsHooks(t *testing.T) {
 
 	writeBinary(t, left, yprotocol.EncodeProtocolSyncStep1([]byte{0x00}))
 	_ = readBinary(t, left)
+	writeBinary(t, right, yprotocol.EncodeProtocolSyncStep1([]byte{0x00}))
+	_ = readBinary(t, right)
 
 	update := buildGCOnlyUpdate(77, 3)
 	writeBinary(t, left, yprotocol.EncodeProtocolSyncUpdate(update))
@@ -55,17 +57,17 @@ func TestHTTPServerInvokesMetricsHooks(t *testing.T) {
 	})
 
 	snapshot := recorder.snapshot()
-	if snapshot.frameReads != 2 {
-		t.Fatalf("frameReads = %d, want 2", snapshot.frameReads)
+	if snapshot.frameReads != 3 {
+		t.Fatalf("frameReads = %d, want 3", snapshot.frameReads)
 	}
-	if snapshot.frameWrites["direct"] != 1 {
-		t.Fatalf("frameWrites[direct] = %d, want 1", snapshot.frameWrites["direct"])
+	if snapshot.frameWrites["direct"] != 2 {
+		t.Fatalf("frameWrites[direct] = %d, want 2", snapshot.frameWrites["direct"])
 	}
 	if snapshot.frameWrites["broadcast"] != 1 {
 		t.Fatalf("frameWrites[broadcast] = %d, want 1", snapshot.frameWrites["broadcast"])
 	}
-	if snapshot.handleCalls != 2 {
-		t.Fatalf("handleCalls = %d, want 2", snapshot.handleCalls)
+	if snapshot.handleCalls != 3 {
+		t.Fatalf("handleCalls = %d, want 3", snapshot.handleCalls)
 	}
 	if len(snapshot.errorStages) != 0 {
 		t.Fatalf("errorStages = %v, want none", snapshot.errorStages)
@@ -88,6 +90,8 @@ type recordingMetrics struct {
 	remoteOwnerHandshakes       map[recordingRemoteOwnerHandshakeKey]int
 	remoteOwnerMessages         map[recordingRemoteOwnerMessageKey]int
 	remoteOwnerCloses           map[recordingRemoteOwnerCloseKey]int
+	authorityRevalidations      map[recordingAuthorityRevalidationKey]int
+	ownershipTransitions        map[recordingOwnershipTransitionKey]int
 }
 
 type recordingMetricsSnapshot struct {
@@ -105,6 +109,8 @@ type recordingMetricsSnapshot struct {
 	remoteOwnerHandshakes       map[recordingRemoteOwnerHandshakeKey]int
 	remoteOwnerMessages         map[recordingRemoteOwnerMessageKey]int
 	remoteOwnerCloses           map[recordingRemoteOwnerCloseKey]int
+	authorityRevalidations      map[recordingAuthorityRevalidationKey]int
+	ownershipTransitions        map[recordingOwnershipTransitionKey]int
 }
 
 func newRecordingMetrics() *recordingMetrics {
@@ -117,6 +123,8 @@ func newRecordingMetrics() *recordingMetrics {
 		remoteOwnerHandshakes:       make(map[recordingRemoteOwnerHandshakeKey]int),
 		remoteOwnerMessages:         make(map[recordingRemoteOwnerMessageKey]int),
 		remoteOwnerCloses:           make(map[recordingRemoteOwnerCloseKey]int),
+		authorityRevalidations:      make(map[recordingAuthorityRevalidationKey]int),
+		ownershipTransitions:        make(map[recordingOwnershipTransitionKey]int),
 	}
 }
 
@@ -214,6 +222,25 @@ func (r *recordingMetrics) RemoteOwnerClose(_ Request, role string, reason strin
 	}]++
 }
 
+func (r *recordingMetrics) AuthorityRevalidation(_ Request, role string, _ time.Duration, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.authorityRevalidations[recordingAuthorityRevalidationKey{
+		role:   role,
+		result: recordingResultLabel(err),
+	}]++
+}
+
+func (r *recordingMetrics) OwnershipTransition(_ Request, from string, to string, _ time.Duration, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ownershipTransitions[recordingOwnershipTransitionKey{
+		from:   from,
+		to:     to,
+		result: recordingResultLabel(err),
+	}]++
+}
+
 func (r *recordingMetrics) snapshot() recordingMetricsSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -250,6 +277,14 @@ func (r *recordingMetrics) snapshot() recordingMetricsSnapshot {
 	for key, total := range r.remoteOwnerCloses {
 		remoteOwnerCloses[key] = total
 	}
+	authorityRevalidations := make(map[recordingAuthorityRevalidationKey]int, len(r.authorityRevalidations))
+	for key, total := range r.authorityRevalidations {
+		authorityRevalidations[key] = total
+	}
+	ownershipTransitions := make(map[recordingOwnershipTransitionKey]int, len(r.ownershipTransitions))
+	for key, total := range r.ownershipTransitions {
+		ownershipTransitions[key] = total
+	}
 
 	errorStages := make([]string, len(r.errorStages))
 	copy(errorStages, r.errorStages)
@@ -269,6 +304,8 @@ func (r *recordingMetrics) snapshot() recordingMetricsSnapshot {
 		remoteOwnerHandshakes:       remoteOwnerHandshakes,
 		remoteOwnerMessages:         remoteOwnerMessages,
 		remoteOwnerCloses:           remoteOwnerCloses,
+		authorityRevalidations:      authorityRevalidations,
+		ownershipTransitions:        ownershipTransitions,
 	}
 }
 
@@ -286,6 +323,17 @@ type recordingRemoteOwnerMessageKey struct {
 type recordingRemoteOwnerCloseKey struct {
 	role   string
 	reason string
+}
+
+type recordingAuthorityRevalidationKey struct {
+	role   string
+	result string
+}
+
+type recordingOwnershipTransitionKey struct {
+	from   string
+	to     string
+	result string
 }
 
 func recordingResultLabel(err error) string {

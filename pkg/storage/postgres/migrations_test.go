@@ -18,8 +18,8 @@ func TestLoadMigrations(t *testing.T) {
 	if migrations[0].version != 1 {
 		t.Fatalf("migrations[0].version = %d, want 1", migrations[0].version)
 	}
-	if migrations[len(migrations)-1].version < 4 {
-		t.Fatalf("last migration version = %d, want at least 4", migrations[len(migrations)-1].version)
+	if migrations[len(migrations)-1].version < 6 {
+		t.Fatalf("last migration version = %d, want at least 6", migrations[len(migrations)-1].version)
 	}
 	if !strings.Contains(migrations[0].sql, `"tenant_app".document_snapshots`) {
 		t.Fatalf("migration sql = %q, want quoted schema substitution", migrations[0].sql)
@@ -27,6 +27,8 @@ func TestLoadMigrations(t *testing.T) {
 
 	var foundGenerationTable bool
 	var foundZeroSeed bool
+	var foundSnapshotThrough bool
+	var foundOwnerEpochColumns bool
 	for _, migration := range migrations {
 		if migration.version == 3 &&
 			strings.Contains(migration.sql, `"tenant_app".shard_lease_generations`) &&
@@ -36,11 +38,28 @@ func TestLoadMigrations(t *testing.T) {
 		if migration.version == 4 && strings.Contains(migration.sql, "last_epoch >= 0") {
 			foundZeroSeed = true
 		}
+		if migration.version == 5 &&
+			strings.Contains(migration.sql, `"tenant_app".document_snapshots`) &&
+			strings.Contains(migration.sql, "through_offset") {
+			foundSnapshotThrough = true
+		}
+		if migration.version == 6 &&
+			strings.Contains(migration.sql, `"tenant_app".document_snapshots`) &&
+			strings.Contains(migration.sql, `"tenant_app".document_update_logs`) &&
+			strings.Contains(migration.sql, "owner_epoch") {
+			foundOwnerEpochColumns = true
+		}
 	}
 	if !foundGenerationTable {
 		t.Fatal("migration version 3 does not define/backfill shard_lease_generations")
 	}
 	if !foundZeroSeed {
 		t.Fatal("migration version 4 does not relax shard_lease_generations last_epoch for zero-seed locking")
+	}
+	if !foundSnapshotThrough {
+		t.Fatal("migration version 5 does not add document snapshot through_offset checkpointing")
+	}
+	if !foundOwnerEpochColumns {
+		t.Fatal("migration version 6 does not add owner_epoch metadata to snapshots and update logs")
 	}
 }

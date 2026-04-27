@@ -24,6 +24,10 @@ type Store struct {
 }
 
 var _ storage.SnapshotStore = (*Store)(nil)
+var _ storage.SnapshotCheckpointStore = (*Store)(nil)
+var _ storage.SnapshotCheckpointEpochStore = (*Store)(nil)
+var _ storage.AuthoritativeSnapshotStore = (*Store)(nil)
+var _ storage.AuthoritativeSnapshotCheckpointStore = (*Store)(nil)
 
 // New cria um store PostgreSQL e executa automigration por padrão.
 func New(ctx context.Context, cfg Config) (*Store, error) {
@@ -78,6 +82,18 @@ func (s *Store) requirePool() (*pgxpool.Pool, error) {
 
 // SaveSnapshot grava ou substitui o snapshot de um documento.
 func (s *Store) SaveSnapshot(ctx context.Context, key storage.DocumentKey, snapshot *yjsbridge.PersistedSnapshot) (*storage.SnapshotRecord, error) {
+	return s.SaveSnapshotCheckpoint(ctx, key, snapshot, 0)
+}
+
+// SaveSnapshotCheckpoint grava ou substitui o snapshot de um documento,
+// persistindo o high-water mark que ele já incorpora.
+func (s *Store) SaveSnapshotCheckpoint(ctx context.Context, key storage.DocumentKey, snapshot *yjsbridge.PersistedSnapshot, through storage.UpdateOffset) (*storage.SnapshotRecord, error) {
+	return s.SaveSnapshotCheckpointEpoch(ctx, key, snapshot, through, 0)
+}
+
+// SaveSnapshotCheckpointEpoch grava ou substitui o snapshot de um documento,
+// persistindo o high-water mark e o epoch observados naquele checkpoint.
+func (s *Store) SaveSnapshotCheckpointEpoch(ctx context.Context, key storage.DocumentKey, snapshot *yjsbridge.PersistedSnapshot, through storage.UpdateOffset, epoch uint64) (*storage.SnapshotRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -96,23 +112,87 @@ func (s *Store) SaveSnapshot(ctx context.Context, key storage.DocumentKey, snaps
 	if err != nil {
 		return nil, err
 	}
-
-	query := fmt.Sprintf(`
-INSERT INTO %s.document_snapshots(namespace, document_id, snapshot_v1, stored_at)
-VALUES ($1, $2, $3, now())
-ON CONFLICT (namespace, document_id)
-DO UPDATE SET snapshot_v1 = EXCLUDED.snapshot_v1, stored_at = now()
-RETURNING stored_at
-`, quoteIdentifier(s.schema))
-
-	var storedAt time.Time
-	if err := pool.QueryRow(ctx, query, key.Namespace, key.DocumentID, payload).Scan(&storedAt); err != nil {
+	storedAt, err := s.saveSnapshotPool(ctx, pool, key, payload, through, epoch)
+	if err != nil {
 		return nil, err
 	}
 
 	return &storage.SnapshotRecord{
 		Key:      key,
 		Snapshot: snapshot.Clone(),
+		Through:  through,
+		Epoch:    epoch,
+		StoredAt: storedAt,
+	}, nil
+}
+
+// SaveSnapshotAuthoritative grava ou substitui o snapshot do documento,
+// exigindo que o placement + lease persistidos ainda correspondam ao fence.
+func (s *Store) SaveSnapshotAuthoritative(
+	ctx context.Context,
+	key storage.DocumentKey,
+	snapshot *yjsbridge.PersistedSnapshot,
+	fence storage.AuthorityFence,
+) (*storage.SnapshotRecord, error) {
+	return s.SaveSnapshotCheckpointAuthoritative(ctx, key, snapshot, 0, fence)
+}
+
+// SaveSnapshotCheckpointAuthoritative grava ou substitui o snapshot do
+// documento, persistindo o checkpoint `through` sob fencing autoritativo.
+func (s *Store) SaveSnapshotCheckpointAuthoritative(
+	ctx context.Context,
+	key storage.DocumentKey,
+	snapshot *yjsbridge.PersistedSnapshot,
+	through storage.UpdateOffset,
+	fence storage.AuthorityFence,
+) (*storage.SnapshotRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := key.Validate(); err != nil {
+		return nil, err
+	}
+	if snapshot == nil {
+		return nil, storage.ErrNilPersistedSnapshot
+	}
+	if err := fence.Validate(); err != nil {
+		return nil, err
+	}
+	pool, err := s.requirePool()
+	if err != nil {
+		return nil, err
+	}
+
+	payload, err := yjsbridge.EncodePersistedSnapshotV1(snapshot)
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+
+	if err := s.validateAuthorityTx(ctx, tx, key, fence, time.Now().UTC()); err != nil {
+		return nil, err
+	}
+
+	storedAt, err := s.saveSnapshotTx(ctx, tx, key, payload, through, fence.Owner.Epoch)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return &storage.SnapshotRecord{
+		Key:      key,
+		Snapshot: snapshot.Clone(),
+		Through:  through,
+		Epoch:    fence.Owner.Epoch,
 		StoredAt: storedAt,
 	}, nil
 }
@@ -131,14 +211,16 @@ func (s *Store) LoadSnapshot(ctx context.Context, key storage.DocumentKey) (*sto
 	}
 
 	query := fmt.Sprintf(`
-SELECT snapshot_v1, stored_at
+SELECT snapshot_v1, through_offset, owner_epoch, stored_at
 FROM %s.document_snapshots
 WHERE namespace = $1 AND document_id = $2
 `, quoteIdentifier(s.schema))
 
 	var payload []byte
+	var through int64
+	var epoch int64
 	var storedAt time.Time
-	if err := pool.QueryRow(ctx, query, key.Namespace, key.DocumentID).Scan(&payload, &storedAt); err != nil {
+	if err := pool.QueryRow(ctx, query, key.Namespace, key.DocumentID).Scan(&payload, &through, &epoch, &storedAt); err != nil {
 		if isNoRows(err) {
 			return nil, storage.ErrSnapshotNotFound
 		}
@@ -149,14 +231,70 @@ WHERE namespace = $1 AND document_id = $2
 	if err != nil {
 		return nil, err
 	}
+	throughOffset, err := int64ToOffset(through)
+	if err != nil {
+		return nil, err
+	}
+	epochValue, err := int64ToUint64("owner epoch", epoch)
+	if err != nil {
+		return nil, err
+	}
 
 	return &storage.SnapshotRecord{
 		Key:      key,
 		Snapshot: snapshot,
+		Through:  throughOffset,
+		Epoch:    epochValue,
 		StoredAt: storedAt,
 	}, nil
 }
 
 func isNoRows(err error) bool {
 	return errors.Is(err, pgx.ErrNoRows)
+}
+
+func (s *Store) saveSnapshotPool(ctx context.Context, pool *pgxpool.Pool, key storage.DocumentKey, payload []byte, through storage.UpdateOffset, epoch uint64) (time.Time, error) {
+	query, args, err := s.saveSnapshotQuery(key, payload, through, epoch)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	var storedAt time.Time
+	if err := pool.QueryRow(ctx, query, args...).Scan(&storedAt); err != nil {
+		return time.Time{}, err
+	}
+	return storedAt, nil
+}
+
+func (s *Store) saveSnapshotTx(ctx context.Context, tx pgx.Tx, key storage.DocumentKey, payload []byte, through storage.UpdateOffset, epoch uint64) (time.Time, error) {
+	query, args, err := s.saveSnapshotQuery(key, payload, through, epoch)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	var storedAt time.Time
+	if err := tx.QueryRow(ctx, query, args...).Scan(&storedAt); err != nil {
+		return time.Time{}, err
+	}
+	return storedAt, nil
+}
+
+func (s *Store) saveSnapshotQuery(key storage.DocumentKey, payload []byte, through storage.UpdateOffset, epoch uint64) (string, []any, error) {
+	throughOffset, err := offsetToInt64(through)
+	if err != nil {
+		return "", nil, err
+	}
+	epochValue, err := uint64ToInt64("owner epoch", epoch)
+	if err != nil {
+		return "", nil, err
+	}
+
+	query := fmt.Sprintf(`
+INSERT INTO %s.document_snapshots(namespace, document_id, snapshot_v1, through_offset, owner_epoch, stored_at)
+VALUES ($1, $2, $3, $4, $5, now())
+ON CONFLICT (namespace, document_id)
+DO UPDATE SET snapshot_v1 = EXCLUDED.snapshot_v1, through_offset = EXCLUDED.through_offset, owner_epoch = EXCLUDED.owner_epoch, stored_at = now()
+RETURNING stored_at
+`, quoteIdentifier(s.schema))
+	return query, []any{key.Namespace, key.DocumentID, payload, throughOffset, epochValue}, nil
 }

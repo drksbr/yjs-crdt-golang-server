@@ -319,9 +319,11 @@ func newOwnerAwareWSHandler(
 		if err != nil {
 			return nil, nil, err
 		}
-		cfg.OnRemoteOwner, err = yhttp.NewRemoteOwnerForwardHandler(yhttp.RemoteOwnerForwardConfig{
+		cfg.OnRemoteOwner, cfg.OnLocalAuthorityLost, err = yhttp.NewRemoteOwnerForwardHandlers(yhttp.RemoteOwnerForwardConfig{
 			LocalNodeID: localNode,
+			Local:       localWSHandler,
 			Dialer:      dialer,
+			OwnerLookup: ownerLookup,
 		})
 		if err != nil {
 			return nil, nil, err

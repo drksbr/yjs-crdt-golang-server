@@ -38,6 +38,18 @@ type RemoteOwnerMetrics interface {
 	RemoteOwnerClose(req Request, role string, reason string)
 }
 
+// AuthorityRevalidationMetrics adiciona observabilidade opcional para os
+// ciclos periodicos de revalidacao de autoridade/lease.
+type AuthorityRevalidationMetrics interface {
+	AuthorityRevalidation(req Request, role string, duration time.Duration, err error)
+}
+
+// OwnershipTransitionMetrics adiciona observabilidade opcional para handoffs e
+// rebinds entre modos de ownership local/remoto.
+type OwnershipTransitionMetrics interface {
+	OwnershipTransition(req Request, from string, to string, duration time.Duration, err error)
+}
+
 type noopMetrics struct{}
 
 func (noopMetrics) ConnectionOpened(Request)              {}
@@ -109,4 +121,20 @@ func observeRemoteOwnerClose(metrics Metrics, req Request, role string, reason s
 		return
 	}
 	observer.RemoteOwnerClose(req, role, reason)
+}
+
+func observeAuthorityRevalidation(metrics Metrics, req Request, role string, duration time.Duration, err error) {
+	observer, ok := metrics.(AuthorityRevalidationMetrics)
+	if !ok {
+		return
+	}
+	observer.AuthorityRevalidation(req, role, duration, err)
+}
+
+func observeOwnershipTransition(metrics Metrics, req Request, from string, to string, duration time.Duration, err error) {
+	observer, ok := metrics.(OwnershipTransitionMetrics)
+	if !ok {
+		return
+	}
+	observer.OwnershipTransition(req, from, to, duration, err)
 }

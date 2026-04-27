@@ -232,26 +232,26 @@ func protocolPayloadToOwnerMessages(
 	return messages, nil
 }
 
-func remoteMessageToProtocolPayload(message ynodeproto.Message) ([]byte, bool, error) {
+func remoteMessageToProtocolPayload(message ynodeproto.Message) ([]byte, *ynodeproto.Close, error) {
 	switch message := message.(type) {
 	case *ynodeproto.HandshakeAck:
-		return nil, false, nil
+		return nil, nil, nil
 	case *ynodeproto.DocumentSyncResponse:
-		return yprotocol.EncodeProtocolSyncStep2(message.UpdateV1), false, nil
+		return yprotocol.EncodeProtocolSyncStep2(message.UpdateV1), nil, nil
 	case *ynodeproto.DocumentUpdate:
-		return yprotocol.EncodeProtocolSyncUpdate(message.UpdateV1), false, nil
+		return yprotocol.EncodeProtocolSyncUpdate(message.UpdateV1), nil, nil
 	case *ynodeproto.AwarenessUpdate:
 		payload, err := yprotocol.EncodeProtocolMessage(yprotocol.ProtocolTypeAwareness, message.Payload)
-		return payload, false, err
+		return payload, nil, err
 	case *ynodeproto.QueryAwarenessResponse:
 		payload, err := yprotocol.EncodeProtocolMessage(yprotocol.ProtocolTypeAwareness, message.Payload)
-		return payload, false, err
+		return payload, nil, err
 	case *ynodeproto.Close:
-		return nil, true, nil
+		return nil, message, nil
 	case *ynodeproto.Ping, *ynodeproto.Pong:
-		return nil, false, nil
+		return nil, nil, nil
 	default:
-		return nil, false, fmt.Errorf("yhttp: message type remoto nao suportado: %T", message)
+		return nil, nil, fmt.Errorf("yhttp: message type remoto nao suportado: %T", message)
 	}
 }
 

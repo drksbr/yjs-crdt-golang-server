@@ -69,6 +69,8 @@ func TestSnapshotRecordClone(t *testing.T) {
 	record := &SnapshotRecord{
 		Key:      DocumentKey{Namespace: "tenant", DocumentID: "doc-1"},
 		Snapshot: baseSnapshot,
+		Through:  17,
+		Epoch:    6,
 		StoredAt: baseTime,
 	}
 
@@ -84,6 +86,12 @@ func TestSnapshotRecordClone(t *testing.T) {
 	}
 	if !clone.StoredAt.Equal(baseTime) {
 		t.Fatalf("Clone().StoredAt = %v, want %v", clone.StoredAt, baseTime)
+	}
+	if clone.Through != 17 {
+		t.Fatalf("Clone().Through = %d, want 17", clone.Through)
+	}
+	if clone.Epoch != 6 {
+		t.Fatalf("Clone().Epoch = %d, want 6", clone.Epoch)
 	}
 
 	clone.Key.DocumentID = "other"

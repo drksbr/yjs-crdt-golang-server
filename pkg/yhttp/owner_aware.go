@@ -43,6 +43,7 @@ type OwnerAwareServerConfig struct {
 	Local         *Server
 	OwnerLookup   ycluster.OwnerLookup
 	OnRemoteOwner RemoteOwnerHandler
+	OnLocalAuthorityLost AuthorityLossHandler
 	RetryAfter    time.Duration
 }
 
@@ -58,6 +59,7 @@ type OwnerAwareServer struct {
 	metrics       Metrics
 	ownerLookup   ycluster.OwnerLookup
 	onRemoteOwner RemoteOwnerHandler
+	onLocalAuthorityLost AuthorityLossHandler
 	retryAfter    time.Duration
 }
 
@@ -81,6 +83,7 @@ func NewOwnerAwareServer(cfg OwnerAwareServerConfig) (*OwnerAwareServer, error) 
 		metrics:       normalizeMetrics(cfg.Local.metrics),
 		ownerLookup:   cfg.OwnerLookup,
 		onRemoteOwner: cfg.OnRemoteOwner,
+		onLocalAuthorityLost: cfg.OnLocalAuthorityLost,
 		retryAfter:    retryAfter,
 	}, nil
 }
@@ -119,7 +122,10 @@ func (s *OwnerAwareServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	observeOwnerLookup(s.metrics, req, lookupDuration, ownerLookupResultFromResolution(*resolution))
 	if resolution.Local {
 		observeRouteDecision(s.metrics, req, routeDecisionLocal)
-		s.local.serveResolvedHTTP(w, r, req)
+		s.local.serveResolvedHTTPWithOptions(w, r, req, serverSocketSessionOptions{
+			observeConnectionLifecycle: true,
+			authorityLossHandler:      s.onLocalAuthorityLost,
+		})
 		return
 	}
 	if strings.TrimSpace(req.ConnectionID) == "" {

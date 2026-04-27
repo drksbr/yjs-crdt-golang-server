@@ -63,6 +63,12 @@ func TestStoreSaveAndLoadSnapshot(t *testing.T) {
 			if !saved.StoredAt.Equal(tt.timestamps[0]) {
 				t.Fatalf("SaveSnapshot().StoredAt = %v, want %v", saved.StoredAt, tt.timestamps[0])
 			}
+			if saved.Through != 0 {
+				t.Fatalf("SaveSnapshot().Through = %d, want 0", saved.Through)
+			}
+			if saved.Epoch != 0 {
+				t.Fatalf("SaveSnapshot().Epoch = %d, want 0", saved.Epoch)
+			}
 			if !bytes.Equal(saved.Snapshot.UpdateV1, tt.first.UpdateV1) {
 				t.Fatalf("snapshot gravado = %v, want %v", saved.Snapshot.UpdateV1, tt.first.UpdateV1)
 			}
@@ -73,6 +79,12 @@ func TestStoreSaveAndLoadSnapshot(t *testing.T) {
 			}
 			if !bytes.Equal(loaded.Snapshot.UpdateV1, tt.first.UpdateV1) {
 				t.Fatalf("snapshot carregado = %v, want %v", loaded.Snapshot.UpdateV1, tt.first.UpdateV1)
+			}
+			if loaded.Through != 0 {
+				t.Fatalf("LoadSnapshot().Through = %d, want 0", loaded.Through)
+			}
+			if loaded.Epoch != 0 {
+				t.Fatalf("LoadSnapshot().Epoch = %d, want 0", loaded.Epoch)
 			}
 
 			loaded.Snapshot.UpdateV1 = []byte{0xff}
@@ -98,6 +110,12 @@ func TestStoreSaveAndLoadSnapshot(t *testing.T) {
 			if !saved.StoredAt.Equal(tt.timestamps[1]) {
 				t.Fatalf("segunda SaveSnapshot().StoredAt = %v, want %v", saved.StoredAt, tt.timestamps[1])
 			}
+			if saved.Through != 0 {
+				t.Fatalf("segunda SaveSnapshot().Through = %d, want 0", saved.Through)
+			}
+			if saved.Epoch != 0 {
+				t.Fatalf("segunda SaveSnapshot().Epoch = %d, want 0", saved.Epoch)
+			}
 			if !bytes.Equal(saved.Snapshot.UpdateV1, tt.second.UpdateV1) {
 				t.Fatalf("snapshot gravado no segundo save = %v, want %v", saved.Snapshot.UpdateV1, tt.second.UpdateV1)
 			}
@@ -110,6 +128,71 @@ func TestStoreSaveAndLoadSnapshot(t *testing.T) {
 				t.Fatalf("snapshot após sobrescricao = %v, want %v", latest.Snapshot.UpdateV1, tt.second.UpdateV1)
 			}
 		})
+	}
+}
+
+func TestStoreSaveAndLoadSnapshotCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	store := New()
+	firstAt := time.Unix(210, 0).UTC()
+	secondAt := time.Unix(211, 0).UTC()
+	store.now = sequenceClock(firstAt, secondAt)
+
+	key := storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-through"}
+	snapshot, err := yjsbridge.PersistedSnapshotFromUpdates()
+	if err != nil {
+		t.Fatalf("PersistedSnapshotFromUpdates() unexpected error: %v", err)
+	}
+
+	saved, err := store.SaveSnapshotCheckpoint(context.Background(), key, snapshot, 7)
+	if err != nil {
+		t.Fatalf("SaveSnapshotCheckpoint() unexpected error: %v", err)
+	}
+	if saved.Through != 7 {
+		t.Fatalf("SaveSnapshotCheckpoint().Through = %d, want 7", saved.Through)
+	}
+	if saved.Epoch != 0 {
+		t.Fatalf("SaveSnapshotCheckpoint().Epoch = %d, want 0", saved.Epoch)
+	}
+	if !saved.StoredAt.Equal(firstAt) {
+		t.Fatalf("SaveSnapshotCheckpoint().StoredAt = %v, want %v", saved.StoredAt, firstAt)
+	}
+
+	loaded, err := store.LoadSnapshot(context.Background(), key)
+	if err != nil {
+		t.Fatalf("LoadSnapshot() unexpected error: %v", err)
+	}
+	if loaded.Through != 7 {
+		t.Fatalf("LoadSnapshot().Through = %d, want 7", loaded.Through)
+	}
+	if loaded.Epoch != 0 {
+		t.Fatalf("LoadSnapshot().Epoch = %d, want 0", loaded.Epoch)
+	}
+
+	saved, err = store.SaveSnapshotCheckpointEpoch(context.Background(), key, snapshot, 13, 21)
+	if err != nil {
+		t.Fatalf("SaveSnapshotCheckpointEpoch(second) unexpected error: %v", err)
+	}
+	if saved.Through != 13 {
+		t.Fatalf("SaveSnapshotCheckpointEpoch(second).Through = %d, want 13", saved.Through)
+	}
+	if saved.Epoch != 21 {
+		t.Fatalf("SaveSnapshotCheckpointEpoch(second).Epoch = %d, want 21", saved.Epoch)
+	}
+	if !saved.StoredAt.Equal(secondAt) {
+		t.Fatalf("SaveSnapshotCheckpointEpoch(second).StoredAt = %v, want %v", saved.StoredAt, secondAt)
+	}
+
+	loaded, err = store.LoadSnapshot(context.Background(), key)
+	if err != nil {
+		t.Fatalf("LoadSnapshot() unexpected error after epoch save: %v", err)
+	}
+	if loaded.Through != 13 {
+		t.Fatalf("LoadSnapshot().Through after epoch save = %d, want 13", loaded.Through)
+	}
+	if loaded.Epoch != 21 {
+		t.Fatalf("LoadSnapshot().Epoch after epoch save = %d, want 21", loaded.Epoch)
 	}
 }
 

@@ -24,6 +24,9 @@ const (
 	// FlagPersistOnClose informa que a conexão roteada deve persistir o snapshot
 	// ao encerrar o contexto remoto.
 	FlagPersistOnClose Flags = 1 << iota
+	// FlagCloseRetryable informa que a mensagem Close representa um cutover
+	// retryable e o cliente deve tentar reconectar.
+	FlagCloseRetryable
 )
 
 // MessageType identifica a classe semântica do payload inter-node.

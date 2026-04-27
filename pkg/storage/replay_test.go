@@ -22,18 +22,37 @@ type testSnapshotLogStore struct {
 	saveErr error
 	trimErr error
 
-	listCalls int
-	saveCalls int
-	trimCalls int
+	listCalls           int
+	saveCalls           int
+	saveCheckpointCalls int
+	saveEpochCalls      int
+	trimCalls           int
 
 	trimmedKey     DocumentKey
 	trimmedThrough UpdateOffset
+	savedThrough   UpdateOffset
+	savedEpoch     uint64
+	listAfters     []UpdateOffset
 }
 
 var _ SnapshotLogStore = (*testSnapshotLogStore)(nil)
+var _ SnapshotCheckpointStore = (*testSnapshotLogStore)(nil)
+var _ SnapshotCheckpointEpochStore = (*testSnapshotLogStore)(nil)
 
 func (s *testSnapshotLogStore) SaveSnapshot(_ context.Context, key DocumentKey, snapshot *yjsbridge.PersistedSnapshot) (*SnapshotRecord, error) {
+	return s.SaveSnapshotCheckpointEpoch(context.Background(), key, snapshot, 0, 0)
+}
+
+func (s *testSnapshotLogStore) SaveSnapshotCheckpoint(_ context.Context, key DocumentKey, snapshot *yjsbridge.PersistedSnapshot, through UpdateOffset) (*SnapshotRecord, error) {
+	return s.SaveSnapshotCheckpointEpoch(context.Background(), key, snapshot, through, 0)
+}
+
+func (s *testSnapshotLogStore) SaveSnapshotCheckpointEpoch(_ context.Context, key DocumentKey, snapshot *yjsbridge.PersistedSnapshot, through UpdateOffset, epoch uint64) (*SnapshotRecord, error) {
 	s.saveCalls++
+	s.saveCheckpointCalls++
+	s.saveEpochCalls++
+	s.savedThrough = through
+	s.savedEpoch = epoch
 	if s.saveErr != nil {
 		return nil, s.saveErr
 	}
@@ -41,6 +60,8 @@ func (s *testSnapshotLogStore) SaveSnapshot(_ context.Context, key DocumentKey, 
 	record := &SnapshotRecord{
 		Key:      key,
 		Snapshot: snapshot.Clone(),
+		Through:  through,
+		Epoch:    epoch,
 		StoredAt: time.Unix(500, 0).UTC(),
 	}
 	s.snapshot = record.Clone()
@@ -60,6 +81,7 @@ func (s *testSnapshotLogStore) AppendUpdate(context.Context, DocumentKey, []byte
 
 func (s *testSnapshotLogStore) ListUpdates(_ context.Context, _ DocumentKey, after UpdateOffset, limit int) ([]*UpdateLogRecord, error) {
 	s.listCalls++
+	s.listAfters = append(s.listAfters, after)
 	if s.listErr != nil {
 		return nil, s.listErr
 	}
@@ -166,8 +188,8 @@ func TestReplayUpdateLogContextRebuildsSnapshotFromBaseAndTail(t *testing.T) {
 
 	store := &testSnapshotLogStore{
 		records: []*UpdateLogRecord{
-			{Key: key, Offset: 11, UpdateV1: tailLeft, StoredAt: time.Unix(11, 0).UTC()},
-			{Key: key, Offset: 15, UpdateV1: tailRight, StoredAt: time.Unix(15, 0).UTC()},
+			{Key: key, Offset: 11, UpdateV1: tailLeft, Epoch: 3, StoredAt: time.Unix(11, 0).UTC()},
+			{Key: key, Offset: 15, UpdateV1: tailRight, Epoch: 4, StoredAt: time.Unix(15, 0).UTC()},
 		},
 	}
 
@@ -182,6 +204,9 @@ func TestReplayUpdateLogContextRebuildsSnapshotFromBaseAndTail(t *testing.T) {
 	}
 	if got.Through != 15 {
 		t.Fatalf("ReplayUpdateLogContext().Through = %d, want 15", got.Through)
+	}
+	if got.LastEpoch != 4 {
+		t.Fatalf("ReplayUpdateLogContext().LastEpoch = %d, want 4", got.LastEpoch)
 	}
 	if !bytes.Equal(got.Snapshot.UpdateV1, want.UpdateV1) {
 		t.Fatalf("ReplayUpdateLogContext().Snapshot.UpdateV1 = %v, want %v", got.Snapshot.UpdateV1, want.UpdateV1)
@@ -200,8 +225,8 @@ func TestReplayUpdateLogRebuildsFromNilBase(t *testing.T) {
 
 	store := &testSnapshotLogStore{
 		records: []*UpdateLogRecord{
-			{Key: key, Offset: 1, UpdateV1: left},
-			{Key: key, Offset: 2, UpdateV1: right},
+			{Key: key, Offset: 1, UpdateV1: left, Epoch: 1},
+			{Key: key, Offset: 2, UpdateV1: right, Epoch: 1},
 		},
 	}
 
@@ -216,6 +241,9 @@ func TestReplayUpdateLogRebuildsFromNilBase(t *testing.T) {
 	}
 	if got.Through != 2 {
 		t.Fatalf("ReplayUpdateLog().Through = %d, want 2", got.Through)
+	}
+	if got.LastEpoch != 1 {
+		t.Fatalf("ReplayUpdateLog().LastEpoch = %d, want 1", got.LastEpoch)
 	}
 	if !bytes.Equal(got.Snapshot.UpdateV1, want.UpdateV1) {
 		t.Fatalf("ReplayUpdateLog().Snapshot.UpdateV1 = %v, want %v", got.Snapshot.UpdateV1, want.UpdateV1)
@@ -330,22 +358,34 @@ func TestRecoverSnapshotPagesTailAndClonesUpdates(t *testing.T) {
 		snapshot: &SnapshotRecord{
 			Key:      key,
 			Snapshot: mustPersistedSnapshotFromUpdates(t, baseUpdate),
+			Through:  5,
+			Epoch:    2,
 			StoredAt: time.Unix(100, 0).UTC(),
 		},
 		records: []*UpdateLogRecord{
-			{Key: key, Offset: 7, UpdateV1: left},
-			{Key: key, Offset: 9, UpdateV1: right},
+			{Key: key, Offset: 3, UpdateV1: buildGCOnlyUpdate(19, 1)},
+			{Key: key, Offset: 7, UpdateV1: left, Epoch: 2},
+			{Key: key, Offset: 9, UpdateV1: right, Epoch: 3},
 		},
 	}
 
-	got, err := RecoverSnapshot(context.Background(), store, store, key, 5, 1)
+	got, err := RecoverSnapshot(context.Background(), store, store, key, 0, 1)
 	if err != nil {
 		t.Fatalf("RecoverSnapshot() unexpected error: %v", err)
 	}
 
 	want := mustPersistedSnapshotFromUpdates(t, baseUpdate, left, right)
+	if got.CheckpointThrough != 5 {
+		t.Fatalf("RecoverSnapshot().CheckpointThrough = %d, want 5", got.CheckpointThrough)
+	}
+	if got.CheckpointEpoch != 2 {
+		t.Fatalf("RecoverSnapshot().CheckpointEpoch = %d, want 2", got.CheckpointEpoch)
+	}
 	if got.LastOffset != 9 {
 		t.Fatalf("RecoverSnapshot().LastOffset = %d, want 9", got.LastOffset)
+	}
+	if got.LastEpoch != 3 {
+		t.Fatalf("RecoverSnapshot().LastEpoch = %d, want 3", got.LastEpoch)
 	}
 	if len(got.Updates) != 2 {
 		t.Fatalf("len(RecoverSnapshot().Updates) = %d, want 2", len(got.Updates))
@@ -356,9 +396,12 @@ func TestRecoverSnapshotPagesTailAndClonesUpdates(t *testing.T) {
 	if store.listCalls != 3 {
 		t.Fatalf("ListUpdates() calls = %d, want 3", store.listCalls)
 	}
+	if len(store.listAfters) == 0 || store.listAfters[0] != 5 {
+		t.Fatalf("ListUpdates() first after = %#v, want first call after 5", store.listAfters)
+	}
 
 	got.Updates[0].UpdateV1[0] ^= 0xff
-	reloaded, err := RecoverSnapshot(context.Background(), store, store, key, 5, 1)
+	reloaded, err := RecoverSnapshot(context.Background(), store, store, key, 0, 1)
 	if err != nil {
 		t.Fatalf("RecoverSnapshot() reload unexpected error: %v", err)
 	}
@@ -379,8 +422,63 @@ func TestRecoverSnapshotWithoutSnapshotOrUpdates(t *testing.T) {
 	if got.LastOffset != 9 {
 		t.Fatalf("RecoverSnapshot().LastOffset = %d, want 9", got.LastOffset)
 	}
+	if got.CheckpointThrough != 0 {
+		t.Fatalf("RecoverSnapshot().CheckpointThrough = %d, want 0", got.CheckpointThrough)
+	}
+	if got.CheckpointEpoch != 0 {
+		t.Fatalf("RecoverSnapshot().CheckpointEpoch = %d, want 0", got.CheckpointEpoch)
+	}
+	if got.LastEpoch != 0 {
+		t.Fatalf("RecoverSnapshot().LastEpoch = %d, want 0", got.LastEpoch)
+	}
 	if got.Snapshot == nil || !got.Snapshot.IsEmpty() {
 		t.Fatalf("RecoverSnapshot().Snapshot = %#v, want empty snapshot", got.Snapshot)
+	}
+}
+
+func TestRecoverSnapshotRejectsConflictingCheckpointOffset(t *testing.T) {
+	t.Parallel()
+
+	key := DocumentKey{Namespace: "tenant-a", DocumentID: "doc-8b"}
+	store := &testSnapshotLogStore{
+		snapshot: &SnapshotRecord{
+			Key:      key,
+			Snapshot: mustPersistedSnapshotFromUpdates(t, buildGCOnlyUpdate(23, 1)),
+			Through:  5,
+			Epoch:    4,
+			StoredAt: time.Unix(101, 0).UTC(),
+		},
+	}
+
+	_, err := RecoverSnapshot(context.Background(), store, store, key, 3, 1)
+	if !errors.Is(err, ErrSnapshotCheckpointMismatch) {
+		t.Fatalf("RecoverSnapshot() error = %v, want %v", err, ErrSnapshotCheckpointMismatch)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("ListUpdates() calls = %d, want 0", store.listCalls)
+	}
+}
+
+func TestRecoverSnapshotRejectsEpochRegressionAcrossCheckpointAndTail(t *testing.T) {
+	t.Parallel()
+
+	key := DocumentKey{Namespace: "tenant-a", DocumentID: "doc-8c"}
+	store := &testSnapshotLogStore{
+		snapshot: &SnapshotRecord{
+			Key:      key,
+			Snapshot: mustPersistedSnapshotFromUpdates(t, buildGCOnlyUpdate(24, 1)),
+			Through:  5,
+			Epoch:    4,
+			StoredAt: time.Unix(102, 0).UTC(),
+		},
+		records: []*UpdateLogRecord{
+			{Key: key, Offset: 6, UpdateV1: buildGCOnlyUpdate(25, 1), Epoch: 3},
+		},
+	}
+
+	_, err := RecoverSnapshot(context.Background(), store, store, key, 0, 1)
+	if !errors.Is(err, ErrUpdateLogEpochRegression) {
+		t.Fatalf("RecoverSnapshot() error = %v, want %v", err, ErrUpdateLogEpochRegression)
 	}
 }
 
@@ -394,7 +492,7 @@ func TestCompactUpdateLogContextSavesSnapshotAndTrimsTail(t *testing.T) {
 
 	store := &testSnapshotLogStore{
 		records: []*UpdateLogRecord{
-			{Key: key, Offset: 8, UpdateV1: tail},
+			{Key: key, Offset: 8, UpdateV1: tail, Epoch: 5},
 		},
 	}
 
@@ -413,14 +511,35 @@ func TestCompactUpdateLogContextSavesSnapshotAndTrimsTail(t *testing.T) {
 	if got.Through != 8 {
 		t.Fatalf("CompactUpdateLogContext().Through = %d, want 8", got.Through)
 	}
+	if got.LastEpoch != 5 {
+		t.Fatalf("CompactUpdateLogContext().LastEpoch = %d, want 5", got.LastEpoch)
+	}
 	if !bytes.Equal(got.Snapshot.UpdateV1, want.UpdateV1) {
 		t.Fatalf("CompactUpdateLogContext().Snapshot.UpdateV1 = %v, want %v", got.Snapshot.UpdateV1, want.UpdateV1)
 	}
 	if !bytes.Equal(got.Record.Snapshot.UpdateV1, want.UpdateV1) {
 		t.Fatalf("CompactUpdateLogContext().Record.Snapshot.UpdateV1 = %v, want %v", got.Record.Snapshot.UpdateV1, want.UpdateV1)
 	}
+	if got.Record.Through != 8 {
+		t.Fatalf("CompactUpdateLogContext().Record.Through = %d, want 8", got.Record.Through)
+	}
+	if got.Record.Epoch != 5 {
+		t.Fatalf("CompactUpdateLogContext().Record.Epoch = %d, want 5", got.Record.Epoch)
+	}
 	if store.saveCalls != 1 {
 		t.Fatalf("SaveSnapshot() calls = %d, want 1", store.saveCalls)
+	}
+	if store.saveCheckpointCalls != 1 {
+		t.Fatalf("SaveSnapshotCheckpoint() calls = %d, want 1", store.saveCheckpointCalls)
+	}
+	if store.saveEpochCalls != 1 {
+		t.Fatalf("SaveSnapshotCheckpointEpoch() calls = %d, want 1", store.saveEpochCalls)
+	}
+	if store.savedThrough != 8 {
+		t.Fatalf("SaveSnapshotCheckpoint() through = %d, want 8", store.savedThrough)
+	}
+	if store.savedEpoch != 5 {
+		t.Fatalf("SaveSnapshotCheckpointEpoch() epoch = %d, want 5", store.savedEpoch)
 	}
 	if store.trimCalls != 1 {
 		t.Fatalf("TrimUpdates() calls = %d, want 1", store.trimCalls)

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"yjs-go-bridge/pkg/storage"
+	"yjs-go-bridge/pkg/yjsbridge"
 )
 
 func TestAutoMigrateRequiresInitializedStore(t *testing.T) {
@@ -141,5 +142,72 @@ func TestAutoMigrateUpgradesLeaseGenerationSeedConstraint(t *testing.T) {
 		ExpiresAt: time.Now().UTC().Add(time.Minute),
 	}); err != nil {
 		t.Fatalf("SaveLease() after v4 migration unexpected error: %v", err)
+	}
+}
+
+func TestAutoMigrateBackfillsSnapshotThroughOffsetAndOwnerEpoch(t *testing.T) {
+	store, _ := newTestStore(t, true)
+	ctx := context.Background()
+	schema := quoteIdentifier(store.schema)
+
+	if _, err := store.pool.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+schema); err != nil {
+		t.Fatalf("create schema unexpected error: %v", err)
+	}
+
+	migrations, err := loadMigrations(store.schema)
+	if err != nil {
+		t.Fatalf("loadMigrations() unexpected error: %v", err)
+	}
+	if len(migrations) < 6 {
+		t.Fatalf("len(migrations) = %d, want at least 6", len(migrations))
+	}
+	for _, migration := range migrations[:4] {
+		if err := store.applyMigration(ctx, schema, migration); err != nil {
+			t.Fatalf("applyMigration(%s) unexpected error: %v", migration.name, err)
+		}
+	}
+
+	insertQuery := fmt.Sprintf(`
+INSERT INTO %s.document_snapshots(namespace, document_id, snapshot_v1, stored_at)
+VALUES ($1, $2, $3, now())
+`, schema)
+	if _, err := store.pool.Exec(ctx, insertQuery, "", "legacy-doc", []byte{0x00, 0x00}); err != nil {
+		t.Fatalf("insert legacy snapshot unexpected error: %v", err)
+	}
+
+	if err := store.AutoMigrate(ctx); err != nil {
+		t.Fatalf("AutoMigrate() upgrade unexpected error: %v", err)
+	}
+
+	var through int64
+	var epoch int64
+	checkQuery := fmt.Sprintf(`
+SELECT through_offset, owner_epoch
+FROM %s.document_snapshots
+WHERE namespace = $1 AND document_id = $2
+`, schema)
+	if err := store.pool.QueryRow(ctx, checkQuery, "", "legacy-doc").Scan(&through, &epoch); err != nil {
+		t.Fatalf("scan through_offset unexpected error: %v", err)
+	}
+	if through != 0 {
+		t.Fatalf("legacy through_offset = %d, want 0", through)
+	}
+	if epoch != 0 {
+		t.Fatalf("legacy owner_epoch = %d, want 0", epoch)
+	}
+
+	snapshot, err := yjsbridge.PersistedSnapshotFromUpdates()
+	if err != nil {
+		t.Fatalf("PersistedSnapshotFromUpdates() unexpected error: %v", err)
+	}
+	record, err := store.SaveSnapshotCheckpoint(ctx, storage.DocumentKey{DocumentID: "fresh-doc"}, snapshot, 11)
+	if err != nil {
+		t.Fatalf("SaveSnapshotCheckpoint() unexpected error: %v", err)
+	}
+	if record.Through != 11 {
+		t.Fatalf("SaveSnapshotCheckpoint().Through = %d, want 11", record.Through)
+	}
+	if record.Epoch != 0 {
+		t.Fatalf("SaveSnapshotCheckpoint().Epoch = %d, want 0", record.Epoch)
 	}
 }

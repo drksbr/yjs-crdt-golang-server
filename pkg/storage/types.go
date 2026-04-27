@@ -28,6 +28,8 @@ func (k DocumentKey) Validate() error {
 type SnapshotRecord struct {
 	Key      DocumentKey
 	Snapshot *yjsbridge.PersistedSnapshot
+	Through  UpdateOffset
+	Epoch    uint64
 	StoredAt time.Time
 }
 
@@ -45,6 +47,8 @@ func (r *SnapshotRecord) Clone() *SnapshotRecord {
 	return &SnapshotRecord{
 		Key:      r.Key,
 		Snapshot: snapshot,
+		Through:  r.Through,
+		Epoch:    r.Epoch,
 		StoredAt: r.StoredAt,
 	}
 }
@@ -56,4 +60,25 @@ type SnapshotStore interface {
 
 	// LoadSnapshot recupera o snapshot persistido para a chave informada.
 	LoadSnapshot(ctx context.Context, key DocumentKey) (*SnapshotRecord, error)
+}
+
+// SnapshotCheckpointStore adiciona persistência opcional do checkpoint
+// representado pelo snapshot.
+type SnapshotCheckpointStore interface {
+	SnapshotStore
+
+	// SaveSnapshotCheckpoint grava o snapshot junto com o offset máximo que ele
+	// já incorpora do update log. Implementações podem ignorar esse valor quando
+	// não oferecem replay incremental.
+	SaveSnapshotCheckpoint(ctx context.Context, key DocumentKey, snapshot *yjsbridge.PersistedSnapshot, through UpdateOffset) (*SnapshotRecord, error)
+}
+
+// SnapshotCheckpointEpochStore adiciona persistência opcional do epoch
+// observado no checkpoint salvo.
+type SnapshotCheckpointEpochStore interface {
+	SnapshotCheckpointStore
+
+	// SaveSnapshotCheckpointEpoch grava o snapshot junto com o offset máximo e o
+	// epoch autoritativo observado naquele checkpoint.
+	SaveSnapshotCheckpointEpoch(ctx context.Context, key DocumentKey, snapshot *yjsbridge.PersistedSnapshot, through UpdateOffset, epoch uint64) (*SnapshotRecord, error)
 }

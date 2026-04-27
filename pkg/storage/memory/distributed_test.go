@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"yjs-go-bridge/pkg/storage"
+	"yjs-go-bridge/pkg/yjsbridge"
 )
 
 func TestStoreAppendListAndTrimUpdates(t *testing.T) {
@@ -37,6 +38,9 @@ func TestStoreAppendListAndTrimUpdates(t *testing.T) {
 	if first.Offset != 1 {
 		t.Fatalf("first.Offset = %d, want 1", first.Offset)
 	}
+	if first.Epoch != 0 {
+		t.Fatalf("first.Epoch = %d, want 0", first.Epoch)
+	}
 	if !first.StoredAt.Equal(time.Unix(100, 0).UTC()) {
 		t.Fatalf("first.StoredAt = %v, want %v", first.StoredAt, time.Unix(100, 0).UTC())
 	}
@@ -52,6 +56,9 @@ func TestStoreAppendListAndTrimUpdates(t *testing.T) {
 	if second.Offset != 2 {
 		t.Fatalf("second.Offset = %d, want 2", second.Offset)
 	}
+	if second.Epoch != 0 {
+		t.Fatalf("second.Epoch = %d, want 0", second.Epoch)
+	}
 
 	if _, err := store.AppendUpdate(context.Background(), otherKey, []byte{0x09}); err != nil {
 		t.Fatalf("AppendUpdate(other key) unexpected error: %v", err)
@@ -63,6 +70,9 @@ func TestStoreAppendListAndTrimUpdates(t *testing.T) {
 	}
 	if third.Offset != 3 {
 		t.Fatalf("third.Offset = %d, want 3", third.Offset)
+	}
+	if third.Epoch != 0 {
+		t.Fatalf("third.Epoch = %d, want 0", third.Epoch)
 	}
 
 	tests := []struct {
@@ -769,5 +779,111 @@ func TestStoreLeaseRejectsConflictAndPreservesGeneration(t *testing.T) {
 	}
 	if reacquired.Owner.Epoch != 4 {
 		t.Fatalf("reacquired.Owner.Epoch = %d, want 4", reacquired.Owner.Epoch)
+	}
+}
+
+func TestStoreAuthoritativeOperationsFenceWritesAndTrim(t *testing.T) {
+	t.Parallel()
+
+	store := New()
+	ctx := context.Background()
+	key := storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-authority"}
+	shardID := storage.ShardID("7")
+	baseTime := time.Now().UTC()
+
+	if _, err := store.SavePlacement(ctx, storage.PlacementRecord{
+		Key:     key,
+		ShardID: shardID,
+		Version: 3,
+	}); err != nil {
+		t.Fatalf("SavePlacement() unexpected error: %v", err)
+	}
+	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID:    shardID,
+		Owner:      storage.OwnerInfo{NodeID: storage.NodeID("node-a"), Epoch: 1},
+		Token:      "lease-a",
+		AcquiredAt: baseTime,
+		ExpiresAt:  baseTime.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("SaveLease(node-a) unexpected error: %v", err)
+	}
+
+	fence := storage.AuthorityFence{
+		ShardID: shardID,
+		Owner:   storage.OwnerInfo{NodeID: storage.NodeID("node-a"), Epoch: 1},
+		Token:   "lease-a",
+	}
+	first, err := store.AppendUpdateAuthoritative(ctx, key, []byte{0x01}, fence)
+	if err != nil {
+		t.Fatalf("AppendUpdateAuthoritative(first) unexpected error: %v", err)
+	}
+	second, err := store.AppendUpdateAuthoritative(ctx, key, []byte{0x02}, fence)
+	if err != nil {
+		t.Fatalf("AppendUpdateAuthoritative(second) unexpected error: %v", err)
+	}
+	if first.Offset != 1 || second.Offset != 2 {
+		t.Fatalf("offsets = [%d %d], want [1 2]", first.Offset, second.Offset)
+	}
+	if first.Epoch != 1 || second.Epoch != 1 {
+		t.Fatalf("epochs = [%d %d], want [1 1]", first.Epoch, second.Epoch)
+	}
+
+	snapshot, err := yjsbridge.PersistedSnapshotFromUpdates()
+	if err != nil {
+		t.Fatalf("PersistedSnapshotFromUpdates() unexpected error: %v", err)
+	}
+	record, err := store.SaveSnapshotCheckpointAuthoritative(ctx, key, snapshot, 2, fence)
+	if err != nil {
+		t.Fatalf("SaveSnapshotCheckpointAuthoritative() unexpected error: %v", err)
+	}
+	if record.Through != 2 {
+		t.Fatalf("SaveSnapshotCheckpointAuthoritative().Through = %d, want 2", record.Through)
+	}
+	if record.Epoch != 1 {
+		t.Fatalf("SaveSnapshotCheckpointAuthoritative().Epoch = %d, want 1", record.Epoch)
+	}
+	if err := store.TrimUpdatesAuthoritative(ctx, key, 1, fence); err != nil {
+		t.Fatalf("TrimUpdatesAuthoritative() unexpected error: %v", err)
+	}
+	loaded, err := store.LoadSnapshot(ctx, key)
+	if err != nil {
+		t.Fatalf("LoadSnapshot() unexpected error: %v", err)
+	}
+	if loaded.Through != 2 {
+		t.Fatalf("LoadSnapshot().Through = %d, want 2", loaded.Through)
+	}
+	if loaded.Epoch != 1 {
+		t.Fatalf("LoadSnapshot().Epoch = %d, want 1", loaded.Epoch)
+	}
+
+	records, err := store.ListUpdates(ctx, key, 0, 0)
+	if err != nil {
+		t.Fatalf("ListUpdates() unexpected error: %v", err)
+	}
+	if len(records) != 1 || records[0].Offset != 2 {
+		t.Fatalf("records after trim = %#v, want single offset 2", records)
+	}
+
+	if err := store.ReleaseLease(ctx, shardID, "lease-a"); err != nil {
+		t.Fatalf("ReleaseLease() unexpected error: %v", err)
+	}
+	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID:    shardID,
+		Owner:      storage.OwnerInfo{NodeID: storage.NodeID("node-b"), Epoch: 2},
+		Token:      "lease-b",
+		AcquiredAt: baseTime.Add(time.Minute),
+		ExpiresAt:  baseTime.Add(2 * time.Hour),
+	}); err != nil {
+		t.Fatalf("SaveLease(node-b) unexpected error: %v", err)
+	}
+
+	if _, err := store.AppendUpdateAuthoritative(ctx, key, []byte{0x03}, fence); !errors.Is(err, storage.ErrAuthorityLost) {
+		t.Fatalf("AppendUpdateAuthoritative(stale fence) error = %v, want %v", err, storage.ErrAuthorityLost)
+	}
+	if _, err := store.SaveSnapshotAuthoritative(ctx, key, snapshot, fence); !errors.Is(err, storage.ErrAuthorityLost) {
+		t.Fatalf("SaveSnapshotAuthoritative(stale fence) error = %v, want %v", err, storage.ErrAuthorityLost)
+	}
+	if err := store.TrimUpdatesAuthoritative(ctx, key, 2, fence); !errors.Is(err, storage.ErrAuthorityLost) {
+		t.Fatalf("TrimUpdatesAuthoritative(stale fence) error = %v, want %v", err, storage.ErrAuthorityLost)
 	}
 }

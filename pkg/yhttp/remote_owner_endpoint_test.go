@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"yjs-go-bridge/pkg/storage/memory"
 	"yjs-go-bridge/pkg/yawareness"
 	"yjs-go-bridge/pkg/ynodeproto"
 	"yjs-go-bridge/pkg/yprotocol"
@@ -301,6 +302,12 @@ func TestRemoteOwnerEndpointRejectsMismatchedRoute(t *testing.T) {
 	if closeFrame.Epoch != 51 {
 		t.Fatalf("closeFrame.Epoch = %d, want %d", closeFrame.Epoch, 51)
 	}
+	if closeFrame.Retryable {
+		t.Fatal("closeFrame.Retryable = true, want false")
+	}
+	if closeFrame.Reason != "route_mismatch" {
+		t.Fatalf("closeFrame.Reason = %q, want %q", closeFrame.Reason, "route_mismatch")
+	}
 
 	select {
 	case err := <-errCh:
@@ -313,6 +320,79 @@ func TestRemoteOwnerEndpointRejectsMismatchedRoute(t *testing.T) {
 	case <-time.After(testIOTimeout):
 		t.Fatal("ServeStream() did not fail after route mismatch")
 	}
+}
+
+func TestRemoteOwnerEndpointRevalidatesAuthorityAndClosesIdleRemoteSession(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	recorder := newRecordingMetrics()
+	local, resolver := newAuthoritativeLocalHTTPServerWithMetrics(t, "node-owner", store, recorder)
+	key := testDocumentKey("room-owner-revalidate")
+	seedAuthoritativeHTTPDocument(t, ctx, store, resolver, key, "node-owner", 1, "lease-owner-a")
+
+	endpoint, err := NewRemoteOwnerEndpoint(RemoteOwnerEndpointConfig{
+		Local:       local,
+		LocalNodeID: "node-owner",
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteOwnerEndpoint() unexpected error: %v", err)
+	}
+
+	stream := newFakeRemoteOwnerStream()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- endpoint.ServeStream(ctx, stream)
+	}()
+
+	stream.pushReceive(&ynodeproto.Handshake{
+		NodeID:       "node-edge",
+		DocumentKey:  key,
+		ConnectionID: "remote-conn",
+		ClientID:     904,
+		Epoch:        61,
+	})
+	if _, ok := readRemoteStreamMessage(t, stream).(*ynodeproto.HandshakeAck); !ok {
+		t.Fatal("expected handshake ack before authority revalidation")
+	}
+
+	handoffAuthoritativeHTTPDocument(t, ctx, store, resolver, key, "lease-owner-a", "node-b", 2, "lease-owner-b")
+
+	closeMessage := readRemoteStreamMessage(t, stream)
+	closeFrame, ok := closeMessage.(*ynodeproto.Close)
+	if !ok {
+		t.Fatalf("close message = %T, want *ynodeproto.Close", closeMessage)
+	}
+	if !closeFrame.Retryable {
+		t.Fatal("closeFrame.Retryable = false, want true")
+	}
+	if closeFrame.Reason != authorityLostCloseReason {
+		t.Fatalf("closeFrame.Reason = %q, want %q", closeFrame.Reason, authorityLostCloseReason)
+	}
+	if closeFrame.DocumentKey != key {
+		t.Fatalf("closeFrame.DocumentKey = %#v, want %#v", closeFrame.DocumentKey, key)
+	}
+	if closeFrame.ConnectionID != "remote-conn" {
+		t.Fatalf("closeFrame.ConnectionID = %q, want %q", closeFrame.ConnectionID, "remote-conn")
+	}
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("ServeStream() unexpected error: %v", err)
+		}
+	case <-time.After(testIOTimeout):
+		t.Fatal("ServeStream() did not return after authority loss")
+	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		snapshot := recorder.snapshot()
+		return snapshot.authorityRevalidations[recordingAuthorityRevalidationKey{
+			role:   authorityRevalidationRoleOwner,
+			result: "error",
+		}] == 1
+	})
 }
 
 func readRemoteStreamMessage(t *testing.T, stream *fakeRemoteOwnerStream) ynodeproto.Message {

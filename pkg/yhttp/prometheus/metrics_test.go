@@ -49,6 +49,10 @@ func TestMetricsRecordsTransportLifecycle(t *testing.T) {
 	metrics.RemoteOwnerMessage(req, "edge", "out", "document_update")
 	metrics.RemoteOwnerMessage(req, "owner", "in", "query_awareness_request")
 	metrics.RemoteOwnerClose(req, "edge", "client_closed")
+	metrics.AuthorityRevalidation(req, "local", 4*time.Millisecond, nil)
+	metrics.AuthorityRevalidation(req, "owner", 9*time.Millisecond, errors.New("boom"))
+	metrics.OwnershipTransition(req, "remote", "local", 11*time.Millisecond, nil)
+	metrics.OwnershipTransition(req, "local", "closed", 13*time.Millisecond, errors.New("boom"))
 	metrics.RemoteOwnerConnectionClosed(req, "edge")
 	metrics.RemoteOwnerConnectionClosed(req, "owner")
 	metrics.ConnectionClosed(req)
@@ -72,6 +76,8 @@ func TestMetricsRecordsTransportLifecycle(t *testing.T) {
 	assertCounterValue(t, registry, "testbridge_yhttp_remote_owner_messages_total", map[string]string{"role": "edge", "direction": "out", "kind": "document_update"}, 1)
 	assertCounterValue(t, registry, "testbridge_yhttp_remote_owner_messages_total", map[string]string{"role": "owner", "direction": "in", "kind": "query_awareness_request"}, 1)
 	assertCounterValue(t, registry, "testbridge_yhttp_remote_owner_closes_total", map[string]string{"role": "edge", "reason": "client_closed"}, 1)
+	assertCounterValue(t, registry, "testbridge_yhttp_ownership_transitions_total", map[string]string{"from": "remote", "to": "local", "result": "ok"}, 1)
+	assertCounterValue(t, registry, "testbridge_yhttp_ownership_transitions_total", map[string]string{"from": "local", "to": "closed", "result": "error"}, 1)
 
 	assertHistogramCount(t, registry, "testbridge_yhttp_handle_duration_seconds", map[string]string{"result": "ok"}, 1)
 	assertHistogramCount(t, registry, "testbridge_yhttp_handle_duration_seconds", map[string]string{"result": "error"}, 1)
@@ -80,6 +86,10 @@ func TestMetricsRecordsTransportLifecycle(t *testing.T) {
 	assertHistogramCount(t, registry, "testbridge_yhttp_owner_lookup_duration_seconds", map[string]string{"result": "remote"}, 1)
 	assertHistogramCount(t, registry, "testbridge_yhttp_remote_owner_handshake_duration_seconds", map[string]string{"role": "edge", "result": "ok"}, 1)
 	assertHistogramCount(t, registry, "testbridge_yhttp_remote_owner_handshake_duration_seconds", map[string]string{"role": "owner", "result": "error"}, 1)
+	assertHistogramCount(t, registry, "testbridge_yhttp_authority_revalidation_duration_seconds", map[string]string{"role": "local", "result": "ok"}, 1)
+	assertHistogramCount(t, registry, "testbridge_yhttp_authority_revalidation_duration_seconds", map[string]string{"role": "owner", "result": "error"}, 1)
+	assertHistogramCount(t, registry, "testbridge_yhttp_ownership_transition_duration_seconds", map[string]string{"from": "remote", "to": "local", "result": "ok"}, 1)
+	assertHistogramCount(t, registry, "testbridge_yhttp_ownership_transition_duration_seconds", map[string]string{"from": "local", "to": "closed", "result": "error"}, 1)
 }
 
 func assertCounterValue(t *testing.T, registry *prometheuslib.Registry, name string, labels map[string]string, want float64) {

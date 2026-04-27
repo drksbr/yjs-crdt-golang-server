@@ -59,9 +59,11 @@ Neste momento o repositório já possui:
 - `pkg/storage` já define `SnapshotStore`, `DocumentKey`, `SnapshotRecord`, erros de domínio e contratos de `SaveSnapshot`/`LoadSnapshot`
 - `pkg/storage` agora também expõe o scaffolding distribuído inicial com `UpdateLogStore`, `PlacementStore`, `LeaseStore`, `DistributedStore`, além de `UpdateLogRecord`, `PlacementRecord`, `LeaseRecord`, `OwnerInfo`, `ShardID`, `NodeID` e `UpdateOffset`
 - `pkg/storage` agora também já expõe helpers públicos de replay/recovery (`ReplaySnapshot`, `RecoverSnapshot`) para reconstrução via `snapshot + update log`
+- `pkg/storage` agora também expõe a fronteira pública de fencing autoritativo com `AuthorityFence`, `ErrAuthorityLost`, `AuthoritativeUpdateLogStore` e `AuthoritativeSnapshotStore`
 - `pkg/ycluster` agora expõe o scaffolding público de control plane com tipos estáveis de `NodeID`/`ShardID`/`Placement`/`Lease`, `DeterministicShardResolver`, `StaticLocalNode`, `PlacementOwnerLookup` e interfaces mínimas de `Runtime`
 - `pkg/ycluster` agora também já expõe adapters storage-backed com `StorageOwnerLookup`, `StorageLeaseStore` e conversões `storage <-> cluster`
 - `pkg/storage/memory` e `pkg/storage/postgres` agora cercam leases por geração persistida, com `OwnerInfo.Epoch` obrigatório, `ErrLeaseConflict`/`ErrLeaseStaleEpoch` e preservação da última geração após release
+- `pkg/storage/memory` e `pkg/storage/postgres` agora também validam placement + lease + token + expiração em operações autoritativas de append/persist/trim, retornando `ErrAuthorityLost` quando o fence esperado já não é válido
 - `pkg/ycluster` agora só resolve ownership a partir de lease ativa e válida; placement sozinho não classifica mais owner local/remoto
 - `pkg/ynodeproto` agora expõe o framing binário versionado do protocolo inter-node com `Header`, `Frame`, `MessageType`, `Encode/DecodeFrame` e decode por prefixo
 - `pkg/ynodeproto` agora também carrega `clientID` em `handshake`/`handshake-ack` e mensagens roteadas para `query-awareness`, `disconnect` e `close`
@@ -83,14 +85,13 @@ A fase atual é **Meta técnica 9 / Fase 3 em consolidação**, com API pública
 As metas técnicas 1, 2, 3, 4, 5, 6, 7 e 8 já possuem corte mínimo implementado.
 Em Meta 9, a prioridade continua sendo reduzir lacunas de compatibilidade estrutural em merge/diff/intersect, estabilizar o writer incremental e abrir a entrada controlada para V2 quando a camada pública atual estiver madura.
 Paralelamente, a nova etapa registra a consolidação operacional de snapshots V1 por meio de API pública e stores, o runtime in-process público de protocolo em `pkg/yprotocol`, a camada mínima de provider acima de `Session` e a primeira borda pública de transporte HTTP/WebSocket em `pkg/yhttp`, ainda sem transporte distribuído e sem V2.
-A mesma transição também já materializou o primeiro corte operacional da Meta 10: os contratos de persistência distribuída, o framing inter-node, os backends concretos de update log/placement/lease, os helpers públicos de replay e os adapters storage-backed de control plane já estão no branch, mas handoff, cutover e coordenação multi-nó ainda permanecem fora do runtime funcional.
-A próxima fase aberta no roadmap é a **Meta técnica 10 / Fase 4**, que introduz owner único por documento/shard, lease/epoch/fencing, `snapshot + update log`, protocolo inter-node próprio e aceite de HTTP/WS em qualquer nó com processamento do room restrito ao owner.
+A mesma transição também já materializou um corte operacional mais amplo da Meta 10: os contratos de persistência distribuída, o framing inter-node, os backends concretos de update log/placement/lease, os helpers públicos de replay, o bootstrap do provider por `snapshot + update log`, a borda owner-aware e a fronteira de fencing autoritativo no storage já estão no branch; handoff seguro, cutover e a propagação desse fence até o runtime ainda permanecem fora do fechamento end-to-end.
+A próxima fase aberta no roadmap é a **Meta técnica 10 / Fase 4**, que fecha owner único por documento/shard com `lease`/`epoch`/fencing propagados até `apply`/persist/handoff, protocolo inter-node próprio e aceite de HTTP/WS em qualquer nó com processamento do room restrito ao owner.
 
 ### Corte provável do próximo epoch
 
-- materializar o endpoint owner-side concreto que consome `NodeMessageStream`/`pkg/ynodeproto` e compartilha fanout com o `Provider` local, em vez de parar no seam do edge;
-- substituir o relay de exemplo/teste via WebSocket bruto por um transporte owner-side que use as mensagens tipadas já expostas em `pkg/ynodeproto`;
-- propagar `epoch`/fencing para o caminho autoritativo de `apply`, append log, persistência e respostas de handoff/cutover, para além do lifecycle de lease já endurecido;
+- conectar o endpoint owner-side já exposto ao fluxo principal de edge->owner, reduzindo wiring ad hoc em example/teste;
+- ligar o fencing autoritativo já exposto em `pkg/storage` ao caminho de `apply`/`Persist` do provider e às respostas de handoff/cutover;
 - fechar failover/handoff do owner em cima do bootstrap já implementado por `snapshot + update log`.
 
 ---
@@ -202,21 +203,29 @@ Nesta etapa, a aceitação é:
 - [x] Endurecer o lifecycle básico de lease em `pkg/ycluster` com `epoch` monotônico no acquire/renew/takeover e propagação desse epoch na resolução de owner
 - [x] Formalizar `DocumentKey`/room/shard como unidade de ownership, lease e roteamento
 - [x] Garantir owner único por documento/shard com lease renovável, expiração detectável e revogação observável
-- [ ] Introduzir `epoch` monotônico e fencing token em toda operação autoritativa (`apply`, persistência, append log, handoff e recovery)
+- [x] Expor `AuthorityFence`, `ErrAuthorityLost` e contratos autoritativos de snapshot/update log em `pkg/storage`
+- [x] Implementar validação de fencing autoritativo em `pkg/storage/memory` e `pkg/storage/postgres` para `append`, `persist` e `trim`, cruzando placement + lease + token + expiração
+- [ ] Propagar `epoch`/fencing para todo o caminho autoritativo do runtime (`apply`, `Persist`, recovery, handoff e respostas de cutover`)
 - [x] Materializar `snapshot + update log` como fonte de hidratação, replay e recuperação do runtime local do owner sobre os contratos já expostos em `pkg/storage`, com bootstrap do provider a partir de snapshot base + tail do log
-- [ ] Persistir snapshot base e update log append-only por epoch, com replay determinístico e checkpoint/compaction planejados
+- [ ] Fechar persistência de snapshot base + update log append-only por epoch, conectando checkpoint/compaction ao handoff e recovery distribuídos
 - [x] Materializar payloads inter-node tipados e versionados sobre o framing já exposto em `pkg/ynodeproto`, pelo menos para handshake, sync request/response, document update, awareness update e ping/pong
 - [x] Expor uma borda HTTP/WS owner-aware em `pkg/yhttp` para resolver owner antes do provider local e só materializar `Session`/`Provider` quando o owner resolvido é local
 - [x] Expor um seam typed de forwarding remoto em `pkg/yhttp` via `OwnerAwareServerConfig.OnRemoteOwner`, `RemoteOwnerDialer` e `NodeMessageStream`
-- [ ] Definir comportamento do nó não-owner para requests HTTP e frames WebSocket: autenticar, resolver owner, encaminhar pelo wire inter-node tipado e encerrar/cutover em caso de fencing ou handoff
+- [ ] Fechar o comportamento do nó não-owner em cima da borda owner-aware já exposta: autenticar, resolver owner, encaminhar pelo wire inter-node tipado e encerrar/cutover em caso de fencing ou handoff
 - [ ] Definir handoff seguro com bootstrap por snapshot, replay do tail do log e troca atômica de epoch
-- [ ] Introduzir observabilidade e diagnósticos para lease, roteamento, forwarding, replay, lag e troca de owner
+- [ ] Expandir a observabilidade já existente em `pkg/yhttp` para lease, roteamento, forwarding, replay, lag e troca de owner
+
+Nota de progresso atual:
+- `snapshot + update log` já persistem checkpoint/high-water mark e metadata observável de `epoch` em memória/Postgres, e o replay público já rejeita regressão de epoch no tail;
+- a borda owner-aware já cobre relay inter-node tipado com handoff transparente do browser entre `remote -> remote`, `remote -> local` e `local -> remote`, além de revalidação periódica e métricas de transição de ownership;
+- o que segue em aberto é fechar coordenação/autonomia de ownership, semântica atômica final de handoff por `epoch` e observabilidade mais profunda de lease/replay/lag.
 
 #### Em foco (abertura da fase)
 - [x] Tratar `pkg/yprotocol.Provider` atual como runtime local do owner, sem fanout multi-process ad hoc e com bootstrap por `snapshot + update log`
 - [x] Definir a fronteira entre a borda `pkg/yhttp` e a futura camada inter-node, explicitando o modo edge owner-aware
 - [x] Promover `pkg/ynodeproto` de framing puro para camada de mensagens tipadas sem quebrar `Header`/`Frame` já expostos
 - [x] Materializar backend/schema concretos para snapshot base, update log, placement e lease acima dos contratos públicos já definidos
+- [x] Materializar fencing autoritativo na fronteira de storage (`snapshot`/`update log`) sem quebrar o runtime local atual
 - [ ] Definir regras de recuperação após queda do owner e de promoção segura de novo owner
 - [x] Adicionar testes de integração das fundações distribuídas (`snapshot + update log` + owner lookup storage-backed)
 - [x] Registrar explicitamente que o modo single-process atual continua suportado como modo de referência

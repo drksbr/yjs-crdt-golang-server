@@ -20,6 +20,7 @@ import (
 	"yjs-go-bridge/pkg/storage"
 	"yjs-go-bridge/pkg/storage/memory"
 	"yjs-go-bridge/pkg/yawareness"
+	"yjs-go-bridge/pkg/ycluster"
 	"yjs-go-bridge/pkg/yjsbridge"
 	"yjs-go-bridge/pkg/yprotocol"
 )
@@ -32,6 +33,11 @@ func TestHTTPServerBroadcastsLocalSyncAndAwareness(t *testing.T) {
 	srv := newHTTPTestServer(t, nil)
 	left := dialWS(t, srv.URL+"/ws?doc=room-a&client=401&conn=left")
 	right := dialWS(t, srv.URL+"/ws?doc=room-a&client=402&conn=right")
+
+	writeBinary(t, left, yprotocol.EncodeProtocolSyncStep1([]byte{0x00}))
+	_ = readBinary(t, left)
+	writeBinary(t, right, yprotocol.EncodeProtocolSyncStep1([]byte{0x00}))
+	_ = readBinary(t, right)
 
 	update := buildGCOnlyUpdate(19, 2)
 	writeBinary(t, left, yprotocol.EncodeProtocolSyncUpdate(update))
@@ -124,6 +130,52 @@ func TestHTTPServerPersistsSnapshotOnClose(t *testing.T) {
 	if !bytes.Equal(messages[0].Sync.Payload, expected) {
 		t.Fatalf("step2 reply payload = %v, want %v", messages[0].Sync.Payload, expected)
 	}
+}
+
+func TestHTTPServerRevalidatesAuthorityAndClosesIdleConnection(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	key := testDocumentKey("doc-authority-revalidate")
+	store, resolver, provider := newAuthoritativeHTTPProvider(t, "node-a")
+	seedAuthoritativeHTTPDocument(t, ctx, store, resolver, key, "node-a", 1, "lease-node-a")
+	recorder := newRecordingMetrics()
+
+	handler, err := NewServer(ServerConfig{
+		Provider:                      provider,
+		ResolveRequest:                resolveTestRequest,
+		AuthorityRevalidationInterval: 10 * time.Millisecond,
+		Metrics:                       recorder,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() unexpected error: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/ws", handler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	conn := dialWS(t, srv.URL+"/ws?doc=doc-authority-revalidate&client=611&conn=idle")
+	writeBinary(t, conn, yprotocol.EncodeProtocolSyncStep1([]byte{0x00}))
+	_ = readBinary(t, conn)
+	handoffAuthoritativeHTTPDocument(t, ctx, store, resolver, key, "lease-node-a", "node-b", 2, "lease-node-b")
+
+	closeErr := readCloseError(t, conn)
+	if closeErr.Code != websocket.StatusTryAgainLater {
+		t.Fatalf("closeErr.Code = %d, want %d", closeErr.Code, websocket.StatusTryAgainLater)
+	}
+	if closeErr.Reason != authorityLostCloseReason {
+		t.Fatalf("closeErr.Reason = %q, want %q", closeErr.Reason, authorityLostCloseReason)
+	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		snapshot := recorder.snapshot()
+		return snapshot.authorityRevalidations[recordingAuthorityRevalidationKey{
+			role:   authorityRevalidationRoleLocal,
+			result: "error",
+		}] == 1
+	})
 }
 
 func newHTTPTestServer(t *testing.T, store storage.SnapshotStore) *httptest.Server {
@@ -228,6 +280,131 @@ func waitForSnapshot(t *testing.T, store storage.SnapshotStore, key storage.Docu
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("snapshot for %v was not persisted before timeout", key)
+}
+
+func newAuthoritativeHTTPProvider(t *testing.T, localNode ycluster.NodeID) (*memory.Store, ycluster.ShardResolver, *yprotocol.Provider) {
+	t.Helper()
+
+	store := memory.New()
+	resolver, err := ycluster.NewDeterministicShardResolver(32)
+	if err != nil {
+		t.Fatalf("NewDeterministicShardResolver() unexpected error: %v", err)
+	}
+	lookup, err := ycluster.NewStorageOwnerLookup(localNode, resolver, store, store)
+	if err != nil {
+		t.Fatalf("NewStorageOwnerLookup(%s) unexpected error: %v", localNode, err)
+	}
+
+	provider := yprotocol.NewProvider(yprotocol.ProviderConfig{
+		Store: store,
+		ResolveAuthorityFence: func(ctx context.Context, key storage.DocumentKey) (*storage.AuthorityFence, error) {
+			return ycluster.ResolveStorageAuthorityFence(ctx, lookup, key)
+		},
+	})
+	return store, resolver, provider
+}
+
+func newAuthoritativeLocalHTTPServer(t *testing.T, localNode ycluster.NodeID, store *memory.Store) (*Server, ycluster.ShardResolver) {
+	return newAuthoritativeLocalHTTPServerWithMetrics(t, localNode, store, nil)
+}
+
+func newAuthoritativeLocalHTTPServerWithMetrics(t *testing.T, localNode ycluster.NodeID, store *memory.Store, metrics Metrics) (*Server, ycluster.ShardResolver) {
+	t.Helper()
+
+	resolver, err := ycluster.NewDeterministicShardResolver(32)
+	if err != nil {
+		t.Fatalf("NewDeterministicShardResolver() unexpected error: %v", err)
+	}
+	lookup, err := ycluster.NewStorageOwnerLookup(localNode, resolver, store, store)
+	if err != nil {
+		t.Fatalf("NewStorageOwnerLookup(%s) unexpected error: %v", localNode, err)
+	}
+	handler, err := NewServer(ServerConfig{
+		Provider: yprotocol.NewProvider(yprotocol.ProviderConfig{
+			Store: store,
+			ResolveAuthorityFence: func(ctx context.Context, key storage.DocumentKey) (*storage.AuthorityFence, error) {
+				return ycluster.ResolveStorageAuthorityFence(ctx, lookup, key)
+			},
+		}),
+		ResolveRequest:                resolveTestRequest,
+		AuthorityRevalidationInterval: 10 * time.Millisecond,
+		Metrics:                       metrics,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() unexpected error: %v", err)
+	}
+	return handler, resolver
+}
+
+func seedAuthoritativeHTTPDocument(
+	t *testing.T,
+	ctx context.Context,
+	store *memory.Store,
+	resolver ycluster.ShardResolver,
+	key storage.DocumentKey,
+	node ycluster.NodeID,
+	epoch uint64,
+	token string,
+) {
+	t.Helper()
+
+	shardID, err := resolver.ResolveShard(key)
+	if err != nil {
+		t.Fatalf("ResolveShard(%#v) unexpected error: %v", key, err)
+	}
+	if _, err := store.SavePlacement(ctx, storage.PlacementRecord{
+		Key:     key,
+		ShardID: ycluster.StorageShardID(shardID),
+		Version: 1,
+	}); err != nil {
+		t.Fatalf("store.SavePlacement() unexpected error: %v", err)
+	}
+	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID: ycluster.StorageShardID(shardID),
+		Owner: storage.OwnerInfo{
+			NodeID: ycluster.StorageNodeID(node),
+			Epoch:  epoch,
+		},
+		Token:      token,
+		AcquiredAt: time.Now().UTC().Add(-time.Minute),
+		ExpiresAt:  time.Now().UTC().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("store.SaveLease() unexpected error: %v", err)
+	}
+}
+
+func handoffAuthoritativeHTTPDocument(
+	t *testing.T,
+	ctx context.Context,
+	store *memory.Store,
+	resolver ycluster.ShardResolver,
+	key storage.DocumentKey,
+	oldToken string,
+	nextNode ycluster.NodeID,
+	nextEpoch uint64,
+	nextToken string,
+) {
+	t.Helper()
+
+	shardID, err := resolver.ResolveShard(key)
+	if err != nil {
+		t.Fatalf("ResolveShard(%#v) unexpected error: %v", key, err)
+	}
+	if err := store.ReleaseLease(ctx, ycluster.StorageShardID(shardID), oldToken); err != nil {
+		t.Fatalf("store.ReleaseLease() unexpected error: %v", err)
+	}
+	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID: ycluster.StorageShardID(shardID),
+		Owner: storage.OwnerInfo{
+			NodeID: ycluster.StorageNodeID(nextNode),
+			Epoch:  nextEpoch,
+		},
+		Token:      nextToken,
+		AcquiredAt: time.Now().UTC(),
+		ExpiresAt:  time.Now().UTC().Add(2 * time.Hour),
+	}); err != nil {
+		t.Fatalf("store.SaveLease() unexpected error: %v", err)
+	}
 }
 
 func buildGCOnlyUpdate(client, length uint32) []byte {

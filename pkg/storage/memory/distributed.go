@@ -4,15 +4,17 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"yjs-go-bridge/pkg/storage"
 )
 
 var (
-	_ storage.UpdateLogStore   = (*Store)(nil)
-	_ storage.PlacementStore   = (*Store)(nil)
-	_ storage.LeaseStore       = (*Store)(nil)
-	_ storage.DistributedStore = (*Store)(nil)
+	_ storage.UpdateLogStore              = (*Store)(nil)
+	_ storage.AuthoritativeUpdateLogStore = (*Store)(nil)
+	_ storage.PlacementStore              = (*Store)(nil)
+	_ storage.LeaseStore                  = (*Store)(nil)
+	_ storage.DistributedStore            = (*Store)(nil)
 )
 
 // AppendUpdate adiciona um update V1 ao fim do log incremental do documento.
@@ -40,7 +42,56 @@ func (s *Store) AppendUpdate(ctx context.Context, key storage.DocumentKey, updat
 		Key:      key,
 		Offset:   offset,
 		UpdateV1: append([]byte(nil), update...),
+		Epoch:    0,
 		StoredAt: s.nowTime(),
+	}
+	s.updateLogs[key] = append(s.updateLogs[key], record)
+	s.updateNext[key] = offset
+	return record.Clone(), nil
+}
+
+// AppendUpdateAuthoritative adiciona um update V1 ao fim do log incremental do
+// documento, exigindo que o placement + lease persistidos correspondam ao
+// fence informado.
+func (s *Store) AppendUpdateAuthoritative(
+	ctx context.Context,
+	key storage.DocumentKey,
+	update []byte,
+	fence storage.AuthorityFence,
+) (*storage.UpdateLogRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s == nil {
+		return nil, errNilStore
+	}
+	if err := key.Validate(); err != nil {
+		return nil, err
+	}
+	if len(update) == 0 {
+		return nil, fmt.Errorf("%w: updateV1 obrigatorio", storage.ErrInvalidUpdatePayload)
+	}
+	if err := fence.Validate(); err != nil {
+		return nil, err
+	}
+
+	now := s.nowTime()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.ensureStoreInitializedLocked()
+	if err := s.validateAuthorityLocked(key, fence, now); err != nil {
+		return nil, err
+	}
+
+	offset := s.updateNext[key] + 1
+	record := &storage.UpdateLogRecord{
+		Key:      key,
+		Offset:   offset,
+		UpdateV1: append([]byte(nil), update...),
+		Epoch:    fence.Owner.Epoch,
+		StoredAt: now,
 	}
 	s.updateLogs[key] = append(s.updateLogs[key], record)
 	s.updateNext[key] = offset
@@ -100,6 +151,61 @@ func (s *Store) TrimUpdates(ctx context.Context, key storage.DocumentKey, throug
 	defer s.mu.Unlock()
 
 	s.ensureStoreInitializedLocked()
+
+	records := s.updateLogs[key]
+	if len(records) == 0 {
+		return nil
+	}
+
+	firstRemaining := 0
+	for firstRemaining < len(records) && records[firstRemaining].Offset <= through {
+		firstRemaining++
+	}
+
+	switch {
+	case firstRemaining == 0:
+		return nil
+	case firstRemaining >= len(records):
+		delete(s.updateLogs, key)
+		return nil
+	default:
+		trimmed := make([]*storage.UpdateLogRecord, len(records)-firstRemaining)
+		copy(trimmed, records[firstRemaining:])
+		s.updateLogs[key] = trimmed
+		return nil
+	}
+}
+
+// TrimUpdatesAuthoritative remove registros com offset menor ou igual ao
+// limite informado, exigindo que o fence autoritativo ainda seja válido.
+func (s *Store) TrimUpdatesAuthoritative(
+	ctx context.Context,
+	key storage.DocumentKey,
+	through storage.UpdateOffset,
+	fence storage.AuthorityFence,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s == nil {
+		return errNilStore
+	}
+	if err := key.Validate(); err != nil {
+		return err
+	}
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+
+	now := s.nowTime()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.ensureStoreInitializedLocked()
+	if err := s.validateAuthorityLocked(key, fence, now); err != nil {
+		return err
+	}
 
 	records := s.updateLogs[key]
 	if len(records) == 0 {
@@ -319,6 +425,46 @@ func sameLeaseRecord(current, next *storage.LeaseRecord) bool {
 func validateLeaseToken(token string) error {
 	if strings.TrimSpace(token) == "" {
 		return fmt.Errorf("%w: token obrigatorio", storage.ErrInvalidLeaseToken)
+	}
+	return nil
+}
+
+func (s *Store) validateAuthorityLocked(key storage.DocumentKey, fence storage.AuthorityFence, now time.Time) error {
+	placement, ok := s.placements[key]
+	if !ok || placement == nil {
+		return fmt.Errorf("%w: placement ausente para %s/%s", storage.ErrAuthorityLost, key.Namespace, key.DocumentID)
+	}
+	if placement.ShardID != fence.ShardID {
+		return fmt.Errorf(
+			"%w: placement shard %s != fence shard %s para %s/%s",
+			storage.ErrAuthorityLost,
+			placement.ShardID,
+			fence.ShardID,
+			key.Namespace,
+			key.DocumentID,
+		)
+	}
+
+	lease, ok := s.leases[fence.ShardID]
+	if !ok || lease == nil {
+		return fmt.Errorf("%w: lease ausente para shard %s", storage.ErrAuthorityLost, fence.ShardID)
+	}
+	if lease.Owner != fence.Owner {
+		return fmt.Errorf(
+			"%w: owner atual %s/%d != fence %s/%d para shard %s",
+			storage.ErrAuthorityLost,
+			lease.Owner.NodeID,
+			lease.Owner.Epoch,
+			fence.Owner.NodeID,
+			fence.Owner.Epoch,
+			fence.ShardID,
+		)
+	}
+	if lease.Token != fence.Token {
+		return fmt.Errorf("%w: token atual nao corresponde ao fence do shard %s", storage.ErrAuthorityLost, fence.ShardID)
+	}
+	if !lease.ExpiresAt.After(now) {
+		return fmt.Errorf("%w: lease expirada para shard %s", storage.ErrAuthorityLost, fence.ShardID)
 	}
 	return nil
 }

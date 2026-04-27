@@ -279,6 +279,9 @@ func TestProviderRuntimeContracts(t *testing.T) {
 		if record == nil || record.Snapshot == nil {
 			t.Fatalf("first.Persist() = %#v, want persisted snapshot", record)
 		}
+		if record.Through != 1 {
+			t.Fatalf("first.Persist().Through = %d, want 1", record.Through)
+		}
 
 		expectedSnapshot, err := yjsbridge.PersistedSnapshotFromUpdate(update)
 		if err != nil {
@@ -286,6 +289,13 @@ func TestProviderRuntimeContracts(t *testing.T) {
 		}
 		if !bytes.Equal(record.Snapshot.UpdateV1, expectedSnapshot.UpdateV1) {
 			t.Fatalf("record.Snapshot.UpdateV1 = %v, want %v", record.Snapshot.UpdateV1, expectedSnapshot.UpdateV1)
+		}
+		loaded, err := store.LoadSnapshot(ctx, key)
+		if err != nil {
+			t.Fatalf("store.LoadSnapshot() unexpected error: %v", err)
+		}
+		if loaded.Through != 1 {
+			t.Fatalf("store.LoadSnapshot().Through = %d, want 1", loaded.Through)
 		}
 
 		if _, err := first.Close(); err != nil {

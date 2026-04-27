@@ -34,6 +34,12 @@ func TestStoreSaveAndLoadSnapshotRoundTrip(t *testing.T) {
 	if saved.StoredAt.IsZero() {
 		t.Fatal("SaveSnapshot().StoredAt is zero")
 	}
+	if saved.Through != 0 {
+		t.Fatalf("SaveSnapshot().Through = %d, want 0", saved.Through)
+	}
+	if saved.Epoch != 0 {
+		t.Fatalf("SaveSnapshot().Epoch = %d, want 0", saved.Epoch)
+	}
 
 	loaded, err := store.LoadSnapshot(ctx, key)
 	if err != nil {
@@ -41,6 +47,12 @@ func TestStoreSaveAndLoadSnapshotRoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(loaded.Snapshot.UpdateV1, snapshot.UpdateV1) {
 		t.Fatalf("LoadSnapshot().Snapshot.UpdateV1 = %v, want %v", loaded.Snapshot.UpdateV1, snapshot.UpdateV1)
+	}
+	if loaded.Through != 0 {
+		t.Fatalf("LoadSnapshot().Through = %d, want 0", loaded.Through)
+	}
+	if loaded.Epoch != 0 {
+		t.Fatalf("LoadSnapshot().Epoch = %d, want 0", loaded.Epoch)
 	}
 	if len(loaded.Snapshot.UpdateV1) == 0 {
 		t.Fatalf("LoadSnapshot().Snapshot.UpdateV1 is empty")
@@ -62,6 +74,65 @@ func TestStoreSaveAndLoadSnapshotRoundTrip(t *testing.T) {
 	}
 	if !again.StoredAt.After(saved.StoredAt) {
 		t.Fatalf("segunda SaveSnapshot().StoredAt = %v, want after %v", again.StoredAt, saved.StoredAt)
+	}
+}
+
+func TestStoreSaveAndLoadSnapshotCheckpointRoundTrip(t *testing.T) {
+	store, _ := newTestStore(t, false)
+	ctx := context.Background()
+
+	snapshot, err := yjsbridge.PersistedSnapshotFromUpdates()
+	if err != nil {
+		t.Fatalf("PersistedSnapshotFromUpdates() unexpected error: %v", err)
+	}
+
+	key := storage.DocumentKey{
+		Namespace:  "integration",
+		DocumentID: "save-load-checkpoint-round-trip",
+	}
+
+	saved, err := store.SaveSnapshotCheckpoint(ctx, key, snapshot, 19)
+	if err != nil {
+		t.Fatalf("SaveSnapshotCheckpoint() unexpected error: %v", err)
+	}
+	if saved.Through != 19 {
+		t.Fatalf("SaveSnapshotCheckpoint().Through = %d, want 19", saved.Through)
+	}
+	if saved.Epoch != 0 {
+		t.Fatalf("SaveSnapshotCheckpoint().Epoch = %d, want 0", saved.Epoch)
+	}
+
+	loaded, err := store.LoadSnapshot(ctx, key)
+	if err != nil {
+		t.Fatalf("LoadSnapshot() unexpected error: %v", err)
+	}
+	if loaded.Through != 19 {
+		t.Fatalf("LoadSnapshot().Through = %d, want 19", loaded.Through)
+	}
+	if loaded.Epoch != 0 {
+		t.Fatalf("LoadSnapshot().Epoch = %d, want 0", loaded.Epoch)
+	}
+
+	saved, err = store.SaveSnapshotCheckpointEpoch(ctx, key, snapshot, 23, 7)
+	if err != nil {
+		t.Fatalf("SaveSnapshotCheckpointEpoch() unexpected error: %v", err)
+	}
+	if saved.Through != 23 {
+		t.Fatalf("SaveSnapshotCheckpointEpoch().Through = %d, want 23", saved.Through)
+	}
+	if saved.Epoch != 7 {
+		t.Fatalf("SaveSnapshotCheckpointEpoch().Epoch = %d, want 7", saved.Epoch)
+	}
+
+	loaded, err = store.LoadSnapshot(ctx, key)
+	if err != nil {
+		t.Fatalf("LoadSnapshot() unexpected error after epoch save: %v", err)
+	}
+	if loaded.Through != 23 {
+		t.Fatalf("LoadSnapshot().Through after epoch save = %d, want 23", loaded.Through)
+	}
+	if loaded.Epoch != 7 {
+		t.Fatalf("LoadSnapshot().Epoch after epoch save = %d, want 7", loaded.Epoch)
 	}
 }
 

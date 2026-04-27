@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"yjs-go-bridge/pkg/storage"
 	"yjs-go-bridge/pkg/storage/memory"
+	"yjs-go-bridge/pkg/ycluster"
 	"yjs-go-bridge/pkg/yjsbridge"
 )
 
@@ -96,6 +98,9 @@ func TestProviderSyncUpdateAppendsLogAndPersistTrimsTail(t *testing.T) {
 	if !bytes.Equal(records[0].UpdateV1, update) {
 		t.Fatalf("records[0].UpdateV1 = %v, want %v", records[0].UpdateV1, update)
 	}
+	if records[0].Epoch != 0 {
+		t.Fatalf("records[0].Epoch = %d, want 0", records[0].Epoch)
+	}
 
 	record, err := conn.Persist(ctx)
 	if err != nil {
@@ -103,6 +108,12 @@ func TestProviderSyncUpdateAppendsLogAndPersistTrimsTail(t *testing.T) {
 	}
 	if record == nil || record.Snapshot == nil {
 		t.Fatalf("conn.Persist() = %#v, want persisted snapshot", record)
+	}
+	if record.Through != 1 {
+		t.Fatalf("conn.Persist().Through = %d, want 1", record.Through)
+	}
+	if record.Epoch != 0 {
+		t.Fatalf("conn.Persist().Epoch = %d, want 0", record.Epoch)
 	}
 
 	trimmed, err := store.ListUpdates(ctx, key, 0, 0)
@@ -123,6 +134,12 @@ func TestProviderSyncUpdateAppendsLogAndPersistTrimsTail(t *testing.T) {
 	}
 	if !bytes.Equal(loaded.Snapshot.UpdateV1, expectedSnapshot.UpdateV1) {
 		t.Fatalf("loaded.Snapshot.UpdateV1 = %v, want %v", loaded.Snapshot.UpdateV1, expectedSnapshot.UpdateV1)
+	}
+	if loaded.Through != 1 {
+		t.Fatalf("loaded.Through = %d, want 1", loaded.Through)
+	}
+	if loaded.Epoch != 0 {
+		t.Fatalf("loaded.Epoch = %d, want 0", loaded.Epoch)
 	}
 }
 
@@ -162,6 +179,12 @@ func TestProviderPersistCompactsRecoveredSnapshotPlusTail(t *testing.T) {
 	if record == nil || record.Snapshot == nil {
 		t.Fatalf("conn.Persist() = %#v, want persisted snapshot", record)
 	}
+	if record.Through != 1 {
+		t.Fatalf("conn.Persist().Through = %d, want 1", record.Through)
+	}
+	if record.Epoch != 0 {
+		t.Fatalf("conn.Persist().Epoch = %d, want 0", record.Epoch)
+	}
 
 	expectedSnapshot, err := yjsbridge.PersistedSnapshotFromUpdates(baseUpdate, tailUpdate)
 	if err != nil {
@@ -169,6 +192,13 @@ func TestProviderPersistCompactsRecoveredSnapshotPlusTail(t *testing.T) {
 	}
 	if !bytes.Equal(record.Snapshot.UpdateV1, expectedSnapshot.UpdateV1) {
 		t.Fatalf("record.Snapshot.UpdateV1 = %v, want %v", record.Snapshot.UpdateV1, expectedSnapshot.UpdateV1)
+	}
+	if loaded, err := store.LoadSnapshot(ctx, key); err != nil {
+		t.Fatalf("store.LoadSnapshot() unexpected error: %v", err)
+	} else if loaded.Through != 1 {
+		t.Fatalf("store.LoadSnapshot().Through = %d, want 1", loaded.Through)
+	} else if loaded.Epoch != 0 {
+		t.Fatalf("store.LoadSnapshot().Epoch = %d, want 0", loaded.Epoch)
 	}
 
 	records, err := store.ListUpdates(ctx, key, 0, 0)
@@ -241,6 +271,161 @@ func TestProviderSyncUpdateDoesNotAdvanceSessionsWhenAppendFails(t *testing.T) {
 	}
 }
 
+func TestProviderOpenRejectsAuthorityFenceWithoutAuthoritativeStore(t *testing.T) {
+	t.Parallel()
+
+	provider := NewProvider(ProviderConfig{
+		Store: testSnapshotStore{},
+		ResolveAuthorityFence: func(context.Context, storage.DocumentKey) (*storage.AuthorityFence, error) {
+			return &storage.AuthorityFence{
+				ShardID: storage.ShardID("7"),
+				Owner: storage.OwnerInfo{
+					NodeID: storage.NodeID("node-a"),
+					Epoch:  1,
+				},
+				Token: "lease-a",
+			}, nil
+		},
+	})
+
+	_, err := provider.Open(context.Background(), storage.DocumentKey{
+		Namespace:  "tests",
+		DocumentID: "provider-authority-unsupported",
+	}, "conn-a", 901)
+	if !errors.Is(err, ErrAuthorityFenceUnsupported) {
+		t.Fatalf("provider.Open() error = %v, want %v", err, ErrAuthorityFenceUnsupported)
+	}
+}
+
+func TestProviderAuthorityLossOnAppendMarksRoomStale(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	key := storage.DocumentKey{
+		Namespace:  "tests",
+		DocumentID: "provider-authority-loss-append",
+	}
+	store, resolver, provider := newAuthoritativeMemoryProvider(t, "node-a")
+	seedAuthoritativeDocument(t, ctx, store, resolver, key, "node-a", 1, "lease-node-a")
+
+	sender, err := provider.Open(ctx, key, "conn-a", 902)
+	if err != nil {
+		t.Fatalf("provider.Open(sender) unexpected error: %v", err)
+	}
+	peer, err := provider.Open(ctx, key, "conn-b", 903)
+	if err != nil {
+		t.Fatalf("provider.Open(peer) unexpected error: %v", err)
+	}
+
+	beforeSender := sender.session.UpdateV1()
+	beforePeer := peer.session.UpdateV1()
+	handoffAuthority(t, ctx, store, resolver, key, "lease-node-a", "node-b", 2, "lease-node-b")
+
+	update := buildGCOnlyUpdate(51, 2)
+	if _, err := sender.HandleEncodedMessages(EncodeProtocolSyncUpdate(update)); !errors.Is(err, ErrAuthorityLost) {
+		t.Fatalf("sender.HandleEncodedMessages() error = %v, want %v", err, ErrAuthorityLost)
+	}
+	if !sender.AuthorityLost() {
+		t.Fatal("sender.AuthorityLost() = false, want true")
+	}
+	if !bytes.Equal(sender.session.UpdateV1(), beforeSender) {
+		t.Fatalf("sender.session.UpdateV1() = %v, want %v", sender.session.UpdateV1(), beforeSender)
+	}
+	if !bytes.Equal(peer.session.UpdateV1(), beforePeer) {
+		t.Fatalf("peer.session.UpdateV1() = %v, want %v", peer.session.UpdateV1(), beforePeer)
+	}
+
+	records, err := store.ListUpdates(ctx, key, 0, 0)
+	if err != nil {
+		t.Fatalf("store.ListUpdates() unexpected error: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("len(store.ListUpdates()) = %d, want 0", len(records))
+	}
+
+	if _, err := sender.Persist(ctx); !errors.Is(err, ErrAuthorityLost) {
+		t.Fatalf("sender.Persist() error = %v, want %v", err, ErrAuthorityLost)
+	}
+	if _, err := provider.Open(ctx, key, "conn-c", 904); !errors.Is(err, ErrAuthorityLost) {
+		t.Fatalf("provider.Open(conn-c) error = %v, want %v", err, ErrAuthorityLost)
+	}
+}
+
+func TestProviderAuthorityLossOnPersistPreservesTail(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	key := storage.DocumentKey{
+		Namespace:  "tests",
+		DocumentID: "provider-authority-loss-persist",
+	}
+	store, resolver, provider := newAuthoritativeMemoryProvider(t, "node-a")
+	seedAuthoritativeDocument(t, ctx, store, resolver, key, "node-a", 1, "lease-node-a")
+
+	conn, err := provider.Open(ctx, key, "conn-a", 905)
+	if err != nil {
+		t.Fatalf("provider.Open() unexpected error: %v", err)
+	}
+
+	update := buildGCOnlyUpdate(61, 3)
+	if _, err := conn.HandleEncodedMessages(EncodeProtocolSyncUpdate(update)); err != nil {
+		t.Fatalf("conn.HandleEncodedMessages(sync-update) unexpected error: %v", err)
+	}
+
+	handoffAuthority(t, ctx, store, resolver, key, "lease-node-a", "node-b", 2, "lease-node-b")
+	if _, err := conn.Persist(ctx); !errors.Is(err, ErrAuthorityLost) {
+		t.Fatalf("conn.Persist() error = %v, want %v", err, ErrAuthorityLost)
+	}
+	if !conn.AuthorityLost() {
+		t.Fatal("conn.AuthorityLost() = false, want true")
+	}
+
+	records, err := store.ListUpdates(ctx, key, 0, 0)
+	if err != nil {
+		t.Fatalf("store.ListUpdates() unexpected error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("len(store.ListUpdates()) = %d, want 1", len(records))
+	}
+	if !bytes.Equal(records[0].UpdateV1, update) {
+		t.Fatalf("records[0].UpdateV1 = %v, want %v", records[0].UpdateV1, update)
+	}
+	if _, err := conn.HandleEncodedMessages(EncodeProtocolQueryAwareness()); !errors.Is(err, ErrAuthorityLost) {
+		t.Fatalf("conn.HandleEncodedMessages(query-awareness) error = %v, want %v", err, ErrAuthorityLost)
+	}
+}
+
+func TestConnectionRevalidateAuthorityMarksRoomStaleAfterHandoff(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	key := storage.DocumentKey{
+		Namespace:  "tests",
+		DocumentID: "provider-revalidate-authority",
+	}
+	store, resolver, provider := newAuthoritativeMemoryProvider(t, "node-a")
+	seedAuthoritativeDocument(t, ctx, store, resolver, key, "node-a", 1, "lease-node-a")
+
+	conn, err := provider.Open(ctx, key, "conn-a", 906)
+	if err != nil {
+		t.Fatalf("provider.Open() unexpected error: %v", err)
+	}
+	if err := conn.RevalidateAuthority(ctx); err != nil {
+		t.Fatalf("conn.RevalidateAuthority(initial) unexpected error: %v", err)
+	}
+
+	handoffAuthority(t, ctx, store, resolver, key, "lease-node-a", "node-b", 2, "lease-node-b")
+	if err := conn.RevalidateAuthority(ctx); !errors.Is(err, ErrAuthorityLost) {
+		t.Fatalf("conn.RevalidateAuthority(after handoff) error = %v, want %v", err, ErrAuthorityLost)
+	}
+	if !conn.AuthorityLost() {
+		t.Fatal("conn.AuthorityLost() = false, want true")
+	}
+	if _, err := provider.Open(ctx, key, "conn-b", 907); !errors.Is(err, ErrAuthorityLost) {
+		t.Fatalf("provider.Open(conn-b) error = %v, want %v", err, ErrAuthorityLost)
+	}
+}
+
 type failingDistributedStore struct {
 	appendErr error
 }
@@ -265,4 +450,97 @@ func (f failingDistributedStore) ListUpdates(context.Context, storage.DocumentKe
 
 func (f failingDistributedStore) TrimUpdates(context.Context, storage.DocumentKey, storage.UpdateOffset) error {
 	return nil
+}
+
+func newAuthoritativeMemoryProvider(t *testing.T, localNode ycluster.NodeID) (*memory.Store, ycluster.ShardResolver, *Provider) {
+	t.Helper()
+
+	store := memory.New()
+	resolver, err := ycluster.NewDeterministicShardResolver(32)
+	if err != nil {
+		t.Fatalf("NewDeterministicShardResolver() unexpected error: %v", err)
+	}
+	lookup, err := ycluster.NewStorageOwnerLookup(localNode, resolver, store, store)
+	if err != nil {
+		t.Fatalf("NewStorageOwnerLookup(%s) unexpected error: %v", localNode, err)
+	}
+
+	provider := NewProvider(ProviderConfig{
+		Store: store,
+		ResolveAuthorityFence: func(ctx context.Context, key storage.DocumentKey) (*storage.AuthorityFence, error) {
+			return ycluster.ResolveStorageAuthorityFence(ctx, lookup, key)
+		},
+	})
+	return store, resolver, provider
+}
+
+func seedAuthoritativeDocument(
+	t *testing.T,
+	ctx context.Context,
+	store *memory.Store,
+	resolver ycluster.ShardResolver,
+	key storage.DocumentKey,
+	node ycluster.NodeID,
+	epoch uint64,
+	token string,
+) {
+	t.Helper()
+
+	shardID, err := resolver.ResolveShard(key)
+	if err != nil {
+		t.Fatalf("ResolveShard(%#v) unexpected error: %v", key, err)
+	}
+	if _, err := store.SavePlacement(ctx, storage.PlacementRecord{
+		Key:     key,
+		ShardID: ycluster.StorageShardID(shardID),
+		Version: 1,
+	}); err != nil {
+		t.Fatalf("store.SavePlacement() unexpected error: %v", err)
+	}
+	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID: ycluster.StorageShardID(shardID),
+		Owner: storage.OwnerInfo{
+			NodeID: ycluster.StorageNodeID(node),
+			Epoch:  epoch,
+		},
+		Token:      token,
+		ExpiresAt:  time.Now().UTC().Add(time.Hour),
+		AcquiredAt: time.Now().UTC().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("store.SaveLease() unexpected error: %v", err)
+	}
+}
+
+func handoffAuthority(
+	t *testing.T,
+	ctx context.Context,
+	store *memory.Store,
+	resolver ycluster.ShardResolver,
+	key storage.DocumentKey,
+	oldToken string,
+	nextNode ycluster.NodeID,
+	nextEpoch uint64,
+	nextToken string,
+) {
+	t.Helper()
+
+	shardID, err := resolver.ResolveShard(key)
+	if err != nil {
+		t.Fatalf("ResolveShard(%#v) unexpected error: %v", key, err)
+	}
+	if err := store.ReleaseLease(ctx, ycluster.StorageShardID(shardID), oldToken); err != nil {
+		t.Fatalf("store.ReleaseLease() unexpected error: %v", err)
+	}
+	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
+		ShardID: ycluster.StorageShardID(shardID),
+		Owner: storage.OwnerInfo{
+			NodeID: ycluster.StorageNodeID(nextNode),
+			Epoch:  nextEpoch,
+		},
+		Token:      nextToken,
+		ExpiresAt:  time.Now().UTC().Add(2 * time.Hour),
+		AcquiredAt: time.Now().UTC().Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("store.SaveLease() handoff unexpected error: %v", err)
+	}
 }

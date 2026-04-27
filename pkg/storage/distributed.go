@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"yjs-go-bridge/pkg/yjsbridge"
 )
 
 // ShardID identifica um shard lógico dentro da topologia distribuída.
@@ -37,6 +39,7 @@ type UpdateLogRecord struct {
 	Key      DocumentKey
 	Offset   UpdateOffset
 	UpdateV1 []byte
+	Epoch    uint64
 	StoredAt time.Time
 }
 
@@ -60,6 +63,7 @@ func (r *UpdateLogRecord) Clone() *UpdateLogRecord {
 	clone := &UpdateLogRecord{
 		Key:      r.Key,
 		Offset:   r.Offset,
+		Epoch:    r.Epoch,
 		StoredAt: r.StoredAt,
 	}
 	if len(r.UpdateV1) > 0 {
@@ -173,6 +177,43 @@ func (r *LeaseRecord) Clone() *LeaseRecord {
 	}
 }
 
+// AuthorityFence identifica a geração autoritativa esperada para operações de
+// escrita, persistência e trim.
+//
+// O fence combina shard, owner/epoch e token opaco da lease ativa.
+type AuthorityFence struct {
+	ShardID ShardID
+	Owner   OwnerInfo
+	Token   string
+}
+
+// Validate confirma se o fence pode ser usado em operações autoritativas.
+func (f AuthorityFence) Validate() error {
+	if err := f.ShardID.Validate(); err != nil {
+		return err
+	}
+	if err := f.Owner.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(f.Token) == "" {
+		return fmt.Errorf("%w: token obrigatorio", ErrInvalidLeaseToken)
+	}
+	return nil
+}
+
+// Clone retorna uma cópia do fence autoritativo.
+func (f *AuthorityFence) Clone() *AuthorityFence {
+	if f == nil {
+		return nil
+	}
+
+	return &AuthorityFence{
+		ShardID: f.ShardID,
+		Owner:   f.Owner,
+		Token:   f.Token,
+	}
+}
+
 // UpdateLogStore define o contrato de log incremental por documento.
 type UpdateLogStore interface {
 	// AppendUpdate adiciona um update V1 ao fim do log do documento e retorna o
@@ -187,6 +228,18 @@ type UpdateLogStore interface {
 
 	// TrimUpdates remove, de forma inclusiva, registros com offset <= through.
 	TrimUpdates(ctx context.Context, key DocumentKey, through UpdateOffset) error
+}
+
+// AuthoritativeUpdateLogStore adiciona fencing opcional a writes/trim do log.
+type AuthoritativeUpdateLogStore interface {
+	UpdateLogStore
+
+	// AppendUpdateAuthoritative exige que o placement + lease persistidos ainda
+	// correspondam ao fence esperado no momento do append.
+	AppendUpdateAuthoritative(ctx context.Context, key DocumentKey, update []byte, fence AuthorityFence) (*UpdateLogRecord, error)
+
+	// TrimUpdatesAuthoritative exige o mesmo fence antes de compactar o tail.
+	TrimUpdatesAuthoritative(ctx context.Context, key DocumentKey, through UpdateOffset, fence AuthorityFence) error
 }
 
 // PlacementStore define o contrato de resolução persistida documento -> shard.
@@ -222,6 +275,27 @@ type LeaseStore interface {
 	// Implementações devem preservar a última geração (`Owner.Epoch`) do shard
 	// para que um acquire posterior continue monotônico.
 	ReleaseLease(ctx context.Context, shardID ShardID, token string) error
+}
+
+// AuthoritativeSnapshotStore adiciona fencing opcional à persistência de
+// snapshots compactados.
+type AuthoritativeSnapshotStore interface {
+	SnapshotStore
+
+	// SaveSnapshotAuthoritative exige que o placement + lease persistidos ainda
+	// correspondam ao fence esperado no momento da persistência.
+	SaveSnapshotAuthoritative(ctx context.Context, key DocumentKey, snapshot *yjsbridge.PersistedSnapshot, fence AuthorityFence) (*SnapshotRecord, error)
+}
+
+// AuthoritativeSnapshotCheckpointStore adiciona persistência opcional do
+// checkpoint do snapshot sob fencing autoritativo.
+type AuthoritativeSnapshotCheckpointStore interface {
+	AuthoritativeSnapshotStore
+	SnapshotCheckpointStore
+
+	// SaveSnapshotCheckpointAuthoritative grava o snapshot e o checkpoint `through`
+	// exigindo que o placement + lease persistidos ainda correspondam ao fence.
+	SaveSnapshotCheckpointAuthoritative(ctx context.Context, key DocumentKey, snapshot *yjsbridge.PersistedSnapshot, through UpdateOffset, fence AuthorityFence) (*SnapshotRecord, error)
 }
 
 // DistributedStore agrega os contratos opcionais usados por um runtime

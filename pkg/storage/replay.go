@@ -17,6 +17,10 @@ var (
 	ErrUpdateLogKeyMismatch = errors.New("storage: update log key inconsistente")
 	// ErrUpdateLogOffsetsOutOfOrder signals that replay observed non-monotonic log offsets.
 	ErrUpdateLogOffsetsOutOfOrder = errors.New("storage: update log offsets fora de ordem")
+	// ErrUpdateLogEpochRegression signals that replay observed a tail whose
+	// authoritative epoch regressed relative to the checkpoint or to prior log
+	// records.
+	ErrUpdateLogEpochRegression = errors.New("storage: update log epoch regressivo")
 )
 
 // SnapshotLogStore narrows the contracts required to persist a compacted
@@ -29,9 +33,12 @@ type SnapshotLogStore interface {
 // RecoveryResult materializes the result of loading a base snapshot and replaying
 // the incremental update log tail for the same document.
 type RecoveryResult struct {
-	Snapshot   *yjsbridge.PersistedSnapshot
-	Updates    []*UpdateLogRecord
-	LastOffset UpdateOffset
+	Snapshot          *yjsbridge.PersistedSnapshot
+	Updates           []*UpdateLogRecord
+	CheckpointThrough UpdateOffset
+	CheckpointEpoch   uint64
+	LastOffset        UpdateOffset
+	LastEpoch         uint64
 }
 
 // UpdateLogReplayResult describes the snapshot rebuilt from a base cut plus a
@@ -40,9 +47,10 @@ type RecoveryResult struct {
 // Through stores the highest applied offset. When no new log records are
 // applied, it remains equal to the input `after`.
 type UpdateLogReplayResult struct {
-	Snapshot *yjsbridge.PersistedSnapshot
-	Through  UpdateOffset
-	Applied  int
+	Snapshot  *yjsbridge.PersistedSnapshot
+	Through   UpdateOffset
+	Applied   int
+	LastEpoch uint64
 }
 
 // UpdateLogCompactionResult describes the outcome of compacting a snapshot plus
@@ -50,10 +58,11 @@ type UpdateLogReplayResult struct {
 //
 // Record stays nil when there were no new updates to persist or trim.
 type UpdateLogCompactionResult struct {
-	Snapshot *yjsbridge.PersistedSnapshot
-	Record   *SnapshotRecord
-	Through  UpdateOffset
-	Applied  int
+	Snapshot  *yjsbridge.PersistedSnapshot
+	Record    *SnapshotRecord
+	Through   UpdateOffset
+	Applied   int
+	LastEpoch uint64
 }
 
 // ReplaySnapshot applies an ordered set of update log records over a base
@@ -182,20 +191,31 @@ func RecoverSnapshot(
 		return nil, err
 	}
 
-	base, err := loadReplayBaseSnapshot(ctx, snapshots, key)
+	base, checkpointThrough, checkpointEpoch, err := loadReplayBaseSnapshot(ctx, snapshots, key)
 	if err != nil {
 		return nil, err
 	}
+	if checkpointThrough > 0 && after > 0 && after != checkpointThrough {
+		return nil, fmt.Errorf("%w: snapshot through %d, after %d", ErrSnapshotCheckpointMismatch, checkpointThrough, after)
+	}
+
+	replayAfter := after
+	if replayAfter < checkpointThrough {
+		replayAfter = checkpointThrough
+	}
 
 	result := &RecoveryResult{
-		Snapshot:   base,
-		LastOffset: after,
+		Snapshot:          base,
+		CheckpointThrough: checkpointThrough,
+		CheckpointEpoch:   checkpointEpoch,
+		LastOffset:        replayAfter,
+		LastEpoch:         checkpointEpoch,
 	}
 	if updates == nil {
 		return result, nil
 	}
 
-	tail, lastOffset, err := listReplayTailContext(ctx, updates, key, after, limit)
+	tail, lastOffset, lastEpoch, err := listReplayTailContext(ctx, updates, key, replayAfter, limit, checkpointEpoch)
 	if err != nil {
 		return nil, err
 	}
@@ -209,9 +229,12 @@ func RecoverSnapshot(
 	}
 
 	return &RecoveryResult{
-		Snapshot:   snapshot,
-		Updates:    cloneUpdateLogRecords(tail),
-		LastOffset: lastOffset,
+		Snapshot:          snapshot,
+		Updates:           cloneUpdateLogRecords(tail),
+		CheckpointThrough: checkpointThrough,
+		CheckpointEpoch:   checkpointEpoch,
+		LastOffset:        lastOffset,
+		LastEpoch:         lastEpoch,
 	}, nil
 }
 
@@ -244,15 +267,16 @@ func CompactUpdateLogContext(ctx context.Context, store SnapshotLogStore, key Do
 	}
 
 	result := &UpdateLogCompactionResult{
-		Snapshot: replay.Snapshot,
-		Through:  replay.Through,
-		Applied:  replay.Applied,
+		Snapshot:  replay.Snapshot,
+		Through:   replay.Through,
+		Applied:   replay.Applied,
+		LastEpoch: replay.LastEpoch,
 	}
 	if replay.Applied == 0 {
 		return result, nil
 	}
 
-	record, err := store.SaveSnapshot(ctx, key, replay.Snapshot)
+	record, err := saveSnapshotCheckpoint(ctx, store, key, replay.Snapshot, replay.Through, replay.LastEpoch)
 	result.Record = record
 	if err != nil {
 		return result, fmt.Errorf("save compacted snapshot: %w", err)
@@ -264,40 +288,48 @@ func CompactUpdateLogContext(ctx context.Context, store SnapshotLogStore, key Do
 	return result, nil
 }
 
-func loadReplayBaseSnapshot(ctx context.Context, snapshots SnapshotStore, key DocumentKey) (*yjsbridge.PersistedSnapshot, error) {
+func loadReplayBaseSnapshot(ctx context.Context, snapshots SnapshotStore, key DocumentKey) (*yjsbridge.PersistedSnapshot, UpdateOffset, uint64, error) {
 	if snapshots == nil {
-		return yjsbridge.NewPersistedSnapshot(), nil
+		return yjsbridge.NewPersistedSnapshot(), 0, 0, nil
 	}
 
 	record, err := snapshots.LoadSnapshot(ctx, key)
 	if err != nil {
 		if errors.Is(err, ErrSnapshotNotFound) {
-			return yjsbridge.NewPersistedSnapshot(), nil
+			return yjsbridge.NewPersistedSnapshot(), 0, 0, nil
 		}
-		return nil, err
+		return nil, 0, 0, err
 	}
 	if record == nil || record.Snapshot == nil {
-		return yjsbridge.NewPersistedSnapshot(), nil
+		if record == nil {
+			return yjsbridge.NewPersistedSnapshot(), 0, 0, nil
+		}
+		return yjsbridge.NewPersistedSnapshot(), record.Through, record.Epoch, nil
 	}
-	return ReplaySnapshot(ctx, record.Snapshot)
+	snapshot, err := ReplaySnapshot(ctx, record.Snapshot)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	return snapshot, record.Through, record.Epoch, nil
 }
 
-func listReplayTailContext(ctx context.Context, store UpdateLogStore, key DocumentKey, after UpdateOffset, limit int) ([]*UpdateLogRecord, UpdateOffset, error) {
+func listReplayTailContext(ctx context.Context, store UpdateLogStore, key DocumentKey, after UpdateOffset, limit int, checkpointEpoch uint64) ([]*UpdateLogRecord, UpdateOffset, uint64, error) {
 	if store == nil {
-		return nil, after, ErrNilUpdateLogStore
+		return nil, after, checkpointEpoch, ErrNilUpdateLogStore
 	}
 
 	through := after
+	lastEpoch := checkpointEpoch
 	tail := make([]*UpdateLogRecord, 0)
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, after, err
+			return nil, after, checkpointEpoch, err
 		}
 
 		records, err := store.ListUpdates(ctx, key, through, limit)
 		if err != nil {
-			return nil, after, err
+			return nil, after, checkpointEpoch, err
 		}
 		if len(records) == 0 {
 			break
@@ -305,24 +337,30 @@ func listReplayTailContext(ctx context.Context, store UpdateLogStore, key Docume
 
 		for idx, record := range records {
 			if record == nil {
-				return nil, after, fmt.Errorf("%w: record %d nil", ErrInvalidUpdatePayload, idx)
+				return nil, after, checkpointEpoch, fmt.Errorf("%w: record %d nil", ErrInvalidUpdatePayload, idx)
 			}
 			if err := record.Validate(); err != nil {
-				return nil, after, fmt.Errorf("update log record %d: %w", idx, err)
+				return nil, after, checkpointEpoch, fmt.Errorf("update log record %d: %w", idx, err)
 			}
 			if record.Key != key {
-				return nil, after, fmt.Errorf("%w: record %d key %#v", ErrUpdateLogKeyMismatch, idx, record.Key)
+				return nil, after, checkpointEpoch, fmt.Errorf("%w: record %d key %#v", ErrUpdateLogKeyMismatch, idx, record.Key)
 			}
 			if record.Offset <= through {
-				return nil, after, fmt.Errorf("%w: offset %d after %d", ErrUpdateLogOffsetsOutOfOrder, record.Offset, through)
+				return nil, after, checkpointEpoch, fmt.Errorf("%w: offset %d after %d", ErrUpdateLogOffsetsOutOfOrder, record.Offset, through)
+			}
+			if err := validateReplayEpochProgression(lastEpoch, record.Epoch); err != nil {
+				return nil, after, checkpointEpoch, fmt.Errorf("update log record %d: %w", idx, err)
 			}
 
 			tail = append(tail, record.Clone())
 			through = record.Offset
+			if record.Epoch > 0 {
+				lastEpoch = record.Epoch
+			}
 		}
 	}
 
-	return tail, through, nil
+	return tail, through, lastEpoch, nil
 }
 
 func replayUpdateBatchContext(ctx context.Context, key DocumentKey, currentUpdate []byte, result *UpdateLogReplayResult, records []*UpdateLogRecord) ([]byte, error) {
@@ -342,13 +380,29 @@ func replayUpdateBatchContext(ctx context.Context, key DocumentKey, currentUpdat
 		if record.Offset <= result.Through {
 			return nil, fmt.Errorf("%w: offset %d after %d", ErrUpdateLogOffsetsOutOfOrder, record.Offset, result.Through)
 		}
+		if err := validateReplayEpochProgression(result.LastEpoch, record.Epoch); err != nil {
+			return nil, fmt.Errorf("update log record %d: %w", idx, err)
+		}
 
 		updates = append(updates, record.UpdateV1)
 		result.Through = record.Offset
 		result.Applied++
+		if record.Epoch > 0 {
+			result.LastEpoch = record.Epoch
+		}
 	}
 
 	return yjsbridge.MergeUpdatesContext(ctx, updates...)
+}
+
+func validateReplayEpochProgression(lastEpoch uint64, nextEpoch uint64) error {
+	if lastEpoch == 0 || nextEpoch == 0 {
+		return nil
+	}
+	if nextEpoch < lastEpoch {
+		return fmt.Errorf("%w: current=%d next=%d", ErrUpdateLogEpochRegression, lastEpoch, nextEpoch)
+	}
+	return nil
 }
 
 func cloneUpdateLogRecords(records []*UpdateLogRecord) []*UpdateLogRecord {
@@ -365,4 +419,16 @@ func cloneUpdateLogRecords(records []*UpdateLogRecord) []*UpdateLogRecord {
 		cloned = append(cloned, record.Clone())
 	}
 	return cloned
+}
+
+func saveSnapshotCheckpoint(ctx context.Context, store SnapshotStore, key DocumentKey, snapshot *yjsbridge.PersistedSnapshot, through UpdateOffset, epoch uint64) (*SnapshotRecord, error) {
+	checkpointEpochStore, ok := store.(SnapshotCheckpointEpochStore)
+	if ok {
+		return checkpointEpochStore.SaveSnapshotCheckpointEpoch(ctx, key, snapshot, through, epoch)
+	}
+	checkpointStore, ok := store.(SnapshotCheckpointStore)
+	if !ok {
+		return store.SaveSnapshot(ctx, key, snapshot)
+	}
+	return checkpointStore.SaveSnapshotCheckpoint(ctx, key, snapshot, through)
 }

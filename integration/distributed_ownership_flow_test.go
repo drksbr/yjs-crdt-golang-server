@@ -92,7 +92,12 @@ func TestDistributedOwnerFailoverRecoversSnapshotTailAndEpoch(t *testing.T) {
 	}
 	expected := mustMergeUpdates(t, append(append([][]byte(nil), baseUpdates...), tailUpdates...)...)
 
-	ownerAProvider := yprotocol.NewProvider(yprotocol.ProviderConfig{Store: store})
+	ownerAProvider := yprotocol.NewProvider(yprotocol.ProviderConfig{
+		Store: store,
+		ResolveAuthorityFence: func(ctx context.Context, key storage.DocumentKey) (*storage.AuthorityFence, error) {
+			return ycluster.ResolveStorageAuthorityFence(ctx, nodeALookup, key)
+		},
+	})
 	ownerAConn, err := ownerAProvider.Open(ctx, key, "owner-a", 1001)
 	if err != nil {
 		t.Fatalf("provider.Open(owner-a) unexpected error: %v", err)
@@ -114,6 +119,12 @@ func TestDistributedOwnerFailoverRecoversSnapshotTailAndEpoch(t *testing.T) {
 	}
 	if !bytes.Equal(checkpointRecord.Snapshot.UpdateV1, checkpointSnapshot.UpdateV1) {
 		t.Fatalf("checkpointRecord.Snapshot.UpdateV1 = %x, want %x", checkpointRecord.Snapshot.UpdateV1, checkpointSnapshot.UpdateV1)
+	}
+	if checkpointRecord.Through != 2 {
+		t.Fatalf("checkpointRecord.Through = %d, want 2", checkpointRecord.Through)
+	}
+	if checkpointRecord.Epoch != 1 {
+		t.Fatalf("checkpointRecord.Epoch = %d, want 1", checkpointRecord.Epoch)
 	}
 
 	for _, update := range tailUpdates {
@@ -181,7 +192,12 @@ func TestDistributedOwnerFailoverRecoversSnapshotTailAndEpoch(t *testing.T) {
 		t.Fatalf("LookupOwner(node-b after handoff).Placement.Lease = %#v, want epoch 2", nodeBLocal.Placement.Lease)
 	}
 
-	ownerBProvider := yprotocol.NewProvider(yprotocol.ProviderConfig{Store: store})
+	ownerBProvider := yprotocol.NewProvider(yprotocol.ProviderConfig{
+		Store: store,
+		ResolveAuthorityFence: func(ctx context.Context, key storage.DocumentKey) (*storage.AuthorityFence, error) {
+			return ycluster.ResolveStorageAuthorityFence(ctx, nodeBLookup, key)
+		},
+	})
 	ownerBConn, err := ownerBProvider.Open(ctx, key, "owner-b", 1002)
 	if err != nil {
 		t.Fatalf("provider.Open(owner-b) unexpected error: %v", err)
@@ -202,6 +218,12 @@ func TestDistributedOwnerFailoverRecoversSnapshotTailAndEpoch(t *testing.T) {
 	}
 	if !bytes.Equal(record.Snapshot.UpdateV1, expected) {
 		t.Fatalf("record.Snapshot.UpdateV1 = %x, want %x", record.Snapshot.UpdateV1, expected)
+	}
+	if record.Through != 4 {
+		t.Fatalf("record.Through = %d, want 4", record.Through)
+	}
+	if record.Epoch != 2 {
+		t.Fatalf("record.Epoch = %d, want 2", record.Epoch)
 	}
 
 	trimmed, err := store.ListUpdates(ctx, key, 0, 0)

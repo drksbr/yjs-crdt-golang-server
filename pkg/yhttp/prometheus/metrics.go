@@ -44,12 +44,17 @@ type Metrics struct {
 	remoteOwnerHandshake      *prometheuslib.HistogramVec
 	remoteOwnerMessages       *prometheuslib.CounterVec
 	remoteOwnerCloses         *prometheuslib.CounterVec
+	authorityRevalidation     *prometheuslib.HistogramVec
+	ownershipTransitions      *prometheuslib.CounterVec
+	ownershipTransitionDur    *prometheuslib.HistogramVec
 }
 
 var _ yhttp.Metrics = (*Metrics)(nil)
 var _ yhttp.OwnerLookupMetrics = (*Metrics)(nil)
 var _ yhttp.RouteDecisionMetrics = (*Metrics)(nil)
 var _ yhttp.RemoteOwnerMetrics = (*Metrics)(nil)
+var _ yhttp.AuthorityRevalidationMetrics = (*Metrics)(nil)
+var _ yhttp.OwnershipTransitionMetrics = (*Metrics)(nil)
 
 // New constrói e registra um conjunto de métricas para `pkg/yhttp`.
 func New(cfg Config) (*Metrics, error) {
@@ -182,6 +187,26 @@ func New(cfg Config) (*Metrics, error) {
 			Name:      "remote_owner_closes_total",
 			Help:      "Total de encerramentos observados no relay inter-node.",
 		}, []string{"role", "reason"}),
+		authorityRevalidation: prometheuslib.NewHistogramVec(prometheuslib.HistogramOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "authority_revalidation_duration_seconds",
+			Help:      "Duracao das revalidacoes periodicas de autoridade local/owner-side.",
+			Buckets:   prometheuslib.DefBuckets,
+		}, []string{"role", "result"}),
+		ownershipTransitions: prometheuslib.NewCounterVec(prometheuslib.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "ownership_transitions_total",
+			Help:      "Total de transicoes de ownership observadas durante handoff e rebind.",
+		}, []string{"from", "to", "result"}),
+		ownershipTransitionDur: prometheuslib.NewHistogramVec(prometheuslib.HistogramOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "ownership_transition_duration_seconds",
+			Help:      "Duracao das transicoes de ownership local/remoto.",
+			Buckets:   prometheuslib.DefBuckets,
+		}, []string{"from", "to", "result"}),
 	}
 
 	registerer := cfg.Registerer
@@ -206,6 +231,9 @@ func New(cfg Config) (*Metrics, error) {
 		metrics.remoteOwnerHandshake,
 		metrics.remoteOwnerMessages,
 		metrics.remoteOwnerCloses,
+		metrics.authorityRevalidation,
+		metrics.ownershipTransitions,
+		metrics.ownershipTransitionDur,
 	}
 	for _, collector := range collectors {
 		if err := registerer.Register(collector); err != nil {
@@ -300,6 +328,23 @@ func (m *Metrics) RemoteOwnerClose(_ yhttp.Request, role string, reason string) 
 		normalizeLabel(role, "unknown"),
 		normalizeLabel(reason, "unknown"),
 	).Inc()
+}
+
+// AuthorityRevalidation observa a duracao e o resultado de uma revalidacao.
+func (m *Metrics) AuthorityRevalidation(_ yhttp.Request, role string, duration time.Duration, err error) {
+	m.authorityRevalidation.WithLabelValues(
+		normalizeLabel(role, "unknown"),
+		resultLabel(err),
+	).Observe(duration.Seconds())
+}
+
+// OwnershipTransition contabiliza e observa a duracao de uma transicao.
+func (m *Metrics) OwnershipTransition(_ yhttp.Request, from string, to string, duration time.Duration, err error) {
+	fromLabel := normalizeLabel(from, "unknown")
+	toLabel := normalizeLabel(to, "unknown")
+	result := resultLabel(err)
+	m.ownershipTransitions.WithLabelValues(fromLabel, toLabel, result).Inc()
+	m.ownershipTransitionDur.WithLabelValues(fromLabel, toLabel, result).Observe(duration.Seconds())
 }
 
 func normalizeBytes(value int) int {

@@ -401,6 +401,8 @@ type Close struct {
 	DocumentKey  storage.DocumentKey
 	ConnectionID string
 	Epoch        uint64
+	Retryable    bool
+	Reason       string
 }
 
 // Type retorna o message type associado ao payload.
@@ -413,7 +415,11 @@ func (m *Close) FrameFlags() Flags {
 	if m == nil {
 		return FlagNone
 	}
-	return m.Flags
+	flags := m.Flags &^ FlagCloseRetryable
+	if m.Retryable {
+		flags |= FlagCloseRetryable
+	}
+	return flags
 }
 
 // Validate confirma se o payload contém os campos mínimos exigidos pelo wire.
@@ -425,7 +431,14 @@ func (m *Close) Validate() error {
 }
 
 func (m *Close) appendPayload(dst []byte) ([]byte, error) {
-	return appendRoutedRoute(dst, m.DocumentKey, m.ConnectionID, m.Epoch)
+	dst, err := appendRoutedRoute(dst, m.DocumentKey, m.ConnectionID, m.Epoch)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(m.Reason) == "" {
+		return dst, nil
+	}
+	return appendString(dst, m.Reason)
 }
 
 // Ping carrega um nonce correlacionável para keepalive/latência.
@@ -835,11 +848,21 @@ func decodeClose(r *ybinary.Reader, flags Flags) (*Close, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	reason := ""
+	if r.Remaining() > 0 {
+		reason, err = readString(r, "ReadClose.reason")
+		if err != nil {
+			return nil, err
+		}
+	}
 	message := &Close{
 		Flags:        flags,
 		DocumentKey:  route.DocumentKey,
 		ConnectionID: route.ConnectionID,
 		Epoch:        route.Epoch,
+		Retryable:    flags&FlagCloseRetryable != 0,
+		Reason:       reason,
 	}
 	if err := message.Validate(); err != nil {
 		return nil, wrapParseError("ReadClose.validate", r.Offset(), err)

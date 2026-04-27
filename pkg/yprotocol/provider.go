@@ -24,7 +24,15 @@ var (
 	ErrClientIDExists = errors.New("yprotocol: client id ja existe para o documento")
 	// ErrPersistenceDisabled sinaliza ausência de SnapshotStore no provider.
 	ErrPersistenceDisabled = errors.New("yprotocol: persistencia desabilitada")
+	// ErrAuthorityLost sinaliza que o owner local perdeu a autoridade sobre o documento.
+	ErrAuthorityLost = errors.New("yprotocol: autoridade perdida para o documento")
+	// ErrAuthorityFenceUnsupported sinaliza wiring inconsistente entre resolver e store.
+	ErrAuthorityFenceUnsupported = errors.New("yprotocol: store nao suporta fencing autoritativo")
 )
+
+// ResolveAuthorityFenceFunc resolve o fence autoritativo atual do owner local
+// para um documento antes das operações de escrita/persistência.
+type ResolveAuthorityFenceFunc func(ctx context.Context, key storage.DocumentKey) (*storage.AuthorityFence, error)
 
 // ProviderConfig define dependências opcionais do provider local.
 type ProviderConfig struct {
@@ -34,6 +42,10 @@ type ProviderConfig struct {
 	// recupera `snapshot + tail` em `Open`, registra updates incrementais no log
 	// e compacta esse estado em `Persist`.
 	Store storage.SnapshotStore
+
+	// ResolveAuthorityFence ativa fencing autoritativo opcional para runtimes
+	// distribuídos, exigindo que o store suporte os contratos autoritativos.
+	ResolveAuthorityFence ResolveAuthorityFenceFunc
 }
 
 // DispatchResult representa a saída local de uma operação no provider.
@@ -54,18 +66,21 @@ type DispatchResult struct {
 // - replica updates e awareness entre conexões do mesmo documento;
 // - deixa transporte, fanout de rede e persistência automática fora de escopo.
 type Provider struct {
-	mu    sync.Mutex
-	store storage.SnapshotStore
-	rooms map[storage.DocumentKey]*providerRoom
+	mu                    sync.Mutex
+	store                 storage.SnapshotStore
+	resolveAuthorityFence ResolveAuthorityFenceFunc
+	rooms                 map[storage.DocumentKey]*providerRoom
 }
 
 type providerRoom struct {
-	mu          sync.Mutex
-	key         storage.DocumentKey
-	snapshot    *yjsbridge.PersistedSnapshot
-	lastOffset  storage.UpdateOffset
-	compactedAt storage.UpdateOffset
-	connections map[string]*Connection
+	mu            sync.Mutex
+	key           storage.DocumentKey
+	snapshot      *yjsbridge.PersistedSnapshot
+	lastOffset    storage.UpdateOffset
+	compactedAt   storage.UpdateOffset
+	authority     *storage.AuthorityFence
+	authorityLost bool
+	connections   map[string]*Connection
 }
 
 // Connection representa uma conexão local anexada a um documento do provider.
@@ -81,8 +96,9 @@ type Connection struct {
 // NewProvider cria um provider local com store opcional.
 func NewProvider(cfg ProviderConfig) *Provider {
 	return &Provider{
-		store: cfg.Store,
-		rooms: make(map[storage.DocumentKey]*providerRoom),
+		store:                 cfg.Store,
+		resolveAuthorityFence: cfg.ResolveAuthorityFence,
+		rooms:                 make(map[storage.DocumentKey]*providerRoom),
 	}
 }
 
@@ -106,6 +122,9 @@ func (p *Provider) Open(ctx context.Context, key storage.DocumentKey, connection
 	room.mu.Lock()
 	defer room.mu.Unlock()
 
+	if room.authorityLost {
+		return nil, ErrAuthorityLost
+	}
 	if _, exists := room.connections[connectionID]; exists {
 		return nil, ErrConnectionExists
 	}
@@ -159,6 +178,92 @@ func (c *Connection) ClientID() uint32 {
 	return c.clientID
 }
 
+// AuthorityLost informa se o room desta conexão já perdeu a autoridade local.
+func (c *Connection) AuthorityLost() bool {
+	if c == nil || c.room == nil {
+		return false
+	}
+
+	c.room.mu.Lock()
+	defer c.room.mu.Unlock()
+	return c.room.authorityLost
+}
+
+// AuthorityEpoch retorna o epoch autoritativo atualmente anexado ao room.
+//
+// Quando o provider nao opera com fencing autoritativo, retorna zero.
+func (c *Connection) AuthorityEpoch() uint64 {
+	if c == nil || c.room == nil {
+		return 0
+	}
+
+	c.room.mu.Lock()
+	defer c.room.mu.Unlock()
+	if c.room.authority == nil {
+		return 0
+	}
+	return c.room.authority.Owner.Epoch
+}
+
+// RevalidateAuthority força uma nova checagem do fence autoritativo do room.
+//
+// Quando não há fencing configurado, a operação é no-op.
+func (c *Connection) RevalidateAuthority(ctx context.Context) error {
+	if c == nil {
+		return ErrConnectionClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	room := c.room
+	if room == nil {
+		return ErrConnectionClosed
+	}
+
+	room.mu.Lock()
+	if c.closed {
+		room.mu.Unlock()
+		return ErrConnectionClosed
+	}
+	if room.authorityLost {
+		room.mu.Unlock()
+		return ErrAuthorityLost
+	}
+	provider := c.provider
+	key := room.key
+	current := room.authority.Clone()
+	room.mu.Unlock()
+
+	if provider == nil || provider.resolveAuthorityFence == nil || current == nil {
+		return nil
+	}
+
+	resolved, err := provider.resolveRoomAuthority(ctx, key)
+	if err != nil {
+		if errors.Is(err, ErrAuthorityLost) || errors.Is(err, storage.ErrAuthorityLost) {
+			room.mu.Lock()
+			room.authorityLost = true
+			room.mu.Unlock()
+			return wrapAuthorityLost(err)
+		}
+		return err
+	}
+	if !authorityFenceEqual(current, resolved) {
+		room.mu.Lock()
+		room.authorityLost = true
+		room.mu.Unlock()
+		return wrapAuthorityLost(storage.ErrAuthorityLost)
+	}
+
+	room.mu.Lock()
+	if !room.authorityLost {
+		room.authority = resolved.Clone()
+	}
+	room.mu.Unlock()
+	return nil
+}
+
 // DocumentKey retorna a chave do documento associada à conexão.
 func (c *Connection) DocumentKey() storage.DocumentKey {
 	if c == nil || c.room == nil {
@@ -185,6 +290,9 @@ func (c *Connection) HandleEncodedMessages(src []byte) (*DispatchResult, error) 
 
 	if c.closed {
 		return nil, ErrConnectionClosed
+	}
+	if c.room.authorityLost {
+		return nil, ErrAuthorityLost
 	}
 
 	result := &DispatchResult{}
@@ -221,6 +329,10 @@ func (c *Connection) Persist(ctx context.Context) (*storage.SnapshotRecord, erro
 		c.room.mu.Unlock()
 		return nil, ErrConnectionClosed
 	}
+	if c.room.authorityLost {
+		c.room.mu.Unlock()
+		return nil, ErrAuthorityLost
+	}
 	if c.provider == nil || c.provider.store == nil {
 		c.room.mu.Unlock()
 		return nil, ErrPersistenceDisabled
@@ -229,15 +341,28 @@ func (c *Connection) Persist(ctx context.Context) (*storage.SnapshotRecord, erro
 	snapshot := c.room.snapshot.Clone()
 	lastOffset := c.room.lastOffset
 	shouldTrim := lastOffset > c.room.compactedAt
+	authority := c.room.authority.Clone()
 	c.room.mu.Unlock()
 
-	record, err := c.provider.store.SaveSnapshot(ctx, key, snapshot)
+	record, err := c.provider.saveSnapshot(ctx, key, snapshot, lastOffset, authority)
 	if err != nil {
+		if errors.Is(err, storage.ErrAuthorityLost) {
+			c.room.mu.Lock()
+			c.room.authorityLost = true
+			c.room.mu.Unlock()
+			return nil, wrapAuthorityLost(err)
+		}
 		return nil, err
 	}
 
 	if updateStore := c.provider.updateLogStore(); updateStore != nil && shouldTrim {
-		if err := updateStore.TrimUpdates(ctx, key, lastOffset); err != nil {
+		if err := c.provider.trimUpdates(ctx, key, lastOffset, authority); err != nil {
+			if errors.Is(err, storage.ErrAuthorityLost) {
+				c.room.mu.Lock()
+				c.room.authorityLost = true
+				c.room.mu.Unlock()
+				return record, wrapAuthorityLost(err)
+			}
 			return record, fmt.Errorf("trim compacted updates through %d: %w", lastOffset, err)
 		}
 
@@ -312,7 +437,13 @@ func (p *Provider) ensureRoom(ctx context.Context, key storage.DocumentKey) (*pr
 		return room, nil
 	}
 
-	snapshot, lastOffset, err := p.loadSnapshot(ctx, key)
+	authority, err := p.resolveRoomAuthority(ctx, key)
+	if err != nil {
+		p.mu.Unlock()
+		return nil, err
+	}
+
+	snapshot, lastOffset, compactedAt, err := p.loadSnapshot(ctx, key)
 	if err != nil {
 		p.mu.Unlock()
 		return nil, err
@@ -322,6 +453,8 @@ func (p *Provider) ensureRoom(ctx context.Context, key storage.DocumentKey) (*pr
 		key:         key,
 		snapshot:    snapshot,
 		lastOffset:  lastOffset,
+		compactedAt: compactedAt,
+		authority:   authority,
 		connections: make(map[string]*Connection),
 	}
 	p.rooms[key] = room
@@ -329,33 +462,36 @@ func (p *Provider) ensureRoom(ctx context.Context, key storage.DocumentKey) (*pr
 	return room, nil
 }
 
-func (p *Provider) loadSnapshot(ctx context.Context, key storage.DocumentKey) (*yjsbridge.PersistedSnapshot, storage.UpdateOffset, error) {
+func (p *Provider) loadSnapshot(ctx context.Context, key storage.DocumentKey) (*yjsbridge.PersistedSnapshot, storage.UpdateOffset, storage.UpdateOffset, error) {
 	if p == nil || p.store == nil {
-		return yjsbridge.NewPersistedSnapshot(), 0, nil
+		return yjsbridge.NewPersistedSnapshot(), 0, 0, nil
 	}
 
 	if updateStore := p.updateLogStore(); updateStore != nil {
 		recovered, err := storage.RecoverSnapshot(ctx, p.store, updateStore, key, 0, 0)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		if recovered == nil || recovered.Snapshot == nil {
-			return yjsbridge.NewPersistedSnapshot(), 0, nil
+			return yjsbridge.NewPersistedSnapshot(), 0, 0, nil
 		}
-		return recovered.Snapshot.Clone(), recovered.LastOffset, nil
+		return recovered.Snapshot.Clone(), recovered.LastOffset, recovered.CheckpointThrough, nil
 	}
 
 	record, err := p.store.LoadSnapshot(ctx, key)
 	if err != nil {
 		if errors.Is(err, storage.ErrSnapshotNotFound) {
-			return yjsbridge.NewPersistedSnapshot(), 0, nil
+			return yjsbridge.NewPersistedSnapshot(), 0, 0, nil
 		}
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	if record == nil || record.Snapshot == nil {
-		return yjsbridge.NewPersistedSnapshot(), 0, nil
+		if record == nil {
+			return yjsbridge.NewPersistedSnapshot(), 0, 0, nil
+		}
+		return yjsbridge.NewPersistedSnapshot(), record.Through, record.Through, nil
 	}
-	return record.Snapshot.Clone(), 0, nil
+	return record.Snapshot.Clone(), record.Through, record.Through, nil
 }
 
 func (p *Provider) updateLogStore() storage.UpdateLogStore {
@@ -369,7 +505,125 @@ func (p *Provider) updateLogStore() storage.UpdateLogStore {
 	return updateStore
 }
 
+func (p *Provider) authoritativeUpdateLogStore() storage.AuthoritativeUpdateLogStore {
+	if p == nil || p.store == nil {
+		return nil
+	}
+	updateStore, ok := p.store.(storage.AuthoritativeUpdateLogStore)
+	if !ok {
+		return nil
+	}
+	return updateStore
+}
+
+func (p *Provider) authoritativeSnapshotStore() storage.AuthoritativeSnapshotStore {
+	if p == nil || p.store == nil {
+		return nil
+	}
+	snapshotStore, ok := p.store.(storage.AuthoritativeSnapshotStore)
+	if !ok {
+		return nil
+	}
+	return snapshotStore
+}
+
+func (p *Provider) snapshotCheckpointStore() storage.SnapshotCheckpointStore {
+	if p == nil || p.store == nil {
+		return nil
+	}
+	snapshotStore, ok := p.store.(storage.SnapshotCheckpointStore)
+	if !ok {
+		return nil
+	}
+	return snapshotStore
+}
+
+func (p *Provider) authoritativeSnapshotCheckpointStore() storage.AuthoritativeSnapshotCheckpointStore {
+	if p == nil || p.store == nil {
+		return nil
+	}
+	snapshotStore, ok := p.store.(storage.AuthoritativeSnapshotCheckpointStore)
+	if !ok {
+		return nil
+	}
+	return snapshotStore
+}
+
+func (p *Provider) resolveRoomAuthority(ctx context.Context, key storage.DocumentKey) (*storage.AuthorityFence, error) {
+	if p == nil || p.resolveAuthorityFence == nil {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if p.authoritativeSnapshotStore() == nil || p.authoritativeUpdateLogStore() == nil {
+		return nil, ErrAuthorityFenceUnsupported
+	}
+
+	fence, err := p.resolveAuthorityFence(ctx, key)
+	if err != nil {
+		if errors.Is(err, storage.ErrAuthorityLost) {
+			return nil, wrapAuthorityLost(err)
+		}
+		return nil, err
+	}
+	if fence == nil {
+		return nil, wrapAuthorityLost(storage.ErrAuthorityLost)
+	}
+	if err := fence.Validate(); err != nil {
+		return nil, err
+	}
+	return fence.Clone(), nil
+}
+
+func (p *Provider) saveSnapshot(ctx context.Context, key storage.DocumentKey, snapshot *yjsbridge.PersistedSnapshot, through storage.UpdateOffset, authority *storage.AuthorityFence) (*storage.SnapshotRecord, error) {
+	if authority == nil {
+		if checkpointStore := p.snapshotCheckpointStore(); checkpointStore != nil {
+			return checkpointStore.SaveSnapshotCheckpoint(ctx, key, snapshot, through)
+		}
+		return p.store.SaveSnapshot(ctx, key, snapshot)
+	}
+	if checkpointStore := p.authoritativeSnapshotCheckpointStore(); checkpointStore != nil {
+		return checkpointStore.SaveSnapshotCheckpointAuthoritative(ctx, key, snapshot, through, *authority)
+	}
+	return p.authoritativeSnapshotStore().SaveSnapshotAuthoritative(ctx, key, snapshot, *authority)
+}
+
+func (p *Provider) trimUpdates(ctx context.Context, key storage.DocumentKey, through storage.UpdateOffset, authority *storage.AuthorityFence) error {
+	updateStore := p.updateLogStore()
+	if updateStore == nil {
+		return nil
+	}
+	if authority == nil {
+		return updateStore.TrimUpdates(ctx, key, through)
+	}
+	return p.authoritativeUpdateLogStore().TrimUpdatesAuthoritative(ctx, key, through, *authority)
+}
+
+func wrapAuthorityLost(err error) error {
+	if err == nil {
+		return ErrAuthorityLost
+	}
+	return fmt.Errorf("%w: %v", ErrAuthorityLost, err)
+}
+
+func authorityFenceEqual(left *storage.AuthorityFence, right *storage.AuthorityFence) bool {
+	switch {
+	case left == nil && right == nil:
+		return true
+	case left == nil || right == nil:
+		return false
+	default:
+		return left.ShardID == right.ShardID &&
+			left.Owner == right.Owner &&
+			left.Token == right.Token
+	}
+}
+
 func (r *providerRoom) handleMessageLocked(sender *Connection, message *ProtocolMessage) ([]*ProtocolMessage, []byte, error) {
+	if r.authorityLost {
+		return nil, nil, ErrAuthorityLost
+	}
 	if err := validateProtocolMessage(message); err != nil {
 		return nil, nil, err
 	}
@@ -432,6 +686,10 @@ func (r *providerRoom) handleMessageLocked(sender *Connection, message *Protocol
 }
 
 func (r *providerRoom) applyDocumentPayloadLocked(provider *Provider, key storage.DocumentKey, payload []byte) error {
+	if r.authorityLost {
+		return ErrAuthorityLost
+	}
+
 	updateV1, err := yjsbridge.ConvertUpdateToV1(payload)
 	if err != nil {
 		return err
@@ -440,8 +698,20 @@ func (r *providerRoom) applyDocumentPayloadLocked(provider *Provider, key storag
 	var appendedOffset storage.UpdateOffset
 	if provider != nil {
 		if updateStore := provider.updateLogStore(); updateStore != nil {
-			record, err := updateStore.AppendUpdate(context.Background(), key, updateV1)
+			var (
+				record *storage.UpdateLogRecord
+				err    error
+			)
+			if r.authority != nil {
+				record, err = provider.authoritativeUpdateLogStore().AppendUpdateAuthoritative(context.Background(), key, updateV1, *r.authority)
+			} else {
+				record, err = updateStore.AppendUpdate(context.Background(), key, updateV1)
+			}
 			if err != nil {
+				if errors.Is(err, storage.ErrAuthorityLost) {
+					r.authorityLost = true
+					return wrapAuthorityLost(err)
+				}
 				return err
 			}
 			if record != nil {
@@ -459,7 +729,7 @@ func (r *providerRoom) applyDocumentPayloadLocked(provider *Provider, key storag
 			return err
 		}
 
-		recovered, lastOffset, recoverErr := provider.loadSnapshot(context.Background(), key)
+		recovered, lastOffset, compactedAt, recoverErr := provider.loadSnapshot(context.Background(), key)
 		if recoverErr != nil {
 			return fmt.Errorf("rebuild room snapshot: %w (recover: %v)", err, recoverErr)
 		}
@@ -468,6 +738,7 @@ func (r *providerRoom) applyDocumentPayloadLocked(provider *Provider, key storag
 			lastOffset = appendedOffset
 		}
 		r.lastOffset = lastOffset
+		r.compactedAt = compactedAt
 		return r.syncSessionsToSnapshotLocked()
 	}
 
