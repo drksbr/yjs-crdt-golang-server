@@ -59,6 +59,36 @@ func (p *remoteStreamPeer) close(string) error {
 	return p.stream.Close()
 }
 
+type ownerStreamPeer struct {
+	stream       NodeMessageStream
+	documentKey  storage.DocumentKey
+	connectionID string
+	epoch        uint64
+
+	writeMu sync.Mutex
+}
+
+func (p *ownerStreamPeer) deliver(ctx context.Context, payload []byte) error {
+	messages, err := protocolPayloadToOwnerMessages(p.documentKey, p.connectionID, p.epoch, payload)
+	if err != nil {
+		return err
+	}
+
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+
+	for _, message := range messages {
+		if err := p.stream.Send(ctx, message); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *ownerStreamPeer) close(string) error {
+	return p.stream.Close()
+}
+
 func protocolPayloadToRemoteMessages(
 	key storage.DocumentKey,
 	connectionID string,
@@ -106,6 +136,37 @@ func protocolPayloadToRemoteMessages(
 		default:
 			return nil, fmt.Errorf("yhttp: protocol outbound remoto nao suportado no indice %d", idx)
 		}
+	}
+	return messages, nil
+}
+
+func protocolPayloadToQueryAwarenessMessages(
+	key storage.DocumentKey,
+	connectionID string,
+	epoch uint64,
+	payload []byte,
+) ([]ynodeproto.Message, error) {
+	protocolMessages, err := yprotocol.DecodeProtocolMessages(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	messages := make([]ynodeproto.Message, 0, len(protocolMessages))
+	for idx, message := range protocolMessages {
+		if message.Awareness == nil {
+			return nil, fmt.Errorf("yhttp: query-awareness direto nao suportado no indice %d", idx)
+		}
+
+		encoded, err := yawareness.EncodeUpdate(message.Awareness)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, &ynodeproto.QueryAwarenessResponse{
+			DocumentKey:  key,
+			ConnectionID: connectionID,
+			Epoch:        epoch,
+			Payload:      encoded,
+		})
 	}
 	return messages, nil
 }

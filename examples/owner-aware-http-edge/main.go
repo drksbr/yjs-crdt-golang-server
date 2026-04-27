@@ -5,16 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
-	"net"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/coder/websocket"
 
 	"yjs-go-bridge/pkg/storage"
 	"yjs-go-bridge/pkg/storage/memory"
@@ -27,6 +23,7 @@ const (
 	address       = "127.0.0.1:8080"
 	remoteAddress = "127.0.0.1:9090"
 	wsPath        = "/ws"
+	nodePath      = "/node"
 	shardCount    = 32
 )
 
@@ -36,10 +33,11 @@ var (
 )
 
 type demoApp struct {
-	localNode       ycluster.NodeID
-	docs            []demoDocument
-	edge            *ownerAwareEdge
-	remoteWSHandler http.Handler
+	localNode           ycluster.NodeID
+	docs                []demoDocument
+	edge                *ownerAwareEdge
+	remoteBrowserHandle http.Handler
+	remoteNodeHandle    http.Handler
 }
 
 type demoDocument struct {
@@ -82,7 +80,8 @@ func main() {
 	mux.HandleFunc("/", app.handleRoot)
 
 	remoteMux := http.NewServeMux()
-	remoteMux.Handle(wsPath, app.remoteWSHandler)
+	remoteMux.Handle(wsPath, app.remoteBrowserHandle)
+	remoteMux.Handle(nodePath, app.remoteNodeHandle)
 	remoteMux.HandleFunc("/", app.handleRemoteRoot)
 
 	go func() {
@@ -144,12 +143,25 @@ func newDemoApp(ctx context.Context) (*demoApp, error) {
 		localNode.LocalNodeID(): fmt.Sprintf("ws://%s%s", address, wsPath),
 		remoteNodeID:            fmt.Sprintf("ws://%s%s", remoteAddress, wsPath),
 	}
+	nodeRoutes := map[ycluster.NodeID]string{
+		remoteNodeID: fmt.Sprintf("ws://%s%s", remoteAddress, nodePath),
+	}
 
-	edgeWSHandler, ownerLookup, err := newOwnerAwareWSHandler(localNode.LocalNodeID(), store, resolver, ownerRoutes)
+	edgeWSHandler, ownerLookup, err := newOwnerAwareWSHandler(localNode.LocalNodeID(), store, resolver, nodeRoutes)
 	if err != nil {
 		return nil, err
 	}
-	remoteWSHandler, _, err := newOwnerAwareWSHandler(remoteNodeID, store, resolver, nil)
+	remoteBrowserHandler, err := yhttp.NewServer(yhttp.ServerConfig{
+		Provider:       yprotocol.NewProvider(yprotocol.ProviderConfig{Store: store}),
+		ResolveRequest: resolveWSRequest,
+	})
+	if err != nil {
+		return nil, err
+	}
+	remoteNodeHandler, err := yhttp.NewRemoteOwnerEndpoint(yhttp.RemoteOwnerEndpointConfig{
+		Local:       remoteBrowserHandler,
+		LocalNodeID: remoteNodeID,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +181,8 @@ func newDemoApp(ctx context.Context) (*demoApp, error) {
 			wsHandler:   edgeWSHandler,
 			ownerRoutes: ownerRoutes,
 		},
-		remoteWSHandler: remoteWSHandler,
+		remoteBrowserHandle: remoteBrowserHandler,
+		remoteNodeHandle:    remoteNodeHandler,
 	}, nil
 }
 
@@ -274,7 +287,7 @@ func newOwnerAwareWSHandler(
 	localNode ycluster.NodeID,
 	store *memory.Store,
 	resolver ycluster.ShardResolver,
-	ownerRoutes map[ycluster.NodeID]string,
+	nodeRoutes map[ycluster.NodeID]string,
 ) (http.Handler, ycluster.OwnerLookup, error) {
 	localWSHandler, err := yhttp.NewServer(yhttp.ServerConfig{
 		Provider:       yprotocol.NewProvider(yprotocol.ProviderConfig{Store: store}),
@@ -293,8 +306,26 @@ func newOwnerAwareWSHandler(
 		Local:       localWSHandler,
 		OwnerLookup: ownerLookup,
 	}
-	if len(ownerRoutes) > 0 {
-		cfg.OnRemoteOwner = relayRemoteOwnerHandler(ownerRoutes)
+	if len(nodeRoutes) > 0 {
+		dialer, err := yhttp.NewWebSocketRemoteOwnerDialer(yhttp.WebSocketRemoteOwnerDialerConfig{
+			ResolveURL: func(_ context.Context, req yhttp.RemoteOwnerDialRequest) (string, error) {
+				targetURL := strings.TrimSpace(nodeRoutes[req.Resolution.Placement.NodeID])
+				if targetURL == "" {
+					return "", errors.New("typed remote owner route indisponivel")
+				}
+				return targetURL, nil
+			},
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		cfg.OnRemoteOwner, err = yhttp.NewRemoteOwnerForwardHandler(yhttp.RemoteOwnerForwardConfig{
+			LocalNodeID: localNode,
+			Dialer:      dialer,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	handler, err := yhttp.NewOwnerAwareServer(cfg)
@@ -314,12 +345,13 @@ func (a *demoApp) handleRoot(w http.ResponseWriter, r *http.Request) {
 		"owner-aware-http-edge",
 		"",
 		fmt.Sprintf("local node: %s", a.localNode),
-		fmt.Sprintf("remote owner server: ws://%s%s", remoteAddress, wsPath),
+		fmt.Sprintf("remote owner browser ws: ws://%s%s", remoteAddress, wsPath),
+		fmt.Sprintf("remote owner node endpoint: ws://%s%s", remoteAddress, nodePath),
 		"",
 		"owner resolution samples:",
 	}
 	for _, doc := range a.docs {
-		label := "remote owner relay"
+		label := "remote owner proxy"
 		if doc.Local {
 			label = "local owner"
 		}
@@ -333,8 +365,8 @@ func (a *demoApp) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 	lines = append(lines,
 		"",
-		"Edge /ws uses yhttp.OwnerAwareServer plus OnRemoteOwner relay.",
-		"Remote-owner documents are proxied to node-b instead of stopping at route metadata.",
+		"Edge /ws uses yhttp.OwnerAwareServer plus RemoteOwnerForwardHandler.",
+		"Remote-owner documents are proxied to node-b through the typed /node endpoint.",
 	)
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -348,7 +380,7 @@ func (a *demoApp) handleRemoteRoot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("owner-aware-http-edge remote owner node-b\n"))
+	_, _ = w.Write([]byte("owner-aware-http-edge remote owner node-b (/ws browser, /node inter-node)\n"))
 }
 
 func (a *demoApp) handleOwner(w http.ResponseWriter, r *http.Request) {
@@ -366,7 +398,7 @@ func (a *demoApp) handleOwner(w http.ResponseWriter, r *http.Request) {
 	if response.Local {
 		response.Note = "este no ja pode materializar o room localmente"
 	} else {
-		response.Note = "o edge encaminha o websocket ao no owner remoto via relay"
+		response.Note = "o edge encaminha o websocket ao no owner remoto via endpoint tipado /node"
 	}
 
 	if err := writeJSON(w, http.StatusOK, response); err != nil {
@@ -446,76 +478,6 @@ func ownerLookupStatus(err error) int {
 		return http.StatusNotFound
 	default:
 		return http.StatusInternalServerError
-	}
-}
-
-func relayRemoteOwnerHandler(ownerRoutes map[ycluster.NodeID]string) yhttp.RemoteOwnerHandler {
-	return func(w http.ResponseWriter, r *http.Request, _ yhttp.Request, resolution ycluster.OwnerResolution) bool {
-		targetURL := withRawQuery(ownerRoutes[resolution.Placement.NodeID], r.URL.RawQuery)
-		if err := relayWebSocketBinary(w, r, targetURL); err != nil && !isExpectedRelayClose(err) {
-			log.Printf("owner-aware-http-edge: relay remote owner %s: %v", resolution.Placement.NodeID, err)
-		}
-		return true
-	}
-}
-
-func relayWebSocketBinary(w http.ResponseWriter, r *http.Request, targetURL string) error {
-	if strings.TrimSpace(targetURL) == "" {
-		http.Error(w, "owner route indisponivel", http.StatusBadGateway)
-		return nil
-	}
-
-	upstream, _, err := websocket.Dial(r.Context(), targetURL, nil)
-	if err != nil {
-		http.Error(w, "relay dial remoto: "+err.Error(), http.StatusBadGateway)
-		return err
-	}
-	defer upstream.CloseNow()
-
-	downstream, err := websocket.Accept(w, r, nil)
-	if err != nil {
-		return err
-	}
-	defer downstream.CloseNow()
-
-	relayCtx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-
-	upstreamConn := websocket.NetConn(relayCtx, upstream, websocket.MessageBinary)
-	downstreamConn := websocket.NetConn(relayCtx, downstream, websocket.MessageBinary)
-	defer upstreamConn.Close()
-	defer downstreamConn.Close()
-
-	errCh := make(chan error, 2)
-	go relayCopy(errCh, upstreamConn, downstreamConn)
-	go relayCopy(errCh, downstreamConn, upstreamConn)
-
-	firstErr := <-errCh
-	cancel()
-	_ = upstreamConn.Close()
-	_ = downstreamConn.Close()
-	secondErr := <-errCh
-	if isExpectedRelayClose(firstErr) {
-		return secondErr
-	}
-	return firstErr
-}
-
-func relayCopy(errCh chan<- error, dst net.Conn, src net.Conn) {
-	_, err := io.Copy(dst, src)
-	errCh <- err
-}
-
-func isExpectedRelayClose(err error) bool {
-	switch {
-	case err == nil, errors.Is(err, io.EOF), errors.Is(err, net.ErrClosed):
-		return true
-	default:
-		var closeErr websocket.CloseError
-		if errors.As(err, &closeErr) {
-			return closeErr.Code == websocket.StatusNormalClosure || closeErr.Code == websocket.StatusGoingAway
-		}
-		return false
 	}
 }
 

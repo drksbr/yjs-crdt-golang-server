@@ -156,7 +156,6 @@ func (f *remoteOwnerForwarder) bridge(r *http.Request, req Request, socket *webs
 
 	firstErr := <-errCh
 	cancel()
-	f.closeStream(r, req, stream)
 
 	if firstErr != nil {
 		if closeErr := socket.Close(websocket.StatusGoingAway, "falha ao encaminhar para owner remoto"); closeErr != nil && !isIgnorableTransportError(closeErr) {
