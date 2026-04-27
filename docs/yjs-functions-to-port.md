@@ -71,7 +71,7 @@ Projeto em **Meta técnica 9 / Fase 3 em consolidação**, com promoção da API
 - Novo corte funcional em V1 de snapshot binário persistido já existe: `PersistedSnapshot` com `PersistedSnapshotFromUpdate(s)` gera, em um passo, `UpdateV1` canônico persistível e `Snapshot` materializado em memória.
 - Há também corte funcional de hidratação reversa V1 (`restore`) para `PersistedSnapshot` com `EncodePersistedSnapshotV1`, `DecodePersistedSnapshotV1` e `DecodePersistedSnapshotV1Context`.
 - O ciclo de persistência operacional já está em funcionamento via stores; `pkg/yprotocol.Provider` passa a servir como runtime local do futuro owner distribuído.
-- O próximo bloco de esforço agora combina duas frentes: fechar lacunas de `merge/diff/intersect` e V2 no runtime local, e subir do epoch-1 já operacional para ownership completo por documento/shard, lease/epoch/fencing, protocolo inter-node semântico e aceite de HTTP/WS em qualquer nó com handoff/cutover seguros.
+- O próximo bloco de esforço agora combina duas frentes: fechar lacunas de `merge/diff/intersect` e V2 no runtime local, e subir do epoch-1 já operacional para ownership completo por documento/shard, lease/epoch/fencing, mensagens inter-node tipadas, recovery do owner via `snapshot + update log` e aceite de HTTP/WS em qualquer nó com handoff/cutover seguros.
 
 ---
 
@@ -411,6 +411,8 @@ Camada que transforma o runtime local atual em execução multi-nó sem duplicar
 - resolução de owner por documento/shard
 - aquisição, renovação, revogação e expiração de lease
 - `epoch` monotônico e fencing token
+- mensagens inter-node tipadas sobre `pkg/ynodeproto.MessageType`
+- modo edge owner-aware em `pkg/yhttp`
 - roteamento de HTTP/WS de qualquer nó para o owner
 - forwarding de frames do cliente e de respostas do owner
 - handoff de room e cutover entre owners
@@ -422,7 +424,7 @@ Permite que todos os nós aceitem tráfego de cliente, mas só um owner processe
 Alta na próxima fase
 
 ### Status esperado
-O scaffolding público inicial já existe em `pkg/ycluster` (`NodeID`, `ShardID`, `Placement`, `Lease`, `DeterministicShardResolver`, `PlacementOwnerLookup` e interfaces mínimas). O próximo passo é ligar esses contratos ao runtime real do owner, sem criar fanout multi-process ad hoc.
+O scaffolding público inicial já existe em `pkg/ycluster` (`NodeID`, `ShardID`, `Placement`, `Lease`, `DeterministicShardResolver`, `PlacementOwnerLookup` e interfaces mínimas). O branch atual já também publicou payloads tipados acima de `pkg/ynodeproto`, bootstrap/recovery do `Provider` por `snapshot + update log` e a borda edge owner-aware em `pkg/yhttp`. O próximo passo é ligar esses contratos ao forwarding real entre edge e owner, ao handoff e ao fencing sem criar fanout multi-process ad hoc.
 
 ---
 
@@ -435,7 +437,9 @@ Camada de durabilidade incremental para recovery, restart e troca de owner.
 - append-only update log por room/epoch
 - replay determinístico de log sobre snapshot
 - checkpoint/compaction
-- bootstrap do owner a partir de snapshot + tail do log
+- bootstrap de `pkg/yprotocol.Provider` a partir de snapshot + tail do log
+- preservação de offset/high-water mark observável para recovery/checkpoint
+- awareness mantido fora do recovery durável
 - envio/catch-up de snapshot/log no handoff
 
 ### Motivação
@@ -445,7 +449,7 @@ Sem `snapshot + update log`, mudança de owner e recuperação pós-falha ficam 
 Alta na próxima fase
 
 ### Status esperado
-O scaffolding público inicial já existe em `pkg/storage` (`UpdateLogRecord`, `PlacementRecord`, `LeaseRecord`, `UpdateLogStore`, `PlacementStore`, `LeaseStore` e `DistributedStore`), e o branch atual já materializa append/list/trim concretos, replay/recovery público e backends em memória/Postgres. O próximo passo é conectar isso ao handoff, ao cutover e ao recovery autoritativo do owner com epoch/fencing.
+O scaffolding público inicial já existe em `pkg/storage` (`UpdateLogRecord`, `PlacementRecord`, `LeaseRecord`, `UpdateLogStore`, `PlacementStore`, `LeaseStore` e `DistributedStore`), e o branch atual já materializa append/list/trim concretos, replay/recovery público, backends em memória/Postgres e bootstrap do `Provider`. O próximo passo é conectar isso ao handoff, ao cutover e ao recovery autoritativo do owner com epoch/fencing.
 
 ---
 
@@ -467,17 +471,16 @@ O núcleo consolidado para Meta 9 já cobre:
 
 Os próximos passos práticos (Meta 9 -> Meta 10) ficam em:
 
-1. congelar `pkg/yprotocol.Provider` como runtime local do futuro owner distribuído
-2. materializar owner único por documento/shard em cima do scaffolding já exposto em `pkg/ycluster`
-3. materializar `snapshot + update log` para replay, recovery e handoff em cima do scaffolding já exposto em `pkg/storage`
-4. materializar o protocolo inter-node em cima do framing já exposto em `pkg/ynodeproto`, separado do `y-protocols`
-5. adaptar a borda HTTP/WS para aceitar conexões em qualquer nó e encaminhar o room ao owner
-6. ampliar compatibilidade estrutural de `merge/diff/intersect`
-7. ampliar o uso do lazy writer além do corte já endurecido
-8. estudar/update V2 e conversion de formato além da classificação mínima atual
-9. avançar para content maps
-10. avançar para attribution
-11. só então atacar recursos avançados do YHub
+1. formalizar owner único por documento/shard em cima do scaffolding já exposto em `pkg/ycluster`
+2. fechar lease/epoch/fencing sobre a persistência já exposta em `pkg/storage`
+3. ligar o wire tipado de `pkg/ynodeproto` ao forwarding real entre edge e owner
+4. fechar handoff/failover do owner em cima do bootstrap já implementado por `snapshot + update log`
+5. ampliar compatibilidade estrutural de `merge/diff/intersect`
+6. ampliar o uso do lazy writer além do corte já endurecido
+7. estudar/update V2 e conversion de formato além da classificação mínima atual
+8. avançar para content maps
+9. avançar para attribution
+10. só então atacar recursos avançados do YHub
 
 ---
 
@@ -486,9 +489,9 @@ Os próximos passos práticos (Meta 9 -> Meta 10) ficam em:
 O backlog imediato agora deve focar em:
 
 1. fechar a unidade de ownership (`DocumentKey`/room/shard) e o contrato operacional de lease/`epoch`/fencing sobre a superfície já publicada
-2. materializar o modelo `snapshot + update log` para hidratação, replay, restart e troca de owner
-3. materializar os payloads/fluxos do protocolo inter-node para resolve/open/forward/handoff/recovery
-4. tratar `pkg/yprotocol.Provider` como runtime local do owner e `pkg/yhttp` como borda pública em qualquer nó
+2. ligar os payloads/fluxos tipados do protocolo inter-node ao resolve/open/forward/handoff/recovery
+3. fechar a recuperação após queda do owner e a promoção segura de novo owner
+4. tratar `pkg/yprotocol.Provider` como runtime local do owner e `pkg/yhttp` como borda owner-aware em qualquer nó
 5. compatibilidade estrutural de `mergeUpdates`
 6. compatibilidade estrutural de `diffUpdate`
 7. interseção/filtragem por content ids em mais content refs
@@ -508,6 +511,7 @@ O backlog imediato agora deve focar em:
 - merge depende de leitura de update + escrita lazy + delete set
 - ownership distribuído depende do runtime local de sync/awareness já estabilizado
 - `snapshot + update log` depende de merge/persistência canônica e de invariantes de replay
+- modo edge owner-aware depende de owner resolution e de mensagens inter-node tipadas para forwarding/handoff
 - handoff entre owners depende de lease, `epoch`/fencing e replay determinístico
 - content map depende de content ids
 - attribution depende de content map
@@ -543,7 +547,8 @@ Ao entrar na fase distribuída, também não deve ser adiado:
 - owner único por room/documento/shard
 - lease, `epoch` e fencing
 - `snapshot + update log` com replay determinístico
-- protocolo inter-node próprio separado do wire de cliente
+- protocolo inter-node tipado separado do wire de cliente
+- modo edge owner-aware em qualquer nó, sem materializar room fora do owner
 
 Esses blocos definem o núcleo compatível já estabelecido para a Fase 2.
 
@@ -574,7 +579,7 @@ O caminho correto é:
 5. falar o protocolo de sync
 6. consolidar merge/diff/interseção mínimos
 7. ampliar compatibilidade remanescente com lazy writer e V2
-8. introduzir ownership distribuído com `snapshot + update log` e protocolo inter-node
+8. introduzir ownership distribuído com `snapshot + update log`, mensagens inter-node tipadas e modo edge owner-aware
 9. só depois entrar em attribution e recursos avançados
 
 Este documento deve ser atualizado sempre que uma nova função relevante do Yjs for estudada ou quando uma prioridade mudar.

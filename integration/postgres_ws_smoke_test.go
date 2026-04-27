@@ -112,6 +112,71 @@ func TestPostgresWebSocketSmoke_FunctionalityPersistence(t *testing.T) {
 	}
 }
 
+func TestPostgresWebSocketSmoke_RecoveryFromSnapshotAndUpdateLog(t *testing.T) {
+	pg := startDockerPostgres(t)
+	schema := newSmokeSchema(t.Name())
+	key := storage.DocumentKey{
+		Namespace:  "integration",
+		DocumentID: "recovery-tail",
+	}
+
+	server1, closeServer1 := newPostgresSmokeServer(t, pg.dsn, schema)
+	writer := dialSmokeWS(t, server1.URL+"/ws?doc=recovery-tail&client=601&conn=writer&persist=1")
+
+	baseUpdate := buildGCOnlyUpdate(71, 2)
+	writeSmokeBinary(t, writer, yprotocol.EncodeProtocolSyncUpdate(baseUpdate))
+	closeSmokeWS(t, writer)
+	waitPersistedSnapshot(t, pg.dsn, schema, key)
+	closeServer1()
+
+	store, err := pgstore.New(context.Background(), pgstore.Config{
+		ConnectionString: pg.dsn,
+		Schema:           schema,
+	})
+	if err != nil {
+		t.Fatalf("pgstore.New(recovery) unexpected error: %v", err)
+	}
+
+	tail := [][]byte{
+		buildGCOnlyUpdate(72, 1),
+		buildGCOnlyUpdate(73, 3),
+	}
+	expected := mustMergeUpdates(t, append([][]byte{baseUpdate}, tail...)...)
+
+	offsets := appendUpdates(t, context.Background(), store, key, tail...)
+	recovered, err := storage.RecoverSnapshot(context.Background(), store, store, key, 0, 1)
+	if err != nil {
+		store.Close()
+		t.Fatalf("RecoverSnapshot() unexpected error: %v", err)
+	}
+	if recovered.LastOffset != offsets[len(offsets)-1] {
+		store.Close()
+		t.Fatalf("recovered.LastOffset = %d, want %d", recovered.LastOffset, offsets[len(offsets)-1])
+	}
+	if !bytes.Equal(recovered.Snapshot.UpdateV1, expected) {
+		store.Close()
+		t.Fatalf("recovered.Snapshot.UpdateV1 = %x, want %x", recovered.Snapshot.UpdateV1, expected)
+	}
+
+	if _, err := store.SaveSnapshot(context.Background(), key, recovered.Snapshot); err != nil {
+		store.Close()
+		t.Fatalf("SaveSnapshot(recovered) unexpected error: %v", err)
+	}
+	if err := store.TrimUpdates(context.Background(), key, recovered.LastOffset); err != nil {
+		store.Close()
+		t.Fatalf("TrimUpdates(recovered.LastOffset) unexpected error: %v", err)
+	}
+	store.Close()
+
+	server2, closeServer2 := newPostgresSmokeServer(t, pg.dsn, schema)
+	defer closeServer2()
+
+	probe := dialSmokeWS(t, server2.URL+"/ws?doc=recovery-tail&client=602&conn=probe")
+	writeSmokeBinary(t, probe, yprotocol.EncodeProtocolSyncStep1([]byte{0x00}))
+	reply := readSmokeBinary(t, probe)
+	assertSyncStep2MatchesUpdate(t, reply, expected)
+}
+
 func TestPostgresWebSocketSmoke_Performance(t *testing.T) {
 	pg := startDockerPostgres(t)
 	schema := newSmokeSchema(t.Name())

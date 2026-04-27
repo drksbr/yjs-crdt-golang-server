@@ -80,6 +80,12 @@ Paralelamente, a nova etapa registra a consolidação operacional de snapshots V
 A mesma transição também já materializou o primeiro corte operacional da Meta 10: os contratos de persistência distribuída, o framing inter-node, os backends concretos de update log/placement/lease, os helpers públicos de replay e os adapters storage-backed de control plane já estão no branch, mas handoff, cutover e coordenação multi-nó ainda permanecem fora do runtime funcional.
 A próxima fase aberta no roadmap é a **Meta técnica 10 / Fase 4**, que introduz owner único por documento/shard, lease/epoch/fencing, `snapshot + update log`, protocolo inter-node próprio e aceite de HTTP/WS em qualquer nó com processamento do room restrito ao owner.
 
+### Corte provável do próximo epoch
+
+- formalizar ownership autoritativo por `DocumentKey`/room/shard com lease/epoch/fencing consistente entre `pkg/storage` e `pkg/ycluster`;
+- ligar `pkg/ynodeproto` ao forwarding real entre edge e owner, cobrindo open/sync/update/awareness em caminho remoto;
+- fechar failover/handoff do owner em cima do bootstrap já implementado por `snapshot + update log`.
+
 ---
 
 ## Objetivo da fase atual
@@ -189,21 +195,22 @@ Nesta etapa, a aceitação é:
 - [ ] Formalizar `DocumentKey`/room/shard como unidade de ownership, lease e roteamento
 - [ ] Garantir owner único por documento/shard com lease renovável, expiração detectável e revogação observável
 - [ ] Introduzir `epoch` monotônico e fencing token em toda operação autoritativa (`apply`, persistência, append log, handoff e recovery)
-- [ ] Materializar `snapshot + update log` como fonte de hidratação, replay, recuperação e troca de owner sobre os contratos já expostos em `pkg/storage`
+- [x] Materializar `snapshot + update log` como fonte de hidratação, replay e recuperação do runtime local do owner sobre os contratos já expostos em `pkg/storage`, com bootstrap do provider a partir de snapshot base + tail do log
 - [ ] Persistir snapshot base e update log append-only por epoch, com replay determinístico e checkpoint/compaction planejados
-- [ ] Materializar os payloads e fluxos do protocolo inter-node sobre o framing já exposto em `pkg/ynodeproto`, cobrindo resolve/open/forward/broadcast/hydrate/handoff/recovery
-- [ ] Permitir que todos os nós aceitem HTTP/WS, mas só o owner materialize `Session`/`Provider` do room
-- [ ] Definir comportamento do nó não-owner para requests HTTP e frames WebSocket: autenticar, resolver owner, encaminhar e encerrar/cutover em caso de fencing ou handoff
+- [x] Materializar payloads inter-node tipados e versionados sobre o framing já exposto em `pkg/ynodeproto`, pelo menos para handshake, sync request/response, document update, awareness update e ping/pong
+- [x] Expor uma borda HTTP/WS owner-aware em `pkg/yhttp` para resolver owner antes do provider local e só materializar `Session`/`Provider` quando o owner resolvido é local
+- [ ] Definir comportamento do nó não-owner para requests HTTP e frames WebSocket: autenticar, resolver owner, encaminhar pelo wire inter-node tipado e encerrar/cutover em caso de fencing ou handoff
 - [ ] Definir handoff seguro com bootstrap por snapshot, replay do tail do log e troca atômica de epoch
 - [ ] Introduzir observabilidade e diagnósticos para lease, roteamento, forwarding, replay, lag e troca de owner
 
 #### Em foco (abertura da fase)
-- [ ] Tratar `pkg/yprotocol.Provider` atual como runtime local do owner, sem fanout multi-process ad hoc
-- [ ] Definir a fronteira entre a borda `pkg/yhttp` e a futura camada inter-node
+- [x] Tratar `pkg/yprotocol.Provider` atual como runtime local do owner, sem fanout multi-process ad hoc e com bootstrap por `snapshot + update log`
+- [x] Definir a fronteira entre a borda `pkg/yhttp` e a futura camada inter-node, explicitando o modo edge owner-aware
+- [x] Promover `pkg/ynodeproto` de framing puro para camada de mensagens tipadas sem quebrar `Header`/`Frame` já expostos
 - [x] Materializar backend/schema concretos para snapshot base, update log, placement e lease acima dos contratos públicos já definidos
 - [ ] Definir regras de recuperação após queda do owner e de promoção segura de novo owner
 - [x] Adicionar testes de integração das fundações distribuídas (`snapshot + update log` + owner lookup storage-backed)
-- [ ] Registrar explicitamente que o modo single-process atual continua suportado como modo de referência
+- [x] Registrar explicitamente que o modo single-process atual continua suportado como modo de referência
 
 ## Progresso de metas anteriores
 

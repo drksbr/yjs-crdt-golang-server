@@ -111,6 +111,29 @@ Para replicar o comportamento do YHub, o backend Go também precisará:
 
 Esse é o núcleo que este projeto pretende portar.
 
+## Corte distribuído atual
+
+Com as fundações públicas de `pkg/storage`, `pkg/ycluster`, `pkg/ynodeproto`,
+`pkg/yprotocol` e `pkg/yhttp` já expostas, o corte atual da fase distribuída
+já ligou três superfícies:
+
+- `pkg/ynodeproto` continua como wire interno do cluster e já sustenta mensagens tipadas por classe semântica;
+- `pkg/yprotocol.Provider` continua como runtime local do owner e já faz bootstrap/recovery a partir de snapshot base + replay do tail do `update log`;
+- `pkg/yhttp` já opera em modo edge owner-aware: qualquer nó aceita HTTP/WS, autentica e resolve owner, mas só o owner local materializa `Session`/`Provider`.
+
+Essa separação preserva dois wires distintos:
+
+- `y-protocols` no perímetro cliente;
+- `ynodeproto` entre nós, para forwarding, recovery, handoff e keepalive.
+
+Também preserva a distinção entre estado durável e efêmero:
+
+- documento autoritativo recuperado por `snapshot + update log`;
+- awareness mantido como presença efêmera, fora do recovery persistido.
+
+O próximo bloco não reabre esse corte; ele fecha forwarding remoto, handoff,
+failover e fencing por epoch sobre essas mesmas superfícies.
+
 ---
 
 ## Descobertas centrais sobre o YHub

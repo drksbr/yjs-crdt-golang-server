@@ -104,8 +104,8 @@ Projeto em **Fase 3 (Meta técnica 9)**, com a **Fase 4 distribuída (Meta técn
 - Meta técnica 9 está em execução com foco em consolidar a API pública de update em `pkg/yjsbridge` em V1, além de snapshots V1 e persistência operacional, da exposição pública de sync/awareness em V1 (`pkg/yprotocol` e `pkg/yawareness`), do runtime in-process mínimo de protocolo em `pkg/yprotocol` e da camada mínima de provider acima de `Session`, ainda em escopo single-process.
 - Existe um ciclo funcional público com `pkg/yjsbridge` expondo `PersistedSnapshot` e utilitários de conversão/codificação.
 - A hidratação reversa de `PersistedSnapshot` está operacionalizada com stores persistentes em `pkg/storage` (memória e Postgres).
-- O branch atual já entrega o epoch-1 operacional da fase distribuída: contratos de `snapshot + update log`/placement/lease em `pkg/storage`, backends concretos em memória/Postgres, helpers públicos de replay/recovery, control plane storage-backed mínimo em `pkg/ycluster` e framing inter-node em `pkg/ynodeproto`.
-- O próximo ciclo passa a preparar a arquitetura distribuída: owner único por documento/shard, lease/epoch/fencing, modelo `snapshot + update log`, protocolo inter-node próprio e borda HTTP/WS aceita em qualquer nó com processamento do room restrito ao owner.
+- O branch atual já entrega o epoch-2 operacional da fase distribuída: contratos de `snapshot + update log`/placement/lease em `pkg/storage`, backends concretos em memória/Postgres, helpers públicos de replay/recovery, control plane storage-backed mínimo em `pkg/ycluster`, mensagens inter-node tipadas em `pkg/ynodeproto`, bootstrap/recovery do owner local em `pkg/yprotocol.Provider` e borda owner-aware em `pkg/yhttp`.
+- O próximo ciclo passa a preparar a arquitetura distribuída autoritativa: owner único por documento/shard com lease/epoch/fencing consistentes, forwarding edge->owner pelo wire inter-node, handoff e failover seguros.
 
 ## Fase 1 — núcleo mínimo compatível
 
@@ -193,8 +193,9 @@ Status: **em execução inicial, com epoch-1 operacional já exposto (Meta técn
 - lease renovável e revogável para ownership do room
 - `epoch` monotônico e fencing token em toda operação autoritativa
 - modelo `snapshot + update log` para hidratação, replay, recovery e handoff
-- protocolo inter-node próprio, separado do `y-protocols`, para roteamento, forwarding, handoff e recuperação
-- borda HTTP/WS aceita em qualquer nó, com materialização do room apenas no owner
+- bootstrap do owner em `pkg/yprotocol.Provider` a partir de snapshot base + replay do tail do log, com offset/high-water mark observável para checkpoint e handoff
+- camada de mensagens inter-node tipadas e versionadas acima do framing de `pkg/ynodeproto`, separada do `y-protocols`, para handshake, forwarding, hydrate/handoff e recuperação
+- modo edge owner-aware em `pkg/yhttp`: qualquer nó aceita HTTP/WS, autentica e resolve owner, mas só o owner local materializa o room
 - handoff seguro com bootstrap por snapshot, replay do tail do log e corte atômico por epoch
 - observabilidade para roteamento, lease, forwarding, replay e troca de owner
 
@@ -202,7 +203,8 @@ Status: **em execução inicial, com epoch-1 operacional já exposto (Meta técn
 Capacidade de:
 - manter um único runtime autoritativo por documento/shard mesmo em cluster multi-nó
 - aceitar clientes e requests HTTP/WS em qualquer nó sem duplicar processamento do room
-- recuperar ou promover owner com replay determinístico de `snapshot + update log`
+- recuperar ou promover owner com replay determinístico de `snapshot + update log`, preservando offsets observáveis para catch-up e checkpoint
+- separar explicitamente o wire de cliente (`y-protocols`) do wire inter-node tipado consumido por edge/owner
 - impedir split-brain e escrita obsoleta via `epoch` monotônico e fencing
 
 ### Epoch-1 já entregue
@@ -211,12 +213,13 @@ Antes do runtime distribuído completo, o repositório já publicou os contratos
 que vão sustentar a próxima etapa:
 
 - `pkg/storage` já separa `SnapshotStore` do scaffolding distribuído (`UpdateLogStore`, `PlacementStore`, `LeaseStore`, `DistributedStore`) e dos registros `UpdateLogRecord`, `PlacementRecord`, `LeaseRecord` e `OwnerInfo`;
-- `pkg/storage` também já expõe `ReplaySnapshot` e `RecoverSnapshot` para reconstrução pública via `snapshot + update log`;
+- `pkg/storage` também já expõe `ReplaySnapshot`, `RecoverSnapshot`, `ReplayUpdateLog` e `CompactUpdateLog` para reconstrução pública via `snapshot + update log`;
 - `pkg/storage/memory` e `pkg/storage/postgres` já materializam esses contratos distribuídos de snapshot, update log, placement e lease;
 - `pkg/ycluster` já expõe tipos estáveis de cluster, `DeterministicShardResolver`, `StaticLocalNode`, `PlacementOwnerLookup`, `StorageOwnerLookup`, `StorageLeaseStore` e interfaces mínimas de `Runtime`;
-- `pkg/ynodeproto` já expõe o framing binário versionado do wire inter-node, ainda sem payloads semânticos finalizados;
-- `pkg/yprotocol.Provider` continua sendo o runtime local de referência do futuro owner;
-- o recovery operacional atual já cobre replay incremental público em cima dos stores, enquanto handoff, cutover e forwarding inter-node permanecem como trabalho da próxima etapa.
+- `pkg/ynodeproto` já expõe o framing binário versionado do wire inter-node e os payloads tipados iniciais para handshake, sync, document update, awareness update e ping/pong;
+- `pkg/yprotocol.Provider` já atua como runtime local de referência do owner, com bootstrap/recovery via `snapshot + update log`;
+- `pkg/yhttp` já expõe `OwnerAwareServer` como borda pública HTTP/WebSocket para resolver owner antes do provider local;
+- o recovery operacional atual já cobre replay incremental público em cima dos stores e bootstrap do provider, enquanto handoff, cutover, forwarding inter-node tipado e aceite distribuído completo de HTTP/WS permanecem como trabalho da próxima etapa.
 
 ---
 
@@ -306,6 +309,15 @@ Versão monotônica do lease usada para invalidar owners antigos e cercar opera�
 ### Update Log
 Sequência append-only de updates aplicada sobre um snapshot base para replay, recovery e handoff.
 
+### Inter-node Message
+Mensagem interna do cluster transportada por `pkg/ynodeproto`, separada do
+`y-protocols` de cliente e tipada por classe semântica (`handshake`,
+`document-sync-*`, `document-update`, `awareness-update`, `ping/pong`).
+
+### Edge Node
+Nó que aceita HTTP/WS publicamente, autentica a request e resolve owner, mas
+não materializa `Session`/`Provider` do room quando não detém a ownership local.
+
 ---
 
 ## Restrições de implementação
@@ -366,10 +378,11 @@ Exemplos:
 - endpoints e recursos equivalentes ao YHub podem ser sustentados por essa base
 
 ### Fase 4 pronta quando:
-- qualquer nó pode aceitar HTTP e WebSocket para um room
+- qualquer nó pode aceitar HTTP e WebSocket para um room em modo edge owner-aware
 - apenas um owner ativo por documento/shard processa o room por vez
+- mensagens inter-node tipadas e versionadas cobrem handshake, forward, recovery e handoff sem reaproveitar `y-protocols`
 - lease, `epoch` e fencing evitam split-brain e escrita obsoleta
-- `snapshot + update log` permitem bootstrap, replay e handoff previsíveis
+- `snapshot + update log` permitem bootstrap, replay e handoff previsíveis, preservando offset/high-water mark observável
 - protocolo inter-node próprio sustenta forwarding, recovery e troca de owner
 
 ## Backlog imediato da transição Fase 3 -> Fase 4
@@ -378,9 +391,10 @@ Exemplos:
 2. Ampliar e endurecer a integração do lazy writer no fluxo de atualização.
 3. Concluir o mapa de lacunas de compatibilidade para V2 e conversões de formato.
 4. Formalizar a unidade de ownership (`DocumentKey`/room/shard) e a semântica de lease/`epoch`/fencing.
-5. Materializar o modelo `snapshot + update log` acima dos contratos já expostos em `pkg/storage`, incluindo replay incremental, trim e compaction.
-6. Materializar o protocolo inter-node acima do framing já exposto em `pkg/ynodeproto` e separar o wire de cliente (`y-protocols`) do wire interno do cluster.
-7. Atualizar continuamente os documentos principais conforme novas divergências ou invariantes distribuídas forem observadas.
+5. Materializar o bootstrap/recovery do owner em `pkg/yprotocol.Provider` via `snapshot + update log`, incluindo replay incremental, trim e compaction.
+6. Materializar payloads tipados acima do framing já exposto em `pkg/ynodeproto` e separar o wire de cliente (`y-protocols`) do wire interno do cluster.
+7. Adaptar `pkg/yhttp` para modo edge owner-aware, mantendo a materialização do room restrita ao owner local.
+8. Atualizar continuamente os documentos principais conforme novas divergências ou invariantes distribuídas forem observadas.
 
 ---
 

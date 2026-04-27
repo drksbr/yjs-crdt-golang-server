@@ -16,29 +16,35 @@ Acima do núcleo binário e do provider local em `pkg/yprotocol`, o projeto já 
 uma primeira borda pública de transporte em `pkg/yhttp`, mantendo o escopo em
 single-process, V1-only e sem coordenação distribuída entre nós.
 
-A próxima fase do roadmap introduz a arquitetura distribuída: owner único por
-documento/shard, lease/epoch/fencing, hidratação por `snapshot + update log`,
-protocolo inter-node próprio e borda HTTP/WS aceita em qualquer nó com
-processamento autoritativo do room concentrado no owner.
+A fase distribuída já entrou no branch atual: o wire inter-node agora tem
+mensagens tipadas em `pkg/ynodeproto`, o `pkg/yprotocol.Provider` já faz
+bootstrap/recovery via `snapshot + update log`, e `pkg/yhttp` já expõe uma
+borda owner-aware que só materializa o room quando o owner resolvido é local.
 
-## Próxima fase distribuída
+## Fase distribuída em andamento
 
-- qualquer nó poderá aceitar requests HTTP e upgrades WebSocket para um room;
-- apenas o owner ativo de cada documento/shard materializará `Session`/`Provider` e processará o room;
-- lease, `epoch` e fencing cercarão handoff, persistência e replay para evitar split-brain;
-- o owner será recuperado ou promovido a partir de `snapshot + update log`, usando protocolo inter-node próprio para forwarding e handoff.
+- qualquer nó já pode expor a borda HTTP/WS e resolver ownership antes de abrir o provider local;
+- `pkg/yhttp.OwnerAwareServer` autentica/resolve owner e só abre o room localmente quando o owner é o nó atual;
+- apenas o owner ativo de cada documento/shard materializa `Session`/`Provider` e processa o room;
+- o tráfego inter-node já tem mensagens tipadas e versionadas acima de `pkg/ynodeproto.MessageType`;
+- o owner local já pode ser reidratado a partir de snapshot base + replay do tail do `update log`, com awareness mantido como estado efêmero fora do recovery durável;
+- lease, `epoch` e fencing continuam sendo o próximo fechamento crítico para handoff, failover e prevenção de split-brain;
+- o wire interno permanece separado do `y-protocols`, que continua restrito à borda cliente.
 
-## Epoch-1 já entregue
+## Epochs 1-2 já entregues
 
-O branch atual já entrega a base operacional inicial da fase distribuída, sem
-ligar ainda um runtime multi-nó completo:
+O branch atual já entrega a base operacional inicial e o segundo corte de
+integração da fase distribuída, ainda sem ligar um runtime multi-nó completo:
 
 - `pkg/storage` agora expõe contratos para snapshot distribuído, append log por documento, placement e lease, além de replay/recovery públicos em cima de `snapshot + update log`;
+- `pkg/storage` já expõe `RecoverSnapshot`, `ReplayUpdateLog` e `CompactUpdateLog` para bootstrap, catch-up e checkpoint/compaction do runtime autoritativo;
 - `pkg/storage/memory` e `pkg/storage/postgres` já implementam `DistributedStore` com snapshot, update log, placement e lease;
 - `pkg/ycluster` expõe tipos, resolver determinístico de shard, lookup storage-backed de owner e adapter de lease sobre `pkg/storage`;
-- `pkg/ynodeproto` expõe o framing binário versionado do protocolo inter-node;
-- `pkg/yprotocol.Provider` continua sendo o runtime local do owner futuro, preservando o modo single-process como referência;
-- o fluxo de recovery/replay já existe como helper público em `pkg/storage`, enquanto handoff, cutover e forwarding inter-node seguem como etapa posterior.
+- `pkg/ynodeproto` agora expõe o framing binário versionado e os payloads tipados do protocolo inter-node (`handshake`, `document-sync-*`, `document-update`, `awareness-update`, `ping/pong`);
+- `pkg/yprotocol.Provider` já trata `snapshot + update log` como bootstrap/recovery do owner local, registrando updates no log e compactando o tail em `Persist`;
+- `pkg/yhttp` já expõe `OwnerAwareServer`, que resolve owner antes do provider local e responde com metadados retryable ou hook customizado quando o owner é remoto;
+- `examples/owner-aware-http-edge` e os novos testes de integração cobrem o wiring owner-aware, o replay via `snapshot + update log` e o recovery do provider;
+- handoff, cutover, forwarding inter-node e fencing autoritativo ainda seguem como etapa posterior.
 
 As APIs de update abaixo estão disponíveis na camada pública e seguem validação de formato antes de executar as operações.
 
@@ -255,8 +261,9 @@ Contrato esperado dessa camada:
 Próxima etapa planejada acima dessa camada:
 
 - tratar `Provider`/`Connection` como runtime local do futuro owner distribuído;
-- introduzir resolução de owner, lease/`epoch`/fencing e `snapshot + update log` acima dessa camada;
-- adicionar protocolo inter-node próprio para forwarding, handoff e recovery, mantendo `y-protocols` apenas na borda cliente.
+- abrir o runtime autoritativo a partir de snapshot base + replay do tail do `update log`, reaproveitando `pkg/storage` para recovery/checkpoint e mantendo awareness fora do estado durável;
+- introduzir resolução de owner, lease/`epoch`/fencing e aceitar `Session`/`Provider` apenas no owner local;
+- adicionar protocolo inter-node tipado para forwarding, handoff e recovery, mantendo `y-protocols` apenas na borda cliente.
 
 ### `pkg/yhttp`
 
@@ -286,7 +293,7 @@ API pública de transporte HTTP/WebSocket acima de `pkg/yprotocol.Provider`.
 - `ConnectionID` pode ser omitido; o handler gera um identificador local estável para a conexão.
 - o handler aceita apenas frames binários do `y-protocols`.
 - o fanout continua local ao processo, reaproveitando o `DispatchResult` do provider.
-- no roadmap distribuído, `pkg/yhttp` continua como borda pública em qualquer nó; nós não-owner apenas resolvem owner e encaminham tráfego, sem materializar o room localmente.
+- no roadmap distribuído, `pkg/yhttp` continua como borda pública em qualquer nó, mas entra em modo edge owner-aware: o nó não-owner aceita e autentica a conexão, resolve owner, encaminha frames/respostas pelo wire inter-node e não materializa o room localmente.
 
 #### Adapters por framework
 
@@ -397,9 +404,14 @@ contratos-base que sustentam a próxima fase distribuída:
 - `type PlacementStore interface`
 - `type LeaseStore interface`
 - `type DistributedStore interface`
+- `type SnapshotLogStore interface`
 - `type RecoveryResult struct { Snapshot *yjsbridge.PersistedSnapshot; Updates []*UpdateLogRecord; LastOffset UpdateOffset }`
+- `type UpdateLogReplayResult struct { Snapshot *yjsbridge.PersistedSnapshot; Through UpdateOffset; Applied int }`
+- `type UpdateLogCompactionResult struct { Snapshot *yjsbridge.PersistedSnapshot; Record *SnapshotRecord; Through UpdateOffset; Applied int }`
 - `func ReplaySnapshot(ctx context.Context, base *yjsbridge.PersistedSnapshot, updates ...*UpdateLogRecord) (*yjsbridge.PersistedSnapshot, error)`
+- `func ReplayUpdateLog(store UpdateLogStore, key DocumentKey, base *yjsbridge.PersistedSnapshot, after UpdateOffset, limit int) (*UpdateLogReplayResult, error)`
 - `func RecoverSnapshot(ctx context.Context, snapshots SnapshotStore, updates UpdateLogStore, key DocumentKey, after UpdateOffset, limit int) (*RecoveryResult, error)`
+- `func CompactUpdateLog(store SnapshotLogStore, key DocumentKey, base *yjsbridge.PersistedSnapshot, after UpdateOffset, limit int) (*UpdateLogCompactionResult, error)`
 
 Esses contratos ainda não substituem `SnapshotStore`; eles abrem o caminho para
 `snapshot + update log`, placement por shard e ownership com lease/fencing.
@@ -410,7 +422,14 @@ No corte atual:
 - `LeaseStore` separa ownership efêmero por shard via `OwnerInfo` + token opaco para renew/release;
 - `DistributedStore` agrega snapshot, log, placement e lease em um backend opcional completo;
 - `ReplaySnapshot` aplica um tail incremental de `UpdateLogRecord` sobre um snapshot base;
-- `RecoverSnapshot` carrega snapshot base, lista batches do `update log` e reconstrói o estado consolidado com `LastOffset` observável para recovery/checkpoint.
+- `ReplayUpdateLog` pagina o tail persistido e devolve `Through` para o runtime reaproveitar como high-water mark de recovery/checkpoint;
+- `RecoverSnapshot` carrega snapshot base, lista batches do `update log` e reconstrói o estado consolidado com `LastOffset` observável para recovery/checkpoint;
+- `CompactUpdateLog` persiste um novo snapshot consolidado e poda o log até o offset aplicado.
+
+No corte atual, `pkg/yprotocol.Provider` já usa esses helpers para bootstrap e
+recovery do owner local: snapshot base + replay do tail do log para recuperar o
+documento autoritativo, seguido de checkpoint/trim em `Persist`. Awareness
+continua fora desse recovery durável.
 
 ### `pkg/ynodeproto`
 
@@ -441,11 +460,15 @@ Escopo atual:
 
 - framing fixo e versionado;
 - enum de tipos de mensagem para handshake, catch-up de documento, update de documento, awareness e ping/pong;
-- encode/decode estrito para frame único e decode por prefixo para stream concatenado.
+- payloads tipados/validados por tipo para handshake, sync request/response, document update, awareness update e ping/pong;
+- encode/decode estrito para frame único e decode por prefixo para stream concatenado;
+- `ParseError` com offset para falhas de decode de payloads tipados.
 
-O pacote ainda não define o shape semântico dos payloads. Nesta fase ele existe
-para congelar o wire envelope do tráfego inter-node que, depois, carregará
-resolve/open/forward/recovery/handoff sem misturar esse wire com `y-protocols`.
+Próximo passo acima desse wire:
+
+- ligar essas mensagens ao forwarding real entre edge e owner;
+- acrescentar fluxos de handoff/cutover e respostas de fencing;
+- manter `Header`/`Frame` estáveis enquanto a semântica distribuída sobe de nível.
 
 ### `pkg/ycluster`
 
@@ -758,11 +781,11 @@ throughput, latência média, `p50`, `p95`, `p99` e tempo de restore após resta
 - V2 já é detectado, mas ainda não é suportado operacionalmente nas APIs de update; `DecodeUpdate`, `MergeUpdates`, `DiffUpdate`, `StateVectorFrom*`, `Create/ContentIDsFrom*` e `IntersectUpdateWithContentIDs` retornam erro explícito (`ErrUnsupportedUpdateFormatV2`) e misturas de formato retornam `ErrMismatchedUpdateFormats`.
 - Em APIs agregadas, a validação preserva índice do payload relevante no erro (inclusive após prefixes vazios), e rejeita entradas vazias misturadas a V2 conforme contrato.
 - `pkg/yprotocol` e `pkg/yawareness` expõem os codecs do envelope `y-protocols`, o runtime in-process mínimo de sessão, o provider local por documento e o estado local de awareness.
-- `pkg/yhttp` adiciona a borda pública de transporte HTTP/WebSocket, hooks opcionais de observabilidade e os subpacotes `pkg/yhttp/gin`, `pkg/yhttp/echo`, `pkg/yhttp/chi` e `pkg/yhttp/prometheus` para adaptação direta aos frameworks suportados.
-- `pkg/storage`, `pkg/ycluster` e `pkg/ynodeproto` já expõem a base pública de epoch-1 para persistência distribuída, control plane e wire inter-node.
+- `pkg/yhttp` agora também expõe `OwnerAwareServer` para resolver owner antes do provider local, além dos hooks opcionais de observabilidade e dos subpacotes `pkg/yhttp/gin`, `pkg/yhttp/echo`, `pkg/yhttp/chi` e `pkg/yhttp/prometheus`.
+- `pkg/storage`, `pkg/ycluster` e `pkg/ynodeproto` já expõem a base pública distribuída com replay/recovery, control plane mínimo e wire inter-node tipado; o próximo passo é ligar essas superfícies ao forwarding/handoff do runtime.
 - Ainda não há transporte distribuído, coordenação entre nós ou replicação horizontal entre processos.
-- Recovery operacional agora já cobre `snapshot + update log` via helpers públicos e stores concretos; handoff, cutover, append log por epoch e forwarding inter-node seguem como etapa posterior.
-- A próxima fase do roadmap adiciona owner único por room/documento/shard, `lease/epoch/fencing`, `snapshot + update log` e protocolo inter-node próprio, mantendo HTTP/WS acessível em qualquer nó.
+- Recovery operacional agora já cobre `snapshot + update log` via helpers públicos, stores concretos e bootstrap do `Provider`; handoff, cutover, append log por epoch, fencing e forwarding inter-node seguem como etapa posterior.
+- A próxima fase do roadmap fecha owner único por room/documento/shard com `lease/epoch/fencing`, forwarding edge->owner e failover/handoff seguros, mantendo HTTP/WS acessível em qualquer nó.
 
 ## Referências do projeto
 

@@ -9,12 +9,15 @@
 // Escopo atual:
 //   - upgrade WebSocket via `net/http`;
 //   - roteamento de conexão para um `storage.DocumentKey`;
+//   - resolução opcional de owner antes do provider local via
+//     `OwnerAwareServer`;
 //   - leitura/escrita de frames binários do protocolo Yjs;
 //   - fanout local de broadcasts produzidos por `pkg/yprotocol.Provider`;
 //   - persistência opcional do snapshot no fechamento da conexão.
 //   - hooks opcionais de observabilidade via `Metrics`, com adapter Prometheus
 //     disponível em `pkg/yhttp/prometheus`.
 //
-// O pacote não implementa transporte distribuído, replicação entre processos ou
-// suporte operacional a Update V2.
+// O pacote ainda não implementa proxy inter-node, replicação entre processos ou
+// suporte operacional a Update V2; o caminho owner-aware apenas responde com
+// metadados retryable quando o owner resolvido é remoto.
 package yhttp

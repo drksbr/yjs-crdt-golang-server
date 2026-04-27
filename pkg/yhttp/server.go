@@ -82,6 +82,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	s.serveResolvedHTTP(w, r, req)
+}
+
+func (s *Server) serveResolvedHTTP(w http.ResponseWriter, r *http.Request, req Request) {
 	if err := req.DocumentKey.Validate(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

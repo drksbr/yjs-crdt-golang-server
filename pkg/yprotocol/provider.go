@@ -29,6 +29,10 @@ var (
 // ProviderConfig define dependências opcionais do provider local.
 type ProviderConfig struct {
 	// Store permite hidratação e persistência explícita de snapshots do documento.
+	//
+	// Quando o store também implementa `storage.UpdateLogStore`, o provider
+	// recupera `snapshot + tail` em `Open`, registra updates incrementais no log
+	// e compacta esse estado em `Persist`.
 	Store storage.SnapshotStore
 }
 
@@ -59,6 +63,8 @@ type providerRoom struct {
 	mu          sync.Mutex
 	key         storage.DocumentKey
 	snapshot    *yjsbridge.PersistedSnapshot
+	lastOffset  storage.UpdateOffset
+	compactedAt storage.UpdateOffset
 	connections map[string]*Connection
 }
 
@@ -221,9 +227,27 @@ func (c *Connection) Persist(ctx context.Context) (*storage.SnapshotRecord, erro
 	}
 	key := c.room.key
 	snapshot := c.room.snapshot.Clone()
+	lastOffset := c.room.lastOffset
+	shouldTrim := lastOffset > c.room.compactedAt
 	c.room.mu.Unlock()
 
-	return c.provider.store.SaveSnapshot(ctx, key, snapshot)
+	record, err := c.provider.store.SaveSnapshot(ctx, key, snapshot)
+	if err != nil {
+		return nil, err
+	}
+
+	if updateStore := c.provider.updateLogStore(); updateStore != nil && shouldTrim {
+		if err := updateStore.TrimUpdates(ctx, key, lastOffset); err != nil {
+			return record, fmt.Errorf("trim compacted updates through %d: %w", lastOffset, err)
+		}
+
+		c.room.mu.Lock()
+		if c.room.compactedAt < lastOffset {
+			c.room.compactedAt = lastOffset
+		}
+		c.room.mu.Unlock()
+	}
+	return record, nil
 }
 
 // Close remove a conexão do room e, se existir presença local, gera um
@@ -288,7 +312,7 @@ func (p *Provider) ensureRoom(ctx context.Context, key storage.DocumentKey) (*pr
 		return room, nil
 	}
 
-	snapshot, err := p.loadSnapshot(ctx, key)
+	snapshot, lastOffset, err := p.loadSnapshot(ctx, key)
 	if err != nil {
 		p.mu.Unlock()
 		return nil, err
@@ -297,6 +321,7 @@ func (p *Provider) ensureRoom(ctx context.Context, key storage.DocumentKey) (*pr
 	room = &providerRoom{
 		key:         key,
 		snapshot:    snapshot,
+		lastOffset:  lastOffset,
 		connections: make(map[string]*Connection),
 	}
 	p.rooms[key] = room
@@ -304,22 +329,44 @@ func (p *Provider) ensureRoom(ctx context.Context, key storage.DocumentKey) (*pr
 	return room, nil
 }
 
-func (p *Provider) loadSnapshot(ctx context.Context, key storage.DocumentKey) (*yjsbridge.PersistedSnapshot, error) {
+func (p *Provider) loadSnapshot(ctx context.Context, key storage.DocumentKey) (*yjsbridge.PersistedSnapshot, storage.UpdateOffset, error) {
 	if p == nil || p.store == nil {
-		return yjsbridge.NewPersistedSnapshot(), nil
+		return yjsbridge.NewPersistedSnapshot(), 0, nil
+	}
+
+	if updateStore := p.updateLogStore(); updateStore != nil {
+		recovered, err := storage.RecoverSnapshot(ctx, p.store, updateStore, key, 0, 0)
+		if err != nil {
+			return nil, 0, err
+		}
+		if recovered == nil || recovered.Snapshot == nil {
+			return yjsbridge.NewPersistedSnapshot(), 0, nil
+		}
+		return recovered.Snapshot.Clone(), recovered.LastOffset, nil
 	}
 
 	record, err := p.store.LoadSnapshot(ctx, key)
 	if err != nil {
 		if errors.Is(err, storage.ErrSnapshotNotFound) {
-			return yjsbridge.NewPersistedSnapshot(), nil
+			return yjsbridge.NewPersistedSnapshot(), 0, nil
 		}
-		return nil, err
+		return nil, 0, err
 	}
 	if record == nil || record.Snapshot == nil {
-		return yjsbridge.NewPersistedSnapshot(), nil
+		return yjsbridge.NewPersistedSnapshot(), 0, nil
 	}
-	return record.Snapshot.Clone(), nil
+	return record.Snapshot.Clone(), 0, nil
+}
+
+func (p *Provider) updateLogStore() storage.UpdateLogStore {
+	if p == nil || p.store == nil {
+		return nil
+	}
+	updateStore, ok := p.store.(storage.UpdateLogStore)
+	if !ok {
+		return nil
+	}
+	return updateStore
 }
 
 func (r *providerRoom) handleMessageLocked(sender *Connection, message *ProtocolMessage) ([]*ProtocolMessage, []byte, error) {
@@ -334,31 +381,31 @@ func (r *providerRoom) handleMessageLocked(sender *Connection, message *Protocol
 			Awareness: r.aggregateLocalAwarenessLocked(""),
 		}}, nil, nil
 	case ProtocolTypeSync:
-		direct, err := sender.session.HandleProtocolMessage(message)
-		if err != nil {
-			return nil, nil, err
-		}
-
 		if message.Sync.Type == SyncMessageTypeStep2 || message.Sync.Type == SyncMessageTypeUpdate {
-			if err := r.mergeDocumentPayloadLocked(message.Sync.Payload); err != nil {
+			if err := r.applyDocumentPayloadLocked(sender.provider, r.key, message.Sync.Payload); err != nil {
 				return nil, nil, err
 			}
-			for _, peer := range r.sortedConnectionsLocked() {
-				if peer.id == sender.id || peer.closed {
-					continue
-				}
-				if _, err := peer.session.HandleProtocolMessage(message); err != nil {
-					return nil, nil, err
-				}
-			}
-
 			encoded, err := EncodeProtocolEnvelope(message)
 			if err != nil {
 				return nil, nil, err
 			}
-			return direct, encoded, nil
+			return nil, encoded, nil
 		}
-		return direct, nil, nil
+		if message.Sync.Type != SyncMessageTypeStep1 {
+			return nil, nil, fmt.Errorf("%w: %d", ErrUnknownSyncMessageType, message.Sync.Type)
+		}
+
+		diff, err := yjsbridge.DiffUpdate(r.snapshot.UpdateV1, message.Sync.Payload)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []*ProtocolMessage{{
+			Protocol: ProtocolTypeSync,
+			Sync: &SyncMessage{
+				Type:    SyncMessageTypeStep2,
+				Payload: diff,
+			},
+		}}, nil, nil
 	case ProtocolTypeAwareness:
 		if _, err := sender.session.HandleProtocolMessage(message); err != nil {
 			return nil, nil, err
@@ -384,16 +431,62 @@ func (r *providerRoom) handleMessageLocked(sender *Connection, message *Protocol
 	}
 }
 
-func (r *providerRoom) mergeDocumentPayloadLocked(payload []byte) error {
-	merged, err := yjsbridge.MergeUpdates(r.snapshot.UpdateV1, payload)
+func (r *providerRoom) applyDocumentPayloadLocked(provider *Provider, key storage.DocumentKey, payload []byte) error {
+	updateV1, err := yjsbridge.ConvertUpdateToV1(payload)
 	if err != nil {
 		return err
 	}
-	snapshot, err := yjsbridge.PersistedSnapshotFromUpdate(merged)
-	if err != nil {
-		return err
+
+	var appendedOffset storage.UpdateOffset
+	if provider != nil {
+		if updateStore := provider.updateLogStore(); updateStore != nil {
+			record, err := updateStore.AppendUpdate(context.Background(), key, updateV1)
+			if err != nil {
+				return err
+			}
+			if record != nil {
+				appendedOffset = record.Offset
+			}
+		}
 	}
-	r.snapshot = snapshot
+
+	nextSnapshot, err := storage.ReplaySnapshot(context.Background(), r.snapshot, &storage.UpdateLogRecord{
+		Key:      key,
+		UpdateV1: updateV1,
+	})
+	if err != nil {
+		if appendedOffset == 0 || provider == nil {
+			return err
+		}
+
+		recovered, lastOffset, recoverErr := provider.loadSnapshot(context.Background(), key)
+		if recoverErr != nil {
+			return fmt.Errorf("rebuild room snapshot: %w (recover: %v)", err, recoverErr)
+		}
+		r.snapshot = recovered
+		if lastOffset < appendedOffset {
+			lastOffset = appendedOffset
+		}
+		r.lastOffset = lastOffset
+		return r.syncSessionsToSnapshotLocked()
+	}
+
+	r.snapshot = nextSnapshot
+	if appendedOffset > 0 {
+		r.lastOffset = appendedOffset
+	}
+	return r.syncSessionsToSnapshotLocked()
+}
+
+func (r *providerRoom) syncSessionsToSnapshotLocked() error {
+	for _, peer := range r.sortedConnectionsLocked() {
+		if peer.closed {
+			continue
+		}
+		if err := peer.session.LoadPersistedSnapshot(r.snapshot); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
