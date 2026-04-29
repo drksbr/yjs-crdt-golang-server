@@ -21,7 +21,19 @@ func TestStateVectorAggregateAPIs(t *testing.T) {
 			},
 		},
 	)
-	v2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2 := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
+	v2AsV1, err := ConvertUpdateToV1(v2)
+	if err != nil {
+		t.Fatalf("ConvertUpdateToV1() unexpected error: %v", err)
+	}
+	v2StateVector, err := StateVectorFromUpdate(v2AsV1)
+	if err != nil {
+		t.Fatalf("StateVectorFromUpdate(v2AsV1) unexpected error: %v", err)
+	}
+	v2EncodedStateVector, err := EncodeStateVectorFromUpdate(v2AsV1)
+	if err != nil {
+		t.Fatalf("EncodeStateVectorFromUpdate(v2AsV1) unexpected error: %v", err)
+	}
 
 	tests := []struct {
 		name    string
@@ -107,34 +119,40 @@ func TestStateVectorAggregateAPIs(t *testing.T) {
 			},
 		},
 		{
-			name:    "detected_v2_is_rejected_for_state_vector",
+			name:    "detected_v2_is_converted_for_state_vector",
 			updates: [][]byte{nil, []byte{}, v2},
-			run: func(_ *testing.T, updates ...[]byte) error {
-				_, err := StateVectorFromUpdates(updates...)
-				return err
+			run: func(t *testing.T, updates ...[]byte) error {
+				got, err := StateVectorFromUpdates(updates...)
+				if err != nil {
+					return err
+				}
+				if !equalStateVectors(got, v2StateVector) {
+					t.Fatalf("StateVectorFromUpdates(v2) = %#v, want %#v", got, v2StateVector)
+				}
+				return nil
 			},
 			check: func(t *testing.T, err error) {
-				if !errors.Is(err, ErrUnsupportedUpdateFormatV2) {
-					t.Fatalf("StateVectorFromUpdates() error = %v, want %v", err, ErrUnsupportedUpdateFormatV2)
-				}
-				if !strings.Contains(err.Error(), "update[2]") {
-					t.Fatalf("StateVectorFromUpdates() error = %v, want update index 2", err)
+				if err != nil {
+					t.Fatalf("StateVectorFromUpdates() unexpected error: %v", err)
 				}
 			},
 		},
 		{
-			name:    "detected_v2_is_rejected_for_encoded_state_vector",
+			name:    "detected_v2_is_converted_for_encoded_state_vector",
 			updates: [][]byte{nil, []byte{}, v2},
-			run: func(_ *testing.T, updates ...[]byte) error {
-				_, err := EncodeStateVectorFromUpdates(updates...)
-				return err
+			run: func(t *testing.T, updates ...[]byte) error {
+				got, err := EncodeStateVectorFromUpdates(updates...)
+				if err != nil {
+					return err
+				}
+				if !bytes.Equal(got, v2EncodedStateVector) {
+					t.Fatalf("EncodeStateVectorFromUpdates(v2) = %x, want %x", got, v2EncodedStateVector)
+				}
+				return nil
 			},
 			check: func(t *testing.T, err error) {
-				if !errors.Is(err, ErrUnsupportedUpdateFormatV2) {
-					t.Fatalf("EncodeStateVectorFromUpdates() error = %v, want %v", err, ErrUnsupportedUpdateFormatV2)
-				}
-				if !strings.Contains(err.Error(), "update[2]") {
-					t.Fatalf("EncodeStateVectorFromUpdates() error = %v, want update index 2", err)
+				if err != nil {
+					t.Fatalf("EncodeStateVectorFromUpdates() unexpected error: %v", err)
 				}
 			},
 		},

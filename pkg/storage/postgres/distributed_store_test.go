@@ -127,6 +127,41 @@ func TestStoreSaveAndLoadPlacement(t *testing.T) {
 	}
 }
 
+func TestStoreListPlacements(t *testing.T) {
+	store, _ := newTestStore(t, false)
+	ctx := context.Background()
+
+	placements := []storage.PlacementRecord{
+		{Key: storage.DocumentKey{Namespace: "tenant-b", DocumentID: "doc-2"}, ShardID: "shard-b"},
+		{Key: storage.DocumentKey{Namespace: "tenant-a", DocumentID: "doc-2"}, ShardID: "shard-a2"},
+		{Key: storage.DocumentKey{Namespace: "tenant-a", DocumentID: "doc-1"}, ShardID: "shard-a1"},
+	}
+	for _, placement := range placements {
+		if _, err := store.SavePlacement(ctx, placement); err != nil {
+			t.Fatalf("SavePlacement(%#v) unexpected error: %v", placement.Key, err)
+		}
+	}
+
+	listed, err := store.ListPlacements(ctx, storage.PlacementListOptions{})
+	if err != nil {
+		t.Fatalf("ListPlacements(all) unexpected error: %v", err)
+	}
+	if len(listed) != 3 {
+		t.Fatalf("len(ListPlacements(all)) = %d, want 3", len(listed))
+	}
+	if listed[0].Key.Namespace != "tenant-a" || listed[0].Key.DocumentID != "doc-1" {
+		t.Fatalf("ListPlacements(all)[0] = %#v, want tenant-a/doc-1", listed[0].Key)
+	}
+
+	filtered, err := store.ListPlacements(ctx, storage.PlacementListOptions{Namespace: "tenant-a", Limit: 1})
+	if err != nil {
+		t.Fatalf("ListPlacements(filtered) unexpected error: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].Key.Namespace != "tenant-a" || filtered[0].Key.DocumentID != "doc-1" {
+		t.Fatalf("ListPlacements(filtered) = %#v, want tenant-a/doc-1 only", filtered)
+	}
+}
+
 func TestStoreSaveLoadAndReleaseLease(t *testing.T) {
 	store, _ := newTestStore(t, false)
 	ctx := context.Background()

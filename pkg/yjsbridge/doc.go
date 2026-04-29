@@ -11,9 +11,9 @@
 //   - Operações de formato, merge, diff, state vector e conversão para V1;
 //   - Extração/transformação de content IDs e funções auxiliares.
 //
-// O pacote não suporta Update V2. Esses cenários retornam sentinelas de erro
-// explícitas (`ErrUnsupportedUpdateFormatV2`) para manter comportamento
-// determinístico e fácil de tratar.
+// O pacote é V1-first. Updates V2 válidos são aceitos pelo reader fixture-backed
+// e normalizados para V1 canônico nas operações públicas de snapshot,
+// state vector, content ids, merge, diff e intersect.
 //
 // Os helpers variadicos tratam payloads vazios como operação no-op na agregação
 // de updates, conforme contratos internos existentes.

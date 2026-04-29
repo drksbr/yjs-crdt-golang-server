@@ -222,6 +222,74 @@ func TestProviderHandleEncodedMessagesBatchedEnvelope(t *testing.T) {
 	}
 }
 
+func TestProviderSyncUpdateNormalizesV2BroadcastAndRoomState(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	key := storage.DocumentKey{
+		Namespace:  "tests",
+		DocumentID: "provider-v2-sync-normalization",
+	}
+	provider := NewProvider(ProviderConfig{})
+
+	sender, err := provider.Open(ctx, key, "conn-sender", 711)
+	if err != nil {
+		t.Fatalf("provider.Open(conn-sender) unexpected error: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, closeErr := sender.Close(); closeErr != nil && !errors.Is(closeErr, ErrConnectionClosed) {
+			t.Fatalf("sender.Close() cleanup unexpected error: %v", closeErr)
+		}
+	})
+
+	peer, err := provider.Open(ctx, key, "conn-peer", 712)
+	if err != nil {
+		t.Fatalf("provider.Open(conn-peer) unexpected error: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, closeErr := peer.Close(); closeErr != nil && !errors.Is(closeErr, ErrConnectionClosed) {
+			t.Fatalf("peer.Close() cleanup unexpected error: %v", closeErr)
+		}
+	})
+
+	v2Update := mustDecodeProtocolHex(t, "000002a50100000104060374686901020101000001010000")
+	v1Update, err := yjsbridge.ConvertUpdateToV1(v2Update)
+	if err != nil {
+		t.Fatalf("ConvertUpdateToV1(v2) unexpected error: %v", err)
+	}
+
+	result, err := sender.HandleEncodedMessages(EncodeProtocolSyncUpdate(v2Update))
+	if err != nil {
+		t.Fatalf("sender.HandleEncodedMessages(v2 sync-update) unexpected error: %v", err)
+	}
+	if len(result.Broadcast) == 0 {
+		t.Fatal("len(result.Broadcast) = 0, want canonical V1 broadcast")
+	}
+
+	broadcastMessages, err := DecodeProtocolMessages(result.Broadcast)
+	if err != nil {
+		t.Fatalf("DecodeProtocolMessages(result.Broadcast) unexpected error: %v", err)
+	}
+	if len(broadcastMessages) != 1 || broadcastMessages[0].Sync == nil {
+		t.Fatalf("broadcastMessages = %#v, want single sync message", broadcastMessages)
+	}
+	if broadcastMessages[0].Sync.Type != SyncMessageTypeUpdate {
+		t.Fatalf("broadcast sync type = %v, want %v", broadcastMessages[0].Sync.Type, SyncMessageTypeUpdate)
+	}
+	if !bytes.Equal(broadcastMessages[0].Sync.Payload, v1Update) {
+		t.Fatalf("broadcast sync payload = %x, want canonical V1 %x", broadcastMessages[0].Sync.Payload, v1Update)
+	}
+	if bytes.Equal(broadcastMessages[0].Sync.Payload, v2Update) {
+		t.Fatalf("broadcast sync payload preserved V2 bytes: %x", broadcastMessages[0].Sync.Payload)
+	}
+	if !bytes.Equal(sender.session.UpdateV1(), v1Update) {
+		t.Fatalf("sender.session.UpdateV1() = %x, want %x", sender.session.UpdateV1(), v1Update)
+	}
+	if !bytes.Equal(peer.session.UpdateV1(), v1Update) {
+		t.Fatalf("peer.session.UpdateV1() = %x, want %x", peer.session.UpdateV1(), v1Update)
+	}
+}
+
 func mustDecodeProtocolHex(t *testing.T, value string) []byte {
 	t.Helper()
 

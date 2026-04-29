@@ -41,11 +41,11 @@ Projeto em **Meta técnica 9 / Fase 3 em consolidação**, com promoção da API
 - Estruturas, parsing e protocolo de base já estão no plano mínimo operacional.
 - O escopo em execução é consolidar compatibilidade estrutural de `merge/diff/intersect`, com lazy writer já endurecido no fluxo principal atual.
 - A API pública de formato e merge já usa validação agregada com erro indexado por update.
-- As superfícies públicas de sync (`pkg/yprotocol`) e awareness (`pkg/yawareness`) já estão promovidas para V1 com limites explícitos de suporte, sem provider completo e sem suporte a V2.
+- As superfícies públicas de sync (`pkg/yprotocol`) e awareness (`pkg/yawareness`) já estão promovidas para V1 com limites explícitos de suporte; sync aceita V2 válido por normalização para V1, enquanto awareness permanece independente de update V2.
 - `pkg/yprotocol` agora também cobre o primeiro runtime in-process mínimo de sessão/protocolo, com `Session`, `HandleProtocolMessage`, `HandleEncodedMessages` e encode público de `ProtocolMessage`, ainda sem transporte/provider completo.
-- `pkg/yprotocol` agora também cobre a camada mínima de provider acima de `Session`, com `Provider`, `Open`, `Connection`, `DispatchResult`, `Persist` e `Close`, ainda sem provider completo, transporte distribuído ou V2.
-- A API pública de persistência mínima já está disponível em `pkg/yjsbridge` para snapshots V1 (`PersistedSnapshot`, conversão, encode/decode de restore e persistência canônica).
-- A promoção da API pública de update já está refletida em `pkg/yjsbridge` (operações de merge/diff/intersect e derivados como state vector/content ids), mantendo `V2` explicitamente fora de escopo.
+- `pkg/yprotocol` agora também cobre a camada mínima de provider acima de `Session`, com `Provider`, `Open`, `Connection`, `DispatchResult`, `Persist` e `Close`, ainda sem provider completo/transporte distribuído próprio e com V2 válido convertido para V1 antes de broadcast/persistência.
+- A API pública de persistência mínima já está disponível em `pkg/yjsbridge` para snapshots V1 (`PersistedSnapshot`, conversão, encode/decode de restore e persistência canônica), com construtores aceitando V2 válido via conversão canônica para V1.
+- A promoção da API pública de update já está refletida em `pkg/yjsbridge` (operações de merge/diff/intersect e derivados como state vector/content ids); V2 válido alimenta essas operações por conversão canônica para V1.
 - A camada de armazenamento operacional já está definida em `pkg/storage` (contratos: `SnapshotStore`, `DocumentKey`, `SnapshotRecord`, erros) com stores implementadas para memória e Postgres.
 - `pkg/storage` agora também expõe os contratos-base da persistência distribuída (`UpdateLogStore`, `PlacementStore`, `LeaseStore`, `DistributedStore`) e os registros públicos necessários para snapshot base, append log, placement e ownership efêmero.
 - `pkg/ycluster` agora expõe o scaffolding público de control plane com tipos estáveis, `DeterministicShardResolver`, `StaticLocalNode`, `PlacementOwnerLookup` e interfaces mínimas de `Runtime`.
@@ -54,7 +54,7 @@ Projeto em **Meta técnica 9 / Fase 3 em consolidação**, com promoção da API
 - `examples/provider-memory` já demonstra o recovery local por snapshot: persistência explícita, fechamento do provider e restore do documento em um novo runtime, ainda sem handoff/cutover distribuído.
 - `pkg/storage` já expõe `ReplaySnapshot` e `RecoverSnapshot`, e `pkg/storage/memory`/`pkg/storage/postgres` já materializam `snapshot + update log`/placement/lease como stores concretos.
 - `pkg/ycluster` já expõe adapters storage-backed para ownership (`StorageOwnerLookup`) e lease (`StorageLeaseStore`) em cima dos contratos públicos de `pkg/storage`.
-- As APIs públicas de inspeção por `single-update` já despacham V1 e rejeitam V2 de forma explícita.
+- As APIs públicas de inspeção por `single-update` já despacham V1 e aceitam V2 válido por conversão canônica para V1.
 - O caminho de merge agora também possui variantes com `context` e agregação paralela na etapa de fusão.
 - Os caminhos públicos de `diff` e `intersect` agora também possuem variantes com `context`.
 - A pré-validação agregada de formato agora também respeita `context` nas APIs multi-update.
@@ -62,16 +62,16 @@ Projeto em **Meta técnica 9 / Fase 3 em consolidação**, com promoção da API
 - Os helpers internos de merge agora também têm guardas defensivas para listas vazias, com cobertura dedicada para evitar `panic` fora do caminho feliz.
 - `EncodeV1` agora normaliza structs fora de ordem por clock dentro do mesmo cliente antes de serializar, endurecendo o fluxo do lazy writer quando recebe `DecodedUpdate` materializado fora da ordem canônica.
 - Os caminhos de slice em `merge` e `ParsedContent` agora usam aritmética segura para evitar wraparound em `uint32` antes de calcular a janela efetiva.
-- As APIs derivadas de `state vector` e `content ids` já respeitam a mesma pré-validação agregada de formato e preservam o índice do primeiro payload relevante ao rejeitar V2.
+- As APIs derivadas de `state vector` e `content ids` já respeitam a mesma pré-validação agregada de formato; V2 válido é convertido para V1 antes da extração.
 - A suíte estrutural já cobre comutatividade de `merge`, gaps sintéticos, workflow multi-client de `merge -> diff -> intersect`, contratos adicionais do `lazy writer` e round-trip mais pesado do writer incremental.
-- A borda pública atual de V2 também ganhou contratos agregados extras para rejeição após `nil`/vazios e precedência de mistura `V1/V2` em `MergeUpdates`.
-- `MergeUpdates` agora também indexa o payload relevante quando rejeita V2 detectado, e a suíte passou a cobrir refs não fatiáveis em `ParsedContent.SliceWindow`, erros de `sliceStructWindowV1` e continuação de merge após `Skip` explícito no overlap.
+- A borda pública atual de V2 também ganhou contratos agregados extras para precedência de mistura `V1/V2` em `MergeUpdates`.
+- `MergeUpdates` agora também aceita V2 válido por conversão canônica para V1, e a suíte passou a cobrir refs não fatiáveis em `ParsedContent.SliceWindow`, erros de `sliceStructWindowV1` e continuação de merge após `Skip` explícito no overlap.
 - `MergeUpdates` também passou a tratar listas compostas apenas por payloads vazios como `no-op`, mantendo o retorno de update V1 vazio, e a suíte cobre payload V1 malformado nos caminhos context-aware de merge e validação agregada.
 - Já existe um primeiro corte funcional de `conversion/snapshots` em V1: `ConvertUpdateToV1` e `ConvertUpdatesToV1` normalizam payloads suportados para a forma canônica, e `SnapshotFromUpdate(s)` extrai `state vector + delete set` em memória a partir de update(s) V1 agregados.
 - Novo corte funcional em V1 de snapshot binário persistido já existe: `PersistedSnapshot` com `PersistedSnapshotFromUpdate(s)` gera, em um passo, `UpdateV1` canônico persistível e `Snapshot` materializado em memória.
 - Há também corte funcional de hidratação reversa V1 (`restore`) para `PersistedSnapshot` com `EncodePersistedSnapshotV1`, `DecodePersistedSnapshotV1` e `DecodePersistedSnapshotV1Context`.
 - O ciclo de persistência operacional já está em funcionamento via stores; `pkg/yprotocol.Provider` passa a servir como runtime local do futuro owner distribuído.
-- O próximo bloco de esforço agora combina duas frentes: fechar lacunas de `merge/diff/intersect` e V2 no runtime local, e subir do epoch-1 já operacional para ownership completo por documento/shard, lease/epoch/fencing, mensagens inter-node tipadas, recovery do owner via `snapshot + update log` e aceite de HTTP/WS em qualquer nó com handoff/cutover seguros.
+- O bloco V2 com reader/conversão limitada, snapshots, state vector, content ids, merge, diff, intersect e sync-runtime derivados já está implementado; a cobertura multi-update já inclui `Y.mergeUpdatesV2` para texto/format, map, XML, array, subdoc e tipos aninhados. O próximo esforço V2 deve decidir se algum caminho público deve preservar saída V2 em vez de V1 canônico.
 
 ---
 
@@ -176,7 +176,7 @@ Essa camada é necessária para:
 Muito alta
 
 ### Status esperado
-Corte mínimo implementado em V1; writer lazy e V2 seguem pendentes
+Corte mínimo implementado em V1; writer lazy já está no fluxo principal atual; reader/conversão V2 inicial e derivados de snapshot/state vector/content ids já existem
 
 ---
 
@@ -223,7 +223,7 @@ O YHub usa content ids diretamente ao montar documento e ao gerar metadata.
 Alta
 
 ### Status esperado
-Extração básica implementada; merge/encode/decode de content ids seguem pendentes
+Extração básica, merge/encode/decode estáveis de content ids implementados em V1; extração de V2 válido usa conversão canônica para V1
 
 ---
 
@@ -271,7 +271,7 @@ O YHub trata awareness separadamente do documento principal e isso deve ser pres
 Alta
 
 ### Status esperado
-Codec wire format, state manager básico e superfície pública em `pkg/yawareness` implementados para V1; deltas/eventos e operadores auxiliares seguem pendentes, sem provider completo
+Codec wire format, state manager básico e superfície pública em `pkg/yawareness` implementados para V1; deltas `Added/Updated/Removed` e operadores locais auxiliares já existem, sem provider completo
 
 ---
 
@@ -302,7 +302,7 @@ Mescla updates binários removendo redundâncias e produzindo um update consolid
 Alta, mas posterior ao núcleo de leitura
 
 ### Status esperado
-Corte mínimo implementado para V1, com lazy writer interno já endurecido no corte atual; faltam ampliar integração remanescente, V2 e maior cobertura estrutural
+Corte mínimo implementado para V1, com lazy writer interno já endurecido no fluxo principal e cobertura estrutural ampliada; V2 válido passa por conversão canônica para V1
 
 ---
 
@@ -324,7 +324,7 @@ Ajudam a evoluir do núcleo de parsing para uma engine binária mais completa.
 Média
 
 ### Status esperado
-Corte mínimo implementado para `diff` e interseção por content ids; classificação mínima de V2 já existe, mas faltam suporte V2 real, conversion e maior cobertura estrutural
+Corte mínimo implementado para `diff` e interseção por content ids, com cobertura estrutural ampliada; V2 válido passa por conversão canônica para V1
 
 ---
 
@@ -424,7 +424,7 @@ Permite que todos os nós aceitem tráfego de cliente, mas só um owner processe
 Alta na próxima fase
 
 ### Status esperado
-O scaffolding público inicial já existe em `pkg/ycluster` (`NodeID`, `ShardID`, `Placement`, `Lease`, `DeterministicShardResolver`, `PlacementOwnerLookup` e interfaces mínimas). O branch atual já também publicou payloads tipados acima de `pkg/ynodeproto`, bootstrap/recovery do `Provider` por `snapshot + update log` e a borda edge owner-aware em `pkg/yhttp`. O próximo passo é ligar esses contratos ao forwarding real entre edge e owner, ao handoff e ao fencing sem criar fanout multi-process ad hoc.
+O scaffolding público inicial já existe em `pkg/ycluster` (`NodeID`, `ShardID`, `Placement`, `Lease`, `DeterministicShardResolver`, `PlacementOwnerLookup` e interfaces mínimas). O branch atual já também publicou payloads tipados acima de `pkg/ynodeproto`, bootstrap/recovery do `Provider` por `snapshot + update log`, planner/executor/controller de rebalance, source por placement store, targets dinâmicos por membership/health e a borda edge owner-aware em `pkg/yhttp`. Decisões do controller podem acionar cutover/rebind imediato via callback yhttp sem criar fanout multi-process ad hoc.
 
 ---
 
@@ -449,7 +449,7 @@ Sem `snapshot + update log`, mudança de owner e recuperação pós-falha ficam 
 Alta na próxima fase
 
 ### Status esperado
-O scaffolding público inicial já existe em `pkg/storage` (`UpdateLogRecord`, `PlacementRecord`, `LeaseRecord`, `UpdateLogStore`, `PlacementStore`, `LeaseStore` e `DistributedStore`), e o branch atual já materializa append/list/trim concretos, replay/recovery público, backends em memória/Postgres e bootstrap do `Provider`. O próximo passo é conectar isso ao handoff, ao cutover e ao recovery autoritativo do owner com epoch/fencing.
+O scaffolding público inicial já existe em `pkg/storage` (`UpdateLogRecord`, `PlacementRecord`, `LeaseRecord`, `UpdateLogStore`, `PlacementStore`, `LeaseStore` e `DistributedStore`), e o branch atual já materializa append/list/trim concretos, replay/recovery público, backends em memória/Postgres, bootstrap do `Provider`, rebalance document-level por handoff atômico, control loop plugável e acionamento de revalidação/cutover na borda.
 
 ---
 
@@ -474,10 +474,10 @@ Os próximos passos práticos (Meta 9 -> Meta 10) ficam em:
 1. formalizar owner único por documento/shard em cima do scaffolding já exposto em `pkg/ycluster`
 2. fechar lease/epoch/fencing sobre a persistência já exposta em `pkg/storage`
 3. ligar o wire tipado de `pkg/ynodeproto` ao forwarding real entre edge e owner
-4. fechar handoff/failover do owner em cima do bootstrap já implementado por `snapshot + update log`
+4. ampliar validação de produção do control loop de rebalance/failover sobre topologias reais
 5. ampliar compatibilidade estrutural de `merge/diff/intersect`
 6. ampliar o uso do lazy writer além do corte já endurecido
-7. estudar/update V2 e conversion de formato além da classificação mínima atual
+7. ampliar cobertura V2 e decidir se haverá saída pública preservando wire format V2
 8. avançar para content maps
 9. avançar para attribution
 10. só então atacar recursos avançados do YHub

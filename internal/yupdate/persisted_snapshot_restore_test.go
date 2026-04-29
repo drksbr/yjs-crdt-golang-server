@@ -28,7 +28,7 @@ func TestPersistedSnapshotFromUpdateV1Restore(t *testing.T) {
 	)
 
 	malformed := []byte{0x80}
-	v2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2 := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
 
 	tests := []struct {
 		name    string
@@ -49,9 +49,8 @@ func TestPersistedSnapshotFromUpdateV1Restore(t *testing.T) {
 			wantErr: varint.ErrUnexpectedEOF,
 		},
 		{
-			name:    "v2_rejected_through_dispatch",
-			input:   v2,
-			wantErr: ErrUnsupportedUpdateFormatV2,
+			name:  "valid_v2_update_converts_to_v1_snapshot",
+			input: v2,
 		},
 	}
 

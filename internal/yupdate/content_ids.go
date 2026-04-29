@@ -252,7 +252,7 @@ func IsSubsetContentIDs(subject, container *ContentIDs) bool {
 }
 
 // ContentIDsFromUpdatesContext agrega ContentIDs extraídos de múltiplos updates
-// V1, respeitando cancelamento do contexto.
+// suportados, respeitando cancelamento do contexto.
 //
 // Entradas nil ou com payload vazio são tratadas como no-op, mantendo o estado
 // atual de agregação.
@@ -265,13 +265,17 @@ func ContentIDsFromUpdatesContext(ctx context.Context, updates ...[]byte) (*Cont
 	case UpdateFormatUnknown:
 		return NewContentIDs(), nil
 	case UpdateFormatV2:
-		return nil, wrapUnsupportedV2AtFirstNonEmpty(updates)
+		converted, err := ConvertUpdatesToV1Context(ctx, updates...)
+		if err != nil {
+			return nil, err
+		}
+		return extractContentIDsFromUpdateV1(ctx, 0, converted)
 	}
 
 	return aggregatePayloadsInParallel(ctx, updates, 0, extractContentIDsFromUpdateV1, mergeContentIDPayloads)
 }
 
-// ContentIDsFromUpdates agrega ContentIDs extraídos de múltiplos updates V1.
+// ContentIDsFromUpdates agrega ContentIDs extraídos de múltiplos updates suportados.
 //
 // Entradas nil ou com payload vazio são tratadas como no-op, mantendo o estado
 // atual de agregação.

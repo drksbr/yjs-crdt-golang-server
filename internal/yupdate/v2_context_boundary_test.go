@@ -20,7 +20,7 @@ func boundaryV1Update() []byte {
 }
 
 func boundaryV2Update() []byte {
-	return []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	return []byte{0x00, 0x00, 0x02, 0xa5, 0x01, 0x00, 0x00, 0x01, 0x04, 0x06, 0x03, 0x74, 0x68, 0x69, 0x01, 0x02, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00}
 }
 
 func TestFormatFromUpdatesContextBoundaryCases(t *testing.T) {
@@ -85,6 +85,10 @@ func TestMergeUpdatesContextBoundaryCases(t *testing.T) {
 
 	v1 := boundaryV1Update()
 	v2 := boundaryV2Update()
+	convertedV2, err := ConvertUpdateToV1(v2)
+	if err != nil {
+		t.Fatalf("ConvertUpdateToV1(v2) unexpected error: %v", err)
+	}
 
 	tests := []struct {
 		name    string
@@ -93,9 +97,9 @@ func TestMergeUpdatesContextBoundaryCases(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name:    "v2_rejected",
+			name:    "v2_converted_to_v1",
 			updates: [][]byte{v2},
-			wantErr: ErrUnsupportedUpdateFormatV2,
+			want:    convertedV2,
 		},
 		{
 			name:    "mixed_formats_rejected",
@@ -154,9 +158,9 @@ func TestStateVectorFromUpdatesContextBoundaryCases(t *testing.T) {
 			wantLen: 0,
 		},
 		{
-			name:    "v2_detected_even_with_empty_prefix",
+			name:    "v2_converted_even_with_empty_prefix",
 			updates: [][]byte{nil, []byte{}, v2},
-			wantErr: ErrUnsupportedUpdateFormatV2,
+			wantLen: 1,
 		},
 		{
 			name:    "mixed_formats_rejected",
@@ -205,9 +209,9 @@ func TestContentIDsFromUpdatesContextBoundaryCases(t *testing.T) {
 			wantLen: 0,
 		},
 		{
-			name:    "v2_detected_even_with_empty_prefix",
+			name:    "v2_converted_even_with_empty_prefix",
 			updates: [][]byte{nil, []byte{}, v2},
-			wantErr: ErrUnsupportedUpdateFormatV2,
+			wantLen: 1,
 		},
 		{
 			name:    "mixed_formats_rejected",
@@ -234,11 +238,11 @@ func TestContentIDsFromUpdatesContextBoundaryCases(t *testing.T) {
 			if got == nil {
 				t.Fatal("ContentIDsFromUpdatesContext() returned nil, want empty ContentIDs")
 			}
-			if !got.IsEmpty() {
+			if tt.wantLen == 0 && !got.IsEmpty() {
 				t.Fatalf("ContentIDsFromUpdatesContext() = %#v, want empty ContentIDs", got)
 			}
-			if tt.wantLen != 0 {
-				t.Fatalf("ContentIDsFromUpdatesContext() wantLen = %d, want 0", tt.wantLen)
+			if tt.wantLen != 0 && got.IsEmpty() {
+				t.Fatalf("ContentIDsFromUpdatesContext() = empty, want non-empty content ids")
 			}
 		})
 	}

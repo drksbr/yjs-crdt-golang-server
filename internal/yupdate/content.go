@@ -63,6 +63,9 @@ func readItemContentV1(d *decoderV1, info byte) (ParsedContent, error) {
 		if err != nil {
 			return ParsedContent{}, err
 		}
+		if err := validateDecodedCollectionLength("ReadContentJSON.len", d.offset(), length); err != nil {
+			return ParsedContent{}, err
+		}
 		values := make([]string, 0, length)
 		raw := appendVarUintV1(nil, length)
 		for i := uint32(0); i < length; i++ {
@@ -130,6 +133,9 @@ func readItemContentV1(d *decoderV1, info byte) (ParsedContent, error) {
 	case itemContentAny:
 		length, err := d.readVarUint("ReadContentAny.len")
 		if err != nil {
+			return ParsedContent{}, err
+		}
+		if err := validateDecodedCollectionLength("ReadContentAny.len", d.offset(), length); err != nil {
 			return ParsedContent{}, err
 		}
 		values := make([][]byte, 0, length)

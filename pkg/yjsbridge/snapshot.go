@@ -16,7 +16,7 @@ type Snapshot = yupdate.Snapshot
 type PersistedSnapshot = yupdate.PersistedSnapshot
 
 var (
-	// ErrUnsupportedUpdateFormatV2 sinaliza que V2 ainda não é suportado.
+	// ErrUnsupportedUpdateFormatV2 sinaliza caminhos V2 ainda sem paridade completa.
 	ErrUnsupportedUpdateFormatV2 = yupdate.ErrUnsupportedUpdateFormatV2
 	// ErrUnknownUpdateFormat sinaliza payload de update com formato desconhecido.
 	ErrUnknownUpdateFormat = yupdate.ErrUnknownUpdateFormat
@@ -38,7 +38,8 @@ func NewPersistedSnapshot() *PersistedSnapshot {
 // PersistedSnapshotFromUpdate materializa um snapshot persistido a partir de um
 // único update.
 //
-// Atualizações V2 retornam `ErrUnsupportedUpdateFormatV2`.
+// Atualizações V2 válidas são convertidas para `UpdateV1` canônico antes da
+// materialização.
 func PersistedSnapshotFromUpdate(update []byte) (*PersistedSnapshot, error) {
 	return yupdate.PersistedSnapshotFromUpdate(update)
 }

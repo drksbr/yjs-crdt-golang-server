@@ -390,10 +390,9 @@ func TestSingleUpdateFormatAwareAPIsDispatchV1(t *testing.T) {
 	}
 }
 
-func TestSingleUpdateFormatAwareAPIsRejectUnsupportedOrUnknownFormats(t *testing.T) {
+func TestSingleUpdateFormatAwareAPIsRejectUnknownFormats(t *testing.T) {
 	t.Parallel()
 
-	v2Update := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 	filter := NewContentIDs()
 
 	tests := []struct {
@@ -402,42 +401,6 @@ func TestSingleUpdateFormatAwareAPIsRejectUnsupportedOrUnknownFormats(t *testing
 		input   []byte
 		wantErr error
 	}{
-		{
-			name: "StateVectorFromUpdate_v2",
-			call: func(update []byte) error {
-				_, err := StateVectorFromUpdate(update)
-				return err
-			},
-			input:   v2Update,
-			wantErr: ErrUnsupportedUpdateFormatV2,
-		},
-		{
-			name: "EncodeStateVectorFromUpdate_v2",
-			call: func(update []byte) error {
-				_, err := EncodeStateVectorFromUpdate(update)
-				return err
-			},
-			input:   v2Update,
-			wantErr: ErrUnsupportedUpdateFormatV2,
-		},
-		{
-			name: "CreateContentIDsFromUpdate_v2",
-			call: func(update []byte) error {
-				_, err := CreateContentIDsFromUpdate(update)
-				return err
-			},
-			input:   v2Update,
-			wantErr: ErrUnsupportedUpdateFormatV2,
-		},
-		{
-			name: "IntersectUpdateWithContentIDs_v2",
-			call: func(update []byte) error {
-				_, err := IntersectUpdateWithContentIDs(update, filter)
-				return err
-			},
-			input:   v2Update,
-			wantErr: ErrUnsupportedUpdateFormatV2,
-		},
 		{
 			name: "StateVectorFromUpdate_empty",
 			call: func(update []byte) error {
@@ -489,7 +452,90 @@ func TestSingleUpdateFormatAwareAPIsRejectUnsupportedOrUnknownFormats(t *testing
 	}
 }
 
-func TestMergeUpdatesContextRejectsUnsupportedOrUnknownFormats(t *testing.T) {
+func TestSingleUpdateFormatAwareAPIsDeriveSupportedV2ThroughV1Conversion(t *testing.T) {
+	t.Parallel()
+
+	v2Update := mustDecodeHex(t, "000003e5010102000400050400810084080474686c6f41000201010001020103000165010101")
+	v1Update, err := ConvertUpdateToV1(v2Update)
+	if err != nil {
+		t.Fatalf("ConvertUpdateToV1() unexpected error: %v", err)
+	}
+
+	gotStateVector, err := StateVectorFromUpdate(v2Update)
+	if err != nil {
+		t.Fatalf("StateVectorFromUpdate(v2) unexpected error: %v", err)
+	}
+	wantStateVector, err := StateVectorFromUpdate(v1Update)
+	if err != nil {
+		t.Fatalf("StateVectorFromUpdate(v1) unexpected error: %v", err)
+	}
+	if !equalStateVectors(gotStateVector, wantStateVector) {
+		t.Fatalf("StateVectorFromUpdate(v2) = %#v, want %#v", gotStateVector, wantStateVector)
+	}
+
+	gotEncodedStateVector, err := EncodeStateVectorFromUpdate(v2Update)
+	if err != nil {
+		t.Fatalf("EncodeStateVectorFromUpdate(v2) unexpected error: %v", err)
+	}
+	wantEncodedStateVector, err := EncodeStateVectorFromUpdate(v1Update)
+	if err != nil {
+		t.Fatalf("EncodeStateVectorFromUpdate(v1) unexpected error: %v", err)
+	}
+	if !bytes.Equal(gotEncodedStateVector, wantEncodedStateVector) {
+		t.Fatalf("EncodeStateVectorFromUpdate(v2) = %x, want %x", gotEncodedStateVector, wantEncodedStateVector)
+	}
+
+	gotContentIDs, err := CreateContentIDsFromUpdate(v2Update)
+	if err != nil {
+		t.Fatalf("CreateContentIDsFromUpdate(v2) unexpected error: %v", err)
+	}
+	wantContentIDs, err := CreateContentIDsFromUpdate(v1Update)
+	if err != nil {
+		t.Fatalf("CreateContentIDsFromUpdate(v1) unexpected error: %v", err)
+	}
+	if !IsSubsetContentIDs(gotContentIDs, wantContentIDs) || !IsSubsetContentIDs(wantContentIDs, gotContentIDs) {
+		t.Fatalf("CreateContentIDsFromUpdate(v2) = %#v, want %#v", gotContentIDs, wantContentIDs)
+	}
+
+	stateVector := encodeStateVectorEntry(101, 2)
+	gotDiff, err := DiffUpdate(v2Update, stateVector)
+	if err != nil {
+		t.Fatalf("DiffUpdate(v2) unexpected error: %v", err)
+	}
+	wantDiff, err := DiffUpdate(v1Update, stateVector)
+	if err != nil {
+		t.Fatalf("DiffUpdate(v1) unexpected error: %v", err)
+	}
+	if !bytes.Equal(gotDiff, wantDiff) {
+		t.Fatalf("DiffUpdate(v2) = %x, want %x", gotDiff, wantDiff)
+	}
+
+	gotIntersection, err := IntersectUpdateWithContentIDs(v2Update, wantContentIDs)
+	if err != nil {
+		t.Fatalf("IntersectUpdateWithContentIDs(v2) unexpected error: %v", err)
+	}
+	wantIntersection, err := IntersectUpdateWithContentIDs(v1Update, wantContentIDs)
+	if err != nil {
+		t.Fatalf("IntersectUpdateWithContentIDs(v1) unexpected error: %v", err)
+	}
+	if !bytes.Equal(gotIntersection, wantIntersection) {
+		t.Fatalf("IntersectUpdateWithContentIDs(v2) = %x, want %x", gotIntersection, wantIntersection)
+	}
+}
+
+func equalStateVectors(a, b map[uint32]uint32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for client, clock := range a {
+		if b[client] != clock {
+			return false
+		}
+	}
+	return true
+}
+
+func TestMergeUpdatesContextRejectsUnknownFormats(t *testing.T) {
 	t.Parallel()
 
 	v1 := buildUpdate(
@@ -501,7 +547,6 @@ func TestMergeUpdatesContextRejectsUnsupportedOrUnknownFormats(t *testing.T) {
 			},
 		},
 	)
-	v2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 
 	tests := []struct {
 		name    string
@@ -509,13 +554,8 @@ func TestMergeUpdatesContextRejectsUnsupportedOrUnknownFormats(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name:    "v2",
-			updates: [][]byte{v2},
-			wantErr: ErrUnsupportedUpdateFormatV2,
-		},
-		{
 			name:    "mixed",
-			updates: [][]byte{v1, v2},
+			updates: [][]byte{v1, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")},
 			wantErr: ErrMismatchedUpdateFormats,
 		},
 		{
@@ -586,11 +626,10 @@ func TestDiffAndIntersectContextDispatchV1(t *testing.T) {
 	}
 }
 
-func TestDiffAndIntersectContextRejectUnsupportedOrUnknownFormats(t *testing.T) {
+func TestDiffAndIntersectContextRejectUnknownFormats(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	v2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 	filter := NewContentIDs()
 
 	tests := []struct {
@@ -599,24 +638,6 @@ func TestDiffAndIntersectContextRejectUnsupportedOrUnknownFormats(t *testing.T) 
 		input   []byte
 		wantErr error
 	}{
-		{
-			name: "DiffUpdateContext_v2",
-			call: func(update []byte) error {
-				_, err := DiffUpdateContext(ctx, update, nil)
-				return err
-			},
-			input:   v2,
-			wantErr: ErrUnsupportedUpdateFormatV2,
-		},
-		{
-			name: "IntersectUpdateWithContentIDsContext_v2",
-			call: func(update []byte) error {
-				_, err := IntersectUpdateWithContentIDsContext(ctx, update, filter)
-				return err
-			},
-			input:   v2,
-			wantErr: ErrUnsupportedUpdateFormatV2,
-		},
 		{
 			name: "DiffUpdateContext_empty",
 			call: func(update []byte) error {

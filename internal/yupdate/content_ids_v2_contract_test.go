@@ -12,7 +12,15 @@ import (
 func TestContentIDsFromUpdatesContractWithV2Detected(t *testing.T) {
 	t.Parallel()
 
-	v2Update := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2Update := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
+	v2AsV1, err := ConvertUpdateToV1(v2Update)
+	if err != nil {
+		t.Fatalf("ConvertUpdateToV1() unexpected error: %v", err)
+	}
+	want, err := ContentIDsFromUpdates(v2AsV1)
+	if err != nil {
+		t.Fatalf("ContentIDsFromUpdates(v1) unexpected error: %v", err)
+	}
 
 	tests := []struct {
 		name    string
@@ -33,9 +41,12 @@ func TestContentIDsFromUpdatesContractWithV2Detected(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := ContentIDsFromUpdates(tt.updates...)
-			if !errors.Is(err, ErrUnsupportedUpdateFormatV2) {
-				t.Fatalf("ContentIDsFromUpdates() error = %v, want %v", err, ErrUnsupportedUpdateFormatV2)
+			got, err := ContentIDsFromUpdates(tt.updates...)
+			if err != nil {
+				t.Fatalf("ContentIDsFromUpdates(v2) unexpected error: %v", err)
+			}
+			if !IsSubsetContentIDs(got, want) || !IsSubsetContentIDs(want, got) {
+				t.Fatalf("ContentIDsFromUpdates(v2) = %#v, want %#v", got, want)
 			}
 		})
 	}
@@ -53,7 +64,7 @@ func TestContentIDsFromUpdatesContractMixedFormatsAreRejected(t *testing.T) {
 			},
 		},
 	)
-	v2Update := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2Update := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
 
 	tests := []struct {
 		name    string
@@ -120,7 +131,7 @@ func TestContentIDsFromUpdatesContractPropagatesIndexedErrors(t *testing.T) {
 		},
 		{
 			name:      "malformed_after_v2_payload_keeps_index",
-			updates:   [][]byte{[]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, nil, malformedUpdate},
+			updates:   [][]byte{mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), nil, malformedUpdate},
 			wantIndex: 2,
 		},
 	}

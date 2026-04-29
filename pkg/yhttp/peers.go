@@ -9,6 +9,7 @@ import (
 
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/ynodeproto"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
@@ -110,18 +111,26 @@ func protocolPayloadToRemoteMessages(
 		case message.Sync != nil:
 			switch message.Sync.Type {
 			case yprotocol.SyncMessageTypeStep2:
+				updateV1, err := yjsbridge.ConvertUpdateToV1(message.Sync.Payload)
+				if err != nil {
+					return nil, err
+				}
 				messages = append(messages, &ynodeproto.DocumentSyncResponse{
 					DocumentKey:  key,
 					ConnectionID: connectionID,
 					Epoch:        epoch,
-					UpdateV1:     append([]byte(nil), message.Sync.Payload...),
+					UpdateV1:     updateV1,
 				})
 			case yprotocol.SyncMessageTypeUpdate:
+				updateV1, err := yjsbridge.ConvertUpdateToV1(message.Sync.Payload)
+				if err != nil {
+					return nil, err
+				}
 				messages = append(messages, &ynodeproto.DocumentUpdate{
 					DocumentKey:  key,
 					ConnectionID: connectionID,
 					Epoch:        epoch,
-					UpdateV1:     append([]byte(nil), message.Sync.Payload...),
+					UpdateV1:     updateV1,
 				})
 			default:
 				return nil, fmt.Errorf("yhttp: sync remoto outbound nao suportado no indice %d: %v", idx, message.Sync.Type)
@@ -199,11 +208,15 @@ func protocolPayloadToOwnerMessages(
 					StateVector:  append([]byte(nil), message.Sync.Payload...),
 				})
 			case yprotocol.SyncMessageTypeStep2, yprotocol.SyncMessageTypeUpdate:
+				updateV1, err := yjsbridge.ConvertUpdateToV1(message.Sync.Payload)
+				if err != nil {
+					return nil, err
+				}
 				messages = append(messages, &ynodeproto.DocumentUpdate{
 					DocumentKey:  key,
 					ConnectionID: connectionID,
 					Epoch:        epoch,
-					UpdateV1:     append([]byte(nil), message.Sync.Payload...),
+					UpdateV1:     updateV1,
 				})
 			default:
 				return nil, fmt.Errorf("yhttp: sync remoto inbound nao suportado no indice %d: %v", idx, message.Sync.Type)

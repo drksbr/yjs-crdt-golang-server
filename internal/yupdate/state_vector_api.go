@@ -24,7 +24,11 @@ func StateVectorFromUpdatesContext(ctx context.Context, updates ...[]byte) (map[
 	case UpdateFormatUnknown:
 		return map[uint32]uint32{}, nil
 	case UpdateFormatV2:
-		return nil, wrapUnsupportedV2AtFirstNonEmpty(updates)
+		converted, err := ConvertUpdatesToV1Context(ctx, updates...)
+		if err != nil {
+			return nil, err
+		}
+		return extractStateVectorFromUpdateV1(ctx, 0, converted)
 	}
 
 	stateVectors, err := aggregatePayloadsInParallel(ctx, updates, 0, extractStateVectorFromUpdateV1, mergeStateVectors)

@@ -266,13 +266,13 @@ func TestOwnerAwareEdgeRebindsRemoteOwnerWithoutClientReconnect(t *testing.T) {
 	}
 
 	ownerPeer := dialSmokeWS(t, ownerC.URL+"/ws?doc=owner-aware-remote-rebind&client=805&conn=owner-c")
-	edgeUpdate := buildIntegrationGCOnlyUpdate(222, 2)
-	writeSmokeBinary(t, edgePeer, yprotocol.EncodeProtocolSyncUpdate(edgeUpdate))
-	assertSyncUpdateMatchesUpdate(t, readSmokeSyncUpdate(t, ownerPeer, edgeUpdate), edgeUpdate)
-
 	ownerUpdate := buildIntegrationGCOnlyUpdate(111, 2)
 	writeSmokeBinary(t, ownerPeer, yprotocol.EncodeProtocolSyncUpdate(ownerUpdate))
 	assertSyncUpdateMatchesUpdate(t, readSmokeSyncUpdate(t, edgePeer, ownerUpdate), ownerUpdate)
+
+	edgeUpdate := buildIntegrationGCOnlyUpdate(222, 2)
+	writeSmokeBinary(t, edgePeer, yprotocol.EncodeProtocolSyncUpdate(edgeUpdate))
+	assertSyncUpdateMatchesUpdate(t, readSmokeSyncUpdate(t, ownerPeer, edgeUpdate), edgeUpdate)
 }
 
 func TestOwnerAwareEdgeTakesOverLocalOwnerWithoutClientReconnect(t *testing.T) {

@@ -60,7 +60,7 @@ func TestContentIDsFromUpdatesRejectsMixedFormatsAfterSkippingEmptyPayloads(t *t
 			},
 		},
 	)
-	v2Update := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2Update := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
 
 	_, err := ContentIDsFromUpdates(nil, []byte{}, v1Update, nil, v2Update, []byte{})
 	if !errors.Is(err, ErrMismatchedUpdateFormats) {
@@ -71,17 +71,25 @@ func TestContentIDsFromUpdatesRejectsMixedFormatsAfterSkippingEmptyPayloads(t *t
 	}
 }
 
-func TestContentIDsFromUpdatesReturnsUnsupportedForDetectedV2AfterSkippingEmptyPayloads(t *testing.T) {
+func TestContentIDsFromUpdatesConvertsDetectedV2AfterSkippingEmptyPayloads(t *testing.T) {
 	t.Parallel()
 
-	v2Update := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-
-	_, err := ContentIDsFromUpdates(nil, []byte{}, v2Update, nil)
-	if !errors.Is(err, ErrUnsupportedUpdateFormatV2) {
-		t.Fatalf("ContentIDsFromUpdates() error = %v, want %v", err, ErrUnsupportedUpdateFormatV2)
+	v2Update := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
+	v2AsV1, err := ConvertUpdateToV1(v2Update)
+	if err != nil {
+		t.Fatalf("ConvertUpdateToV1() unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "update[2]") {
-		t.Fatalf("ContentIDsFromUpdates() error = %v, want update index 2", err)
+	want, err := ContentIDsFromUpdates(v2AsV1)
+	if err != nil {
+		t.Fatalf("ContentIDsFromUpdates(v1) unexpected error: %v", err)
+	}
+
+	got, err := ContentIDsFromUpdates(nil, []byte{}, v2Update, nil)
+	if err != nil {
+		t.Fatalf("ContentIDsFromUpdates(v2) unexpected error: %v", err)
+	}
+	if !IsSubsetContentIDs(got, want) || !IsSubsetContentIDs(want, got) {
+		t.Fatalf("ContentIDsFromUpdates(v2) = %#v, want %#v", got, want)
 	}
 }
 

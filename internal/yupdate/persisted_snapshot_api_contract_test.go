@@ -136,15 +136,17 @@ func TestPersistedSnapshotV1RestoreContextCanceled(t *testing.T) {
 	}
 }
 
-func TestPersistedSnapshotV1RestoreV2UnsupportedErrorContract(t *testing.T) {
+func TestPersistedSnapshotV2BoundaryContract(t *testing.T) {
 	t.Parallel()
 
-	v2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	minimalDetectedV2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	validV2 := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
+	validV2AsV1 := mustDecodeHex(t, "010165000401017402686900")
 
 	t.Run("single_payload_no_format_detection_keeps_error_unindexed", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := DecodePersistedSnapshotV1(v2)
+		_, err := DecodePersistedSnapshotV1(minimalDetectedV2)
 		if err == nil {
 			t.Fatalf("DecodePersistedSnapshotV1() error = nil, want %v", ErrUnsupportedUpdateFormatV2)
 		}
@@ -156,18 +158,15 @@ func TestPersistedSnapshotV1RestoreV2UnsupportedErrorContract(t *testing.T) {
 		}
 	})
 
-	t.Run("format_detection_variant_returns_indexed_unsupported_error", func(t *testing.T) {
+	t.Run("constructor_variant_converts_valid_v2", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := PersistedSnapshotFromUpdatesContext(context.Background(), nil, []byte{}, v2)
-		if err == nil {
-			t.Fatalf("PersistedSnapshotFromUpdatesContext() error = nil, want %v", ErrUnsupportedUpdateFormatV2)
+		got, err := PersistedSnapshotFromUpdatesContext(context.Background(), nil, []byte{}, validV2)
+		if err != nil {
+			t.Fatalf("PersistedSnapshotFromUpdatesContext() unexpected error: %v", err)
 		}
-		if !errors.Is(err, ErrUnsupportedUpdateFormatV2) {
-			t.Fatalf("PersistedSnapshotFromUpdatesContext() error = %v, want %v", err, ErrUnsupportedUpdateFormatV2)
-		}
-		if !strings.Contains(err.Error(), "update[2]") {
-			t.Fatalf("PersistedSnapshotFromUpdatesContext() error = %v, want contains %q", err, "update[2]")
+		if !bytes.Equal(got.UpdateV1, validV2AsV1) {
+			t.Fatalf("PersistedSnapshotFromUpdatesContext().UpdateV1 = %x, want %x", got.UpdateV1, validV2AsV1)
 		}
 	})
 }

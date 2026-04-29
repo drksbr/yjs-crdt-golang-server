@@ -14,8 +14,8 @@ var (
 	ErrAmbiguousUpdateFormat = errors.New("yupdate: formato de update ambíguo entre V1 e V2")
 	// ErrUnknownUpdateFormat sinaliza que o formato binário do update não pôde ser identificado.
 	ErrUnknownUpdateFormat = errors.New("yupdate: formato de update desconhecido")
-	// ErrUnsupportedUpdateFormatV2 sinaliza que o formato V2 ainda não foi implementado.
-	ErrUnsupportedUpdateFormatV2 = errors.New("yupdate: formato de update v2 ainda nao implementado")
+	// ErrUnsupportedUpdateFormatV2 sinaliza caminhos V2 ainda sem paridade completa.
+	ErrUnsupportedUpdateFormatV2 = errors.New("yupdate: formato de update v2 ainda nao suportado nesta operacao")
 	// ErrMismatchedUpdateFormats sinaliza mistura de formatos incompatíveis entre updates.
 	ErrMismatchedUpdateFormats = errors.New("yupdate: formatos de update incompatíveis")
 	// ErrInvalidSliceOffset sinaliza tentativa de fatiar uma struct fora do range.
@@ -34,6 +34,8 @@ var (
 	ErrContentIDsTrailingBytes = errors.New("yupdate: bytes residuais ao final do content ids")
 	// ErrInconsistentPersistedSnapshot sinaliza snapshot persistido em memória inconsistente com o payload V1 armazenado.
 	ErrInconsistentPersistedSnapshot = errors.New("yupdate: persisted snapshot inconsistente")
+	// ErrDecodedCollectionTooLarge sinaliza uma contagem de elementos grande demais para decodificação segura.
+	ErrDecodedCollectionTooLarge = errors.New("yupdate: colecao decodificada excede o limite seguro")
 )
 
 // ParseError adiciona contexto de operação e offset aos erros do parser.

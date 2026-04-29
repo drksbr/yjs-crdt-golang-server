@@ -71,6 +71,7 @@ type DispatchResult struct {
 // O provider:
 // - carrega o snapshot inicial do documento em `Open`;
 // - mantém o update V1 autoritativo do room;
+// - normaliza updates V2 válidos para V1 antes de broadcast e persistência;
 // - replica updates e awareness entre conexões do mesmo documento;
 // - deixa transporte, fanout de rede e persistência automática fora de escopo.
 type Provider struct {
@@ -699,10 +700,17 @@ func (r *providerRoom) handleMessageLocked(ctx context.Context, sender *Connecti
 		}}, nil, nil
 	case ProtocolTypeSync:
 		if message.Sync.Type == SyncMessageTypeStep2 || message.Sync.Type == SyncMessageTypeUpdate {
-			if err := r.applyDocumentPayloadLocked(ctx, sender.provider, r.key, message.Sync.Payload); err != nil {
+			updateV1, err := r.applyDocumentPayloadLocked(ctx, sender.provider, r.key, message.Sync.Payload)
+			if err != nil {
 				return nil, nil, err
 			}
-			encoded, err := EncodeProtocolEnvelope(message)
+			encoded, err := EncodeProtocolEnvelope(&ProtocolMessage{
+				Protocol: ProtocolTypeSync,
+				Sync: &SyncMessage{
+					Type:    message.Sync.Type,
+					Payload: updateV1,
+				},
+			})
 			if err != nil {
 				return nil, nil, err
 			}
@@ -748,23 +756,23 @@ func (r *providerRoom) handleMessageLocked(ctx context.Context, sender *Connecti
 	}
 }
 
-func (r *providerRoom) applyDocumentPayloadLocked(ctx context.Context, provider *Provider, key storage.DocumentKey, payload []byte) error {
+func (r *providerRoom) applyDocumentPayloadLocked(ctx context.Context, provider *Provider, key storage.DocumentKey, payload []byte) ([]byte, error) {
 	if r.authorityLost {
-		return ErrAuthorityLost
+		return nil, ErrAuthorityLost
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
 	updateV1, err := yjsbridge.ConvertUpdateToV1(payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
 	var appendedOffset storage.UpdateOffset
@@ -785,9 +793,9 @@ func (r *providerRoom) applyDocumentPayloadLocked(ctx context.Context, provider 
 					if provider != nil {
 						observeAuthorityLost(provider.metrics, key, authorityLossStageAppend)
 					}
-					return wrapAuthorityLost(err)
+					return nil, wrapAuthorityLost(err)
 				}
-				return err
+				return nil, err
 			}
 			if record != nil {
 				appendedOffset = record.Offset
@@ -801,12 +809,12 @@ func (r *providerRoom) applyDocumentPayloadLocked(ctx context.Context, provider 
 	})
 	if err != nil {
 		if appendedOffset == 0 || provider == nil {
-			return err
+			return nil, err
 		}
 
 		recovered, lastOffset, compactedAt, recoverErr := provider.loadSnapshot(context.Background(), key)
 		if recoverErr != nil {
-			return fmt.Errorf("rebuild room snapshot: %w (recover: %v)", err, recoverErr)
+			return nil, fmt.Errorf("rebuild room snapshot: %w (recover: %v)", err, recoverErr)
 		}
 		r.snapshot = recovered
 		if lastOffset < appendedOffset {
@@ -814,14 +822,14 @@ func (r *providerRoom) applyDocumentPayloadLocked(ctx context.Context, provider 
 		}
 		r.lastOffset = lastOffset
 		r.compactedAt = compactedAt
-		return r.syncSessionsToSnapshotLocked()
+		return updateV1, r.syncSessionsToSnapshotLocked()
 	}
 
 	r.snapshot = nextSnapshot
 	if appendedOffset > 0 {
 		r.lastOffset = appendedOffset
 	}
-	return r.syncSessionsToSnapshotLocked()
+	return updateV1, r.syncSessionsToSnapshotLocked()
 }
 
 func (r *providerRoom) syncSessionsToSnapshotLocked() error {

@@ -2,8 +2,6 @@ package yupdate
 
 import (
 	"context"
-	"errors"
-	"strings"
 	"testing"
 
 	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
@@ -90,7 +88,7 @@ func TestSnapshotFromUpdatesContextAggregatesV1(t *testing.T) {
 func TestSnapshotFromUpdatesContextHandlesEmptyAndV2(t *testing.T) {
 	t.Parallel()
 
-	v2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2 := mustDecodeHex(t, "0000000000000100000000000165010101")
 	empty, err := SnapshotFromUpdatesContext(context.Background(), nil, []byte{})
 	if err != nil {
 		t.Fatalf("SnapshotFromUpdatesContext(empty) unexpected error: %v", err)
@@ -99,12 +97,15 @@ func TestSnapshotFromUpdatesContextHandlesEmptyAndV2(t *testing.T) {
 		t.Fatalf("SnapshotFromUpdatesContext(empty) = %#v, want empty snapshot", empty)
 	}
 
-	_, err = SnapshotFromUpdatesContext(context.Background(), nil, []byte{}, v2)
-	if !errors.Is(err, ErrUnsupportedUpdateFormatV2) {
-		t.Fatalf("SnapshotFromUpdatesContext(v2) error = %v, want %v", err, ErrUnsupportedUpdateFormatV2)
+	got, err := SnapshotFromUpdatesContext(context.Background(), nil, []byte{}, v2)
+	if err != nil {
+		t.Fatalf("SnapshotFromUpdatesContext(v2) unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "update[2]") {
-		t.Fatalf("SnapshotFromUpdatesContext(v2) error = %v, want update index 2", err)
+	if len(got.StateVector) != 0 {
+		t.Fatalf("SnapshotFromUpdatesContext(v2).StateVector = %v, want empty", got.StateVector)
+	}
+	if !got.DeleteSet.Has(ytypes.ID{Client: 101, Clock: 1}) || !got.DeleteSet.Has(ytypes.ID{Client: 101, Clock: 2}) {
+		t.Fatalf("SnapshotFromUpdatesContext(v2).DeleteSet = %#v, want client 101 clocks 1 and 2", got.DeleteSet)
 	}
 }
 

@@ -44,6 +44,14 @@ func DecodePersistedSnapshotV1Context(ctx context.Context, payload []byte) (*Per
 		return NewPersistedSnapshot(), nil
 	}
 
+	format, err := FormatFromUpdate(payload)
+	if err != nil {
+		return nil, err
+	}
+	if format == UpdateFormatV2 {
+		return nil, ErrUnsupportedUpdateFormatV2
+	}
+
 	updateV1, err := ConvertUpdateToV1(payload)
 	if err != nil {
 		return nil, err

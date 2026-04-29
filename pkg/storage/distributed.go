@@ -256,6 +256,18 @@ type PlacementStore interface {
 	LoadPlacement(ctx context.Context, key DocumentKey) (*PlacementRecord, error)
 }
 
+// PlacementListOptions configura a listagem operacional de placements.
+type PlacementListOptions struct {
+	Namespace string
+	Limit     int
+}
+
+// PlacementListStore adiciona listagem de placements para control loops que
+// precisam descobrir documentos conhecidos pelo storage.
+type PlacementListStore interface {
+	ListPlacements(ctx context.Context, opts PlacementListOptions) ([]*PlacementRecord, error)
+}
+
 // LeaseStore define o contrato de ownership temporário por shard.
 type LeaseStore interface {
 	// SaveLease grava, renova ou substitui a lease informada para o shard.

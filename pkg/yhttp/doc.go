@@ -29,7 +29,9 @@
 //     disponível em `pkg/yhttp/prometheus`.
 //
 // O pacote ainda não implementa discovery automático entre nós, replicação
-// completa entre processos ou suporte operacional a Update V2; quando o owner
-// resolvido é remoto, o caller pode injetar um `OnRemoteOwner` apropriado ou
-// manter o fallback retryable com metadados do owner.
+// completa entre processos ou saída preservada em Update V2; updates V2 válidos
+// recebidos pela borda seguem o contrato do provider e são normalizados para V1
+// canônico. Quando o owner resolvido é remoto, o caller pode injetar um
+// `OnRemoteOwner` apropriado ou manter o fallback retryable com metadados do
+// owner.
 package yhttp

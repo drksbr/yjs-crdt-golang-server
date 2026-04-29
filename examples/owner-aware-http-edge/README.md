@@ -102,7 +102,7 @@ O transporte entre nos agora e tipado, mas o escopo continua deliberadamente
 enxuto:
 
 - nao existe discovery dinamico entre nos;
-- nao existe migracao de sessoes durante handoff;
+- ha rebind transparente de sessoes WebSocket no fluxo owner-aware durante handoff; fora desse caminho nao existe migracao generica de sessoes;
 - discovery de owners ainda vem de `PlacementStore + LeaseStore`.
 
 Mesmo assim, o exemplo ja cobre o caminho que faltava na borda:

@@ -249,14 +249,17 @@ func TestValidateUpdateFormatWithReasonHandlesUnknownPayload(t *testing.T) {
 	}
 }
 
-func TestDecodeUpdateReturnsUnsupportedForDetectedV2(t *testing.T) {
+func TestDecodeUpdateDispatchesDetectedV2(t *testing.T) {
 	t.Parallel()
 
-	update := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	update := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
 
-	_, err := DecodeUpdate(update)
-	if !errors.Is(err, ErrUnsupportedUpdateFormatV2) {
-		t.Fatalf("DecodeUpdate() error = %v, want %v", err, ErrUnsupportedUpdateFormatV2)
+	decoded, err := DecodeUpdate(update)
+	if err != nil {
+		t.Fatalf("DecodeUpdate() unexpected error: %v", err)
+	}
+	if len(decoded.Structs) != 1 {
+		t.Fatalf("DecodeUpdate() structs len = %d, want 1", len(decoded.Structs))
 	}
 }
 

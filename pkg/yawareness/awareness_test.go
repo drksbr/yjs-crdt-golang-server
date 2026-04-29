@@ -189,6 +189,39 @@ func TestPublicAwarenessStateManagerLocalProtectionContract(t *testing.T) {
 	}
 }
 
+func TestPublicAwarenessStateManagerChangeContract(t *testing.T) {
+	t.Parallel()
+
+	manager := NewStateManager(11)
+	start := time.Unix(1700001010, 0)
+
+	change, err := manager.SetLocalStateWithChangeAt(json.RawMessage(`{"cursor":1}`), start)
+	if err != nil {
+		t.Fatalf("SetLocalStateWithChangeAt() unexpected error: %v", err)
+	}
+	if len(change.Added) != 1 || change.Added[0] != 11 || change.Empty() {
+		t.Fatalf("local change = %#v, want added client 11", change)
+	}
+
+	change, err = manager.SetLocalStateFieldWithChangeAt("name", json.RawMessage(`"alice"`), start.Add(time.Second))
+	if err != nil {
+		t.Fatalf("SetLocalStateFieldWithChangeAt() unexpected error: %v", err)
+	}
+	if len(change.Updated) != 1 || change.Updated[0] != 11 {
+		t.Fatalf("field change = %#v, want updated client 11", change)
+	}
+
+	remoteChange := manager.ApplyWithChangeAt(&Update{
+		Clients: []ClientState{
+			{ClientID: 22, Clock: 1, State: json.RawMessage(`{"name":"remote"}`)},
+			{ClientID: 22, Clock: 2, State: nil},
+		},
+	}, start.Add(2*time.Second))
+	if len(remoteChange.Removed) != 1 || remoteChange.Removed[0] != 22 {
+		t.Fatalf("remoteChange = %#v, want removed client 22", remoteChange)
+	}
+}
+
 func TestPublicAwarenessErrors(t *testing.T) {
 	t.Parallel()
 

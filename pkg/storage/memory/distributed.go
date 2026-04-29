@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ var (
 	_ storage.UpdateLogStore              = (*Store)(nil)
 	_ storage.AuthoritativeUpdateLogStore = (*Store)(nil)
 	_ storage.PlacementStore              = (*Store)(nil)
+	_ storage.PlacementListStore          = (*Store)(nil)
 	_ storage.LeaseStore                  = (*Store)(nil)
 	_ storage.LeaseHandoffStore           = (*Store)(nil)
 	_ storage.DistributedStore            = (*Store)(nil)
@@ -277,6 +279,37 @@ func (s *Store) LoadPlacement(ctx context.Context, key storage.DocumentKey) (*st
 		return nil, storage.ErrPlacementNotFound
 	}
 	return record.Clone(), nil
+}
+
+// ListPlacements lista placements conhecidos de forma determinística.
+func (s *Store) ListPlacements(ctx context.Context, opts storage.PlacementListOptions) ([]*storage.PlacementRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s == nil {
+		return nil, errNilStore
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	records := make([]*storage.PlacementRecord, 0, len(s.placements))
+	for _, record := range s.placements {
+		if opts.Namespace != "" && record.Key.Namespace != opts.Namespace {
+			continue
+		}
+		records = append(records, record.Clone())
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Key.Namespace != records[j].Key.Namespace {
+			return records[i].Key.Namespace < records[j].Key.Namespace
+		}
+		return records[i].Key.DocumentID < records[j].Key.DocumentID
+	})
+	if opts.Limit > 0 && len(records) > opts.Limit {
+		records = records[:opts.Limit]
+	}
+	return records, nil
 }
 
 // SaveLease grava ou renova a lease atual de ownership para o shard.

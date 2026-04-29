@@ -11,6 +11,9 @@ type Update = internal.Update
 // ClientMeta mantém o clock observado e o instante da última atualização.
 type ClientMeta = internal.ClientMeta
 
+// Change descreve o delta produzido por uma operação de awareness.
+type Change = internal.Change
+
 // StateManager mantém o estado mais recente de awareness por cliente.
 type StateManager = internal.StateManager
 

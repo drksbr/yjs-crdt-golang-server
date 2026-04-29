@@ -88,6 +88,47 @@ func TestSessionRuntimeContracts(t *testing.T) {
 		}
 	})
 
+	t.Run("sync update and step2 normalize v2 payloads to canonical v1", func(t *testing.T) {
+		session := NewSession(22)
+
+		v2Update := mustDecodeProtocolHex(t, "000002a50100000104060374686901020101000001010000")
+		v1Update, err := yjsbridge.ConvertUpdateToV1(v2Update)
+		if err != nil {
+			t.Fatalf("ConvertUpdateToV1(v2) unexpected error: %v", err)
+		}
+		v2Step2 := mustDecodeProtocolHex(t, "0000028a0300000104060374686901020101000001010000")
+		v1Step2, err := yjsbridge.ConvertUpdateToV1(v2Step2)
+		if err != nil {
+			t.Fatalf("ConvertUpdateToV1(v2Step2) unexpected error: %v", err)
+		}
+
+		responses, err := session.HandleProtocolMessages(
+			mustDecodeProtocolMessage(t, EncodeProtocolSyncUpdate(v2Update)),
+			mustDecodeProtocolMessage(t, EncodeProtocolSyncStep2(v2Step2)),
+		)
+		if err != nil {
+			t.Fatalf("HandleProtocolMessages(v2) unexpected error: %v", err)
+		}
+		if len(responses) != 0 {
+			t.Fatalf("len(responses) = %d, want 0", len(responses))
+		}
+
+		want, err := yjsbridge.MergeUpdates(v1Update, v1Step2)
+		if err != nil {
+			t.Fatalf("MergeUpdates(converted v1) unexpected error: %v", err)
+		}
+		if got := session.UpdateV1(); !bytes.Equal(got, want) {
+			t.Fatalf("session.UpdateV1() = %x, want %x", got, want)
+		}
+		snapshot, err := session.PersistedSnapshot()
+		if err != nil {
+			t.Fatalf("PersistedSnapshot() unexpected error: %v", err)
+		}
+		if !bytes.Equal(snapshot.UpdateV1, want) {
+			t.Fatalf("snapshot.UpdateV1 = %x, want %x", snapshot.UpdateV1, want)
+		}
+	})
+
 	t.Run("query-awareness returns the current awareness snapshot", func(t *testing.T) {
 		session := NewSession(3)
 

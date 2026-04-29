@@ -8,7 +8,7 @@ groups:
           severity: warning
         annotations:
           summary: "Yjs CRDT Golang Server owner perdeu autoridade"
-          description: "O provider local reportou perda de autoridade em apply, persist, open ou revalidate."
+          description: "O provider local reportou perda de autoridade em open, append, persist_save, persist_trim ou revalidate."
 
       - alert: YjsBridgeYHTTPErrors
         expr: sum by (node_id, deployment_role, stage) (rate(yjsbridge_yhttp_errors_total[5m])) > 1
@@ -20,7 +20,7 @@ groups:
           description: "A borda WebSocket/owner-aware esta registrando mais de 1 erro por segundo em 5 minutos."
 
       - alert: YjsBridgeOwnerLookupErrors
-        expr: sum by (node_id, deployment_role) (rate(yjsbridge_yhttp_owner_lookup_duration_seconds_count{result="error"}[5m])) > 0
+        expr: sum by (node_id, deployment_role, result) (rate(yjsbridge_yhttp_owner_lookup_duration_seconds_count{result!~"local|remote"}[5m])) > 0
         for: 3m
         labels:
           severity: warning

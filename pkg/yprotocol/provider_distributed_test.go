@@ -143,6 +143,46 @@ func TestProviderSyncUpdateAppendsLogAndPersistTrimsTail(t *testing.T) {
 	}
 }
 
+func TestProviderSyncUpdateAppendsCanonicalV1ForV2Input(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	key := storage.DocumentKey{
+		Namespace:  "tests",
+		DocumentID: "provider-append-v2-as-v1",
+	}
+	store := memory.New()
+	provider := NewProvider(ProviderConfig{Store: store})
+
+	conn, err := provider.Open(ctx, key, "conn-a", 812)
+	if err != nil {
+		t.Fatalf("provider.Open() unexpected error: %v", err)
+	}
+
+	v2Update := mustDecodeProtocolHex(t, "000002a50100000104060374686901020101000001010000")
+	v1Update, err := yjsbridge.ConvertUpdateToV1(v2Update)
+	if err != nil {
+		t.Fatalf("ConvertUpdateToV1(v2) unexpected error: %v", err)
+	}
+	if _, err := conn.HandleEncodedMessages(EncodeProtocolSyncUpdate(v2Update)); err != nil {
+		t.Fatalf("conn.HandleEncodedMessages(v2 sync-update) unexpected error: %v", err)
+	}
+
+	records, err := store.ListUpdates(ctx, key, 0, 0)
+	if err != nil {
+		t.Fatalf("store.ListUpdates() unexpected error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("len(records) = %d, want 1", len(records))
+	}
+	if !bytes.Equal(records[0].UpdateV1, v1Update) {
+		t.Fatalf("records[0].UpdateV1 = %x, want canonical V1 %x", records[0].UpdateV1, v1Update)
+	}
+	if bytes.Equal(records[0].UpdateV1, v2Update) {
+		t.Fatalf("records[0].UpdateV1 preserved V2 bytes: %x", records[0].UpdateV1)
+	}
+}
+
 func TestProviderPersistCompactsRecoveredSnapshotPlusTail(t *testing.T) {
 	t.Parallel()
 

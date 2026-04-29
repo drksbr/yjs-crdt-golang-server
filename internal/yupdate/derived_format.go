@@ -3,7 +3,6 @@ package yupdate
 import (
 	"context"
 	"errors"
-	"fmt"
 )
 
 // detectAggregateUpdateFormatSkippingEmpty pré-valida o formato de uma lista de
@@ -31,21 +30,4 @@ func hasNonEmptyUpdate(updates [][]byte) bool {
 		}
 	}
 	return false
-}
-
-func firstNonEmptyUpdateIndex(updates [][]byte) (int, bool) {
-	for i, update := range updates {
-		if len(update) != 0 {
-			return i, true
-		}
-	}
-	return 0, false
-}
-
-func wrapUnsupportedV2AtFirstNonEmpty(updates [][]byte) error {
-	index, ok := firstNonEmptyUpdateIndex(updates)
-	if !ok {
-		return ErrUnsupportedUpdateFormatV2
-	}
-	return fmt.Errorf("update[%d]: %w", index, ErrUnsupportedUpdateFormatV2)
 }

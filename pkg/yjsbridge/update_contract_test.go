@@ -3,6 +3,7 @@ package yjsbridge
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"testing"
 	"unicode/utf16"
@@ -13,7 +14,7 @@ import (
 )
 
 var (
-	v2UpdatePayload = []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2UpdatePayload = []byte{0x00, 0x00, 0x02, 0xa5, 0x01, 0x00, 0x00, 0x01, 0x04, 0x06, 0x03, 0x74, 0x68, 0x69, 0x01, 0x02, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00}
 )
 
 func TestPublicUpdateAPIFormatsAndDispatch(t *testing.T) {
@@ -291,49 +292,146 @@ func TestPublicUpdateAPIV2LimitsAreExplicitlyEnforced(t *testing.T) {
 		t.Fatalf("filter.AddInsert() unexpected error: %v", err)
 	}
 
-	t.Run("single_update_apis_reject_v2", func(t *testing.T) {
+	t.Run("single_update_mutating_apis_use_v1_conversion", func(t *testing.T) {
 		t.Parallel()
 
-		tests := []struct {
-			name string
-			call func() error
-		}{
-			{
-				name: "StateVectorFromUpdate",
-				call: func() error { _, err := StateVectorFromUpdate(v2UpdatePayload); return err },
-			},
-			{
-				name: "EncodeStateVectorFromUpdate",
-				call: func() error { _, err := EncodeStateVectorFromUpdate(v2UpdatePayload); return err },
-			},
-			{
-				name: "CreateContentIDsFromUpdate",
-				call: func() error { _, err := CreateContentIDsFromUpdate(v2UpdatePayload); return err },
-			},
-			{
-				name: "IntersectUpdateWithContentIDs",
-				call: func() error { _, err := IntersectUpdateWithContentIDs(v2UpdatePayload, filter); return err },
-			},
-			{
-				name: "DiffUpdate",
-				call: func() error { _, err := DiffUpdate(v2UpdatePayload, nil); return err },
-			},
-			{
-				name: "MergeUpdates",
-				call: func() error { _, err := MergeUpdates(v2UpdatePayload); return err },
-			},
+		converted, err := ConvertUpdateToV1(v2UpdatePayload)
+		if err != nil {
+			t.Fatalf("ConvertUpdateToV1(v2) unexpected error: %v", err)
 		}
 
-		for _, tt := range tests {
-			tt := tt
-			t.Run(tt.name, func(t *testing.T) {
-				t.Parallel()
+		merged, err := MergeUpdates(v2UpdatePayload)
+		if err != nil {
+			t.Fatalf("MergeUpdates(v2) unexpected error: %v", err)
+		}
+		if !bytes.Equal(merged, converted) {
+			t.Fatalf("MergeUpdates(v2) = %x, want %x", merged, converted)
+		}
 
-				err := tt.call()
-				if !errors.Is(err, ErrUnsupportedUpdateFormatV2) {
-					t.Fatalf("%s error = %v, want %v", tt.name, err, ErrUnsupportedUpdateFormatV2)
-				}
-			})
+		emptyStateVector, err := EncodeStateVectorFromUpdate(NewPersistedSnapshot().UpdateV1)
+		if err != nil {
+			t.Fatalf("EncodeStateVectorFromUpdate(empty) unexpected error: %v", err)
+		}
+		diff, err := DiffUpdate(v2UpdatePayload, emptyStateVector)
+		if err != nil {
+			t.Fatalf("DiffUpdate(v2) unexpected error: %v", err)
+		}
+		wantDiff, err := DiffUpdate(converted, emptyStateVector)
+		if err != nil {
+			t.Fatalf("DiffUpdate(v1) unexpected error: %v", err)
+		}
+		if !bytes.Equal(diff, wantDiff) {
+			t.Fatalf("DiffUpdate(v2) = %x, want %x", diff, wantDiff)
+		}
+
+		intersected, err := IntersectUpdateWithContentIDs(v2UpdatePayload, filter)
+		if err != nil {
+			t.Fatalf("IntersectUpdateWithContentIDs(v2) unexpected error: %v", err)
+		}
+		wantIntersected, err := IntersectUpdateWithContentIDs(converted, filter)
+		if err != nil {
+			t.Fatalf("IntersectUpdateWithContentIDs(v1) unexpected error: %v", err)
+		}
+		if !bytes.Equal(intersected, wantIntersected) {
+			t.Fatalf("IntersectUpdateWithContentIDs(v2) = %x, want %x", intersected, wantIntersected)
+		}
+	})
+
+	t.Run("single_update_v2_derived_apis_use_v1_conversion", func(t *testing.T) {
+		t.Parallel()
+
+		converted, err := ConvertUpdateToV1(v2UpdatePayload)
+		if err != nil {
+			t.Fatalf("ConvertUpdateToV1(v2) unexpected error: %v", err)
+		}
+
+		gotStateVector, err := StateVectorFromUpdate(v2UpdatePayload)
+		if err != nil {
+			t.Fatalf("StateVectorFromUpdate(v2) unexpected error: %v", err)
+		}
+		wantStateVector, err := StateVectorFromUpdate(converted)
+		if err != nil {
+			t.Fatalf("StateVectorFromUpdate(v1) unexpected error: %v", err)
+		}
+		if len(gotStateVector) != len(wantStateVector) || gotStateVector[101] != wantStateVector[101] {
+			t.Fatalf("StateVectorFromUpdate(v2) = %#v, want %#v", gotStateVector, wantStateVector)
+		}
+
+		gotEncoded, err := EncodeStateVectorFromUpdate(v2UpdatePayload)
+		if err != nil {
+			t.Fatalf("EncodeStateVectorFromUpdate(v2) unexpected error: %v", err)
+		}
+		wantEncoded, err := EncodeStateVectorFromUpdate(converted)
+		if err != nil {
+			t.Fatalf("EncodeStateVectorFromUpdate(v1) unexpected error: %v", err)
+		}
+		if !bytes.Equal(gotEncoded, wantEncoded) {
+			t.Fatalf("EncodeStateVectorFromUpdate(v2) = %x, want %x", gotEncoded, wantEncoded)
+		}
+
+		gotContentIDs, err := CreateContentIDsFromUpdate(v2UpdatePayload)
+		if err != nil {
+			t.Fatalf("CreateContentIDsFromUpdate(v2) unexpected error: %v", err)
+		}
+		if gotContentIDs == nil || gotContentIDs.IsEmpty() {
+			t.Fatalf("CreateContentIDsFromUpdate(v2) = %#v, want non-empty content ids", gotContentIDs)
+		}
+	})
+
+	t.Run("multi_update_v2_apis_use_canonical_v1", func(t *testing.T) {
+		t.Parallel()
+
+		firstV2 := mustDecodeHexPayload(t, "000002a50100000104060374686901020101000001010000")
+		secondV2 := mustDecodeHexPayload(t, "0000048a03a50101020001840301210100000001010000")
+		mergedV2 := mustDecodeHexPayload(t, "0000058a03e501000102000384000408042174686941000201010000020100010000")
+		mergedV1 := mustDecodeHexPayload(t, "0201ca010084650101210165000401017402686900")
+
+		merged, err := MergeUpdates(firstV2, secondV2)
+		if err != nil {
+			t.Fatalf("MergeUpdates(v2...) unexpected error: %v", err)
+		}
+		if !bytes.Equal(merged, mergedV1) {
+			t.Fatalf("MergeUpdates(v2...) = %x, want %x", merged, mergedV1)
+		}
+
+		converted, err := ConvertUpdatesToV1(firstV2, secondV2)
+		if err != nil {
+			t.Fatalf("ConvertUpdatesToV1(v2...) unexpected error: %v", err)
+		}
+		if !bytes.Equal(converted, mergedV1) {
+			t.Fatalf("ConvertUpdatesToV1(v2...) = %x, want %x", converted, mergedV1)
+		}
+
+		stateVector, err := EncodeStateVectorFromUpdate(convertedTextInsertV1ForTest(t))
+		if err != nil {
+			t.Fatalf("EncodeStateVectorFromUpdate(first v1) unexpected error: %v", err)
+		}
+		diff, err := DiffUpdate(mergedV2, stateVector)
+		if err != nil {
+			t.Fatalf("DiffUpdate(mergedV2) unexpected error: %v", err)
+		}
+		wantDiff, err := DiffUpdate(mergedV1, stateVector)
+		if err != nil {
+			t.Fatalf("DiffUpdate(mergedV1) unexpected error: %v", err)
+		}
+		if !bytes.Equal(diff, wantDiff) {
+			t.Fatalf("DiffUpdate(mergedV2) = %x, want %x", diff, wantDiff)
+		}
+
+		contentIDs, err := CreateContentIDsFromUpdate(mergedV1)
+		if err != nil {
+			t.Fatalf("CreateContentIDsFromUpdate(mergedV1) unexpected error: %v", err)
+		}
+		intersected, err := IntersectUpdateWithContentIDs(mergedV2, contentIDs)
+		if err != nil {
+			t.Fatalf("IntersectUpdateWithContentIDs(mergedV2) unexpected error: %v", err)
+		}
+		wantIntersected, err := IntersectUpdateWithContentIDs(mergedV1, contentIDs)
+		if err != nil {
+			t.Fatalf("IntersectUpdateWithContentIDs(mergedV1) unexpected error: %v", err)
+		}
+		if !bytes.Equal(intersected, wantIntersected) {
+			t.Fatalf("IntersectUpdateWithContentIDs(mergedV2) = %x, want %x", intersected, wantIntersected)
 		}
 	})
 
@@ -345,11 +443,30 @@ func TestPublicUpdateAPIV2LimitsAreExplicitlyEnforced(t *testing.T) {
 			t.Fatalf("StateVectorFromUpdates(v1, v2) error = %v, want %v", err, ErrMismatchedUpdateFormats)
 		}
 
-		_, err = ContentIDsFromUpdates(nil, v2UpdatePayload)
-		if !errors.Is(err, ErrUnsupportedUpdateFormatV2) {
-			t.Fatalf("ContentIDsFromUpdates(v2-only) error = %v, want %v", err, ErrUnsupportedUpdateFormatV2)
+		contentIDs, err := ContentIDsFromUpdates(nil, v2UpdatePayload)
+		if err != nil {
+			t.Fatalf("ContentIDsFromUpdates(v2-only) unexpected error: %v", err)
+		}
+		if contentIDs == nil || contentIDs.IsEmpty() {
+			t.Fatalf("ContentIDsFromUpdates(v2-only) = %#v, want non-empty content ids", contentIDs)
 		}
 	})
+}
+
+func convertedTextInsertV1ForTest(t *testing.T) []byte {
+	t.Helper()
+
+	return mustDecodeHexPayload(t, "010165000401017402686900")
+}
+
+func mustDecodeHexPayload(t *testing.T, value string) []byte {
+	t.Helper()
+
+	data, err := hex.DecodeString(value)
+	if err != nil {
+		t.Fatalf("hex.DecodeString(%q) unexpected error: %v", value, err)
+	}
+	return data
 }
 
 func mustBuildStringUpdate(t *testing.T, client, clock uint32, value string) []byte {

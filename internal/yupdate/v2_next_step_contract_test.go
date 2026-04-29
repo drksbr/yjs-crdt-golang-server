@@ -1,12 +1,12 @@
 package yupdate
 
 import (
+	"bytes"
 	"errors"
-	"strings"
 	"testing"
 )
 
-func TestV2NextStepMergeUpdatesRejectsDetectedV2(t *testing.T) {
+func TestV2NextStepMergeUpdatesConvertsDetectedV2(t *testing.T) {
 	t.Parallel()
 
 	v1 := buildUpdate(
@@ -18,47 +18,30 @@ func TestV2NextStepMergeUpdatesRejectsDetectedV2(t *testing.T) {
 			},
 		},
 	)
-	v2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2 := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
 
-	tests := []struct {
-		name      string
-		updates   [][]byte
-		wantErr   error
-		wantIndex string
-	}{
-		{
-			name:      "single_v2_payload_is_rejected",
-			updates:   [][]byte{v2},
-			wantErr:   ErrUnsupportedUpdateFormatV2,
-			wantIndex: "update[0]",
-		},
-		{
-			name:    "mixed_v1_and_v2_still_rejects_as_mismatch",
-			updates: [][]byte{v1, v2},
-			wantErr: ErrMismatchedUpdateFormats,
-		},
+	got, err := MergeUpdates(v2)
+	if err != nil {
+		t.Fatalf("MergeUpdates(v2) unexpected error: %v", err)
+	}
+	want, err := ConvertUpdateToV1(v2)
+	if err != nil {
+		t.Fatalf("ConvertUpdateToV1(v2) unexpected error: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("MergeUpdates(v2) = %x, want %x", got, want)
 	}
 
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			_, err := MergeUpdates(tt.updates...)
-			if !errors.Is(err, tt.wantErr) {
-				t.Fatalf("MergeUpdates() error = %v, want %v", err, tt.wantErr)
-			}
-			if tt.wantIndex != "" && !strings.Contains(err.Error(), tt.wantIndex) {
-				t.Fatalf("MergeUpdates() error = %v, want %s", err, tt.wantIndex)
-			}
-		})
+	_, err = MergeUpdates(v1, v2)
+	if !errors.Is(err, ErrMismatchedUpdateFormats) {
+		t.Fatalf("MergeUpdates(v1, v2) error = %v, want %v", err, ErrMismatchedUpdateFormats)
 	}
 }
 
-func TestV2NextStepAggregateAPIsRejectDetectedV2AfterEmptyPrefixes(t *testing.T) {
+func TestV2NextStepAggregateAPIsConvertDetectedV2AfterEmptyPrefixes(t *testing.T) {
 	t.Parallel()
 
-	v2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2 := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
 
 	type contractFn func(...[]byte) error
 	apiCalls := []struct {
@@ -94,11 +77,8 @@ func TestV2NextStepAggregateAPIsRejectDetectedV2AfterEmptyPrefixes(t *testing.T)
 			t.Parallel()
 
 			err := api.call(nil, []byte{}, v2)
-			if !errors.Is(err, ErrUnsupportedUpdateFormatV2) {
-				t.Fatalf("%s() error = %v, want %v", api.name, err, ErrUnsupportedUpdateFormatV2)
-			}
-			if !strings.Contains(err.Error(), "update[2]") {
-				t.Fatalf("%s() error = %v, want update index 2", api.name, err)
+			if err != nil {
+				t.Fatalf("%s() unexpected error: %v", api.name, err)
 			}
 		})
 	}

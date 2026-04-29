@@ -178,6 +178,69 @@ func TestHTTPServerRevalidatesAuthorityAndClosesIdleConnection(t *testing.T) {
 	})
 }
 
+func TestHTTPServerRevalidatesAuthorityFromRebalanceCallback(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	key := testDocumentKey("doc-authority-rebalance-callback")
+	store, resolver, provider := newAuthoritativeHTTPProvider(t, "node-a")
+	seedAuthoritativeHTTPDocument(t, ctx, store, resolver, key, "node-a", 1, "lease-node-a")
+
+	handler, err := NewServer(ServerConfig{
+		Provider:       provider,
+		ResolveRequest: resolveTestRequest,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() unexpected error: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/ws", handler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	conn := dialWS(t, srv.URL+"/ws?doc=doc-authority-rebalance-callback&client=612&conn=idle")
+	writeBinary(t, conn, yprotocol.EncodeProtocolSyncStep1([]byte{0x00}))
+	_ = readBinary(t, conn)
+
+	revalidation, err := handler.RevalidateDocumentAuthority(ctx, key)
+	if err != nil {
+		t.Fatalf("RevalidateDocumentAuthority(initial) unexpected error: %v", err)
+	}
+	if revalidation.Checked != 1 || revalidation.AuthorityLost != 0 {
+		t.Fatalf("RevalidateDocumentAuthority(initial) = %#v, want one healthy connection", revalidation)
+	}
+
+	handoffAuthoritativeHTTPDocument(t, ctx, store, resolver, key, "lease-node-a", "node-b", 2, "lease-node-b")
+	callback, err := NewRebalanceAuthorityRevalidationCallback(RebalanceAuthorityRevalidationConfig{
+		Server:  handler,
+		Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewRebalanceAuthorityRevalidationCallback() unexpected error: %v", err)
+	}
+	callback(ycluster.RebalanceControllerRunResult{
+		Results: []ycluster.RebalancePlanExecutionResult{
+			{
+				Result: &ycluster.RebalanceDocumentResult{
+					DocumentKey: key,
+					Changed:     true,
+					From:        "node-a",
+					To:          "node-b",
+				},
+			},
+		},
+	}, nil)
+
+	closeErr := readCloseError(t, conn)
+	if closeErr.Code != websocket.StatusTryAgainLater {
+		t.Fatalf("closeErr.Code = %d, want %d", closeErr.Code, websocket.StatusTryAgainLater)
+	}
+	if closeErr.Reason != authorityLostCloseReason {
+		t.Fatalf("closeErr.Reason = %q, want %q", closeErr.Reason, authorityLostCloseReason)
+	}
+}
+
 func TestHTTPServerOwnershipRuntimeClaimsAndReleasesOnConnectionClose(t *testing.T) {
 	t.Parallel()
 

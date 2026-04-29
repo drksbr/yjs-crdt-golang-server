@@ -43,7 +43,8 @@ func TestConvertUpdatesToV1(t *testing.T) {
 		t.Fatalf("MergeUpdatesV1() unexpected error: %v", err)
 	}
 
-	v2Update := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2Update := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
+	v2UpdateAsV1 := mustDecodeHex(t, "010165000401017402686900")
 	malformedUpdate := []byte{0x80}
 
 	tests := []struct {
@@ -72,10 +73,9 @@ func TestConvertUpdatesToV1(t *testing.T) {
 			want:    encodeEmptyUpdateV1(),
 		},
 		{
-			name:      "v2_after_empty_prefix_is_rejected_with_index",
-			updates:   [][]byte{nil, []byte{}, v2Update},
-			wantErr:   ErrUnsupportedUpdateFormatV2,
-			wantIndex: "update[2]",
+			name:    "v2_after_empty_prefix_is_converted",
+			updates: [][]byte{nil, []byte{}, v2Update},
+			want:    v2UpdateAsV1,
 		},
 		{
 			name:      "malformed_payload_is_rejected_with_index",
@@ -143,7 +143,8 @@ func TestConvertUpdatesToV1Context(t *testing.T) {
 		t.Fatalf("MergeUpdatesV1() unexpected error: %v", err)
 	}
 
-	v2Update := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2Update := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
+	v2UpdateAsV1 := mustDecodeHex(t, "010165000401017402686900")
 	malformedUpdate := []byte{0x80}
 
 	tests := []struct {
@@ -176,11 +177,10 @@ func TestConvertUpdatesToV1Context(t *testing.T) {
 			want:    encodeEmptyUpdateV1(),
 		},
 		{
-			name:      "v2_after_empty_prefix_is_rejected_with_index",
-			ctx:       context.Background(),
-			updates:   [][]byte{nil, []byte{}, v2Update},
-			wantErr:   ErrUnsupportedUpdateFormatV2,
-			wantIndex: "update[2]",
+			name:    "v2_after_empty_prefix_is_converted",
+			ctx:     context.Background(),
+			updates: [][]byte{nil, []byte{}, v2Update},
+			want:    v2UpdateAsV1,
 		},
 		{
 			name:      "context_is_respected",

@@ -82,7 +82,14 @@ func (d *decoderV1) readParentInfo() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return value == 1, nil
+	switch value {
+	case 0:
+		return false, nil
+	case 1:
+		return true, nil
+	default:
+		return false, wrapError("ReadParentInfo.value", d.offset(), fmt.Errorf("parent info invalido: %d", value))
+	}
 }
 
 func (d *decoderV1) skipJSON(op string) error {

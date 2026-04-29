@@ -1,0 +1,116 @@
+groups:
+  - name: yjs-crdt-golang-server-slo-recording
+    interval: 30s
+    rules:
+      - record: yjsbridge:slo_yhttp_error_ratio_5m
+        expr: |
+          sum by (env, region, tenant, deployment_role) (rate(yjsbridge_yhttp_errors_total[5m]))
+          /
+          clamp_min(sum by (env, region, tenant, deployment_role) (rate(yjsbridge_yhttp_frames_read_total[5m])), 1)
+
+      - record: yjsbridge:slo_yhttp_handle_p95_seconds_5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (env, region, tenant, deployment_role, le) (rate(yjsbridge_yhttp_handle_duration_seconds_bucket[5m]))
+          )
+
+      - record: yjsbridge:slo_owner_lookup_p95_seconds_5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (env, region, tenant, deployment_role, le) (rate(yjsbridge_yhttp_owner_lookup_duration_seconds_bucket[5m]))
+          )
+
+      - record: yjsbridge:slo_remote_owner_handshake_p95_seconds_5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (env, region, tenant, deployment_role, role, le) (rate(yjsbridge_yhttp_remote_owner_handshake_duration_seconds_bucket[5m]))
+          )
+
+      - record: yjsbridge:slo_authority_loss_rate_5m
+        expr: |
+          sum by (env, region, tenant, deployment_role, stage) (rate(yjsbridge_yprotocol_authority_losses_total[5m]))
+
+      - record: yjsbridge:slo_lease_error_ratio_5m
+        expr: |
+          sum by (env, region, tenant, deployment_role, operation) (rate(yjsbridge_ycluster_lease_operations_total{result!="ok"}[5m]))
+          /
+          clamp_min(sum by (env, region, tenant, deployment_role, operation) (rate(yjsbridge_ycluster_lease_operations_total[5m])), 1)
+
+      - record: yjsbridge:slo_recovery_tail_lag_max
+        expr: |
+          max by (env, region, tenant, deployment_role) (yjsbridge_storage_recovery_tail_lag_updates)
+
+  - name: yjs-crdt-golang-server-slo-alerts
+    rules:
+      - alert: YjsBridgeSLOYHTTPAvailabilityBurn
+        expr: yjsbridge:slo_yhttp_error_ratio_5m > 0.01
+        for: 10m
+        labels:
+          severity: critical
+          slo: yhttp_availability
+        annotations:
+          summary: "SLO de disponibilidade yhttp em burn alto"
+          description: "A taxa de erro da borda HTTP/WebSocket excedeu 1% por 10 minutos para env/region/tenant/deployment_role."
+
+      - alert: YjsBridgeSLOYHTTPHandleLatencyP95
+        expr: yjsbridge:slo_yhttp_handle_p95_seconds_5m > 0.25
+        for: 10m
+        labels:
+          severity: warning
+          slo: yhttp_latency
+        annotations:
+          summary: "Latencia p95 alta no processamento yhttp"
+          description: "O p95 de handle_duration passou de 250ms por 10 minutos."
+
+      - alert: YjsBridgeSLOOwnerLookupLatencyP95
+        expr: yjsbridge:slo_owner_lookup_p95_seconds_5m > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          slo: owner_lookup_latency
+        annotations:
+          summary: "Latencia p95 alta na resolucao de owner"
+          description: "O p95 de owner lookup passou de 100ms por 10 minutos."
+
+      - alert: YjsBridgeSLORemoteOwnerHandshakeLatencyP95
+        expr: yjsbridge:slo_remote_owner_handshake_p95_seconds_5m > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          slo: remote_owner_handshake_latency
+        annotations:
+          summary: "Latencia p95 alta no handshake edge/owner"
+          description: "O p95 de handshake remoto passou de 500ms por 10 minutos."
+
+      - alert: YjsBridgeSLOAuthorityLoss
+        expr: sum by (env, region, tenant, deployment_role) (yjsbridge:slo_authority_loss_rate_5m) > 0
+        for: 2m
+        labels:
+          severity: critical
+          slo: single_owner_authority
+        annotations:
+          summary: "Perda de autoridade detectada"
+          description: "O owner local reportou perda de autoridade; investigar fencing, lease e handoff."
+
+      - alert: YjsBridgeSLOLeaseErrorBurn
+        expr: yjsbridge:slo_lease_error_ratio_5m > 0.005
+        for: 10m
+        labels:
+          severity: critical
+          slo: lease_control_plane
+        annotations:
+          summary: "Taxa de erro alta no control plane de lease"
+          description: "Mais de 0.5% das operacoes de lease falharam por 10 minutos."
+
+      - alert: YjsBridgeSLORecoveryTailLagHigh
+        expr: yjsbridge:slo_recovery_tail_lag_max > 1000
+        for: 15m
+        labels:
+          severity: warning
+          slo: recovery_lag
+        annotations:
+          summary: "Lag alto entre snapshot e update log"
+          description: "O recovery observou mais de 1000 updates pendentes no tail por 15 minutos."

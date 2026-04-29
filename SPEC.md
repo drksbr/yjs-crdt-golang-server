@@ -149,12 +149,12 @@ Capacidade de:
 - preparar backend para persistência e compaction
 
 ### Corte funcional V1
-- `ConvertUpdateToV1` e `ConvertUpdatesToV1` normalizam payload para V1 canônico com validação agregada.
+- `ConvertUpdateToV1` e `ConvertUpdatesToV1` normalizam payload para V1 canônico com validação agregada; V2 válido entra pelo reader interno fixture-backed e sai como V1 canônico.
 - `PersistedSnapshotFromUpdate`, `PersistedSnapshotFromUpdates` e `PersistedSnapshotFromUpdatesContext` materializam um snapshot persistível em memória, com:
   - `UpdateV1` canônico consolidado
   - `StateVector` e `DeleteSet` derivados em `Snapshot`
-- `SnapshotFromUpdate`/`SnapshotFromUpdates` permanece cobrindo extração de estado e delete set para V1; V2 ainda não possui materialização.
-- `EncodePersistedSnapshotV1`, `DecodePersistedSnapshotV1` e `DecodePersistedSnapshotV1Context` fecham o ciclo mínimo de persistência/restore em V1; V2 ainda não possui materialização nem restore.
+- `SnapshotFromUpdate`/`SnapshotFromUpdates` cobrem extração de estado e delete set para V1 e aceitam V2 válido via conversão canônica para V1.
+- `EncodePersistedSnapshotV1`, `DecodePersistedSnapshotV1` e `DecodePersistedSnapshotV1Context` fecham o ciclo mínimo de persistência/restore em V1; `DecodePersistedSnapshotV1` continua rejeitando restore V2, enquanto os construtores de snapshot persistido aceitam V2 válido após conversão para V1.
 
 ---
 
@@ -170,10 +170,10 @@ Status: **em execução (promoção da API pública de update em `pkg/yjsbridge`
 - activity
 - changeset
 - recursos auxiliares para auditoria e histórico
-- exposição estável de `merge/diff/intersect`/`state vector`/`content ids` em `pkg/yjsbridge` em V1 (sem suporte V2)
-- exposição estável da superfície de protocolo sync em `pkg/yprotocol` para `SyncStep1`, `SyncStep2` e envelope de mensagens websocket, em V1 (sem provider completo e sem suporte V2)
-- runtime in-process mínimo em `pkg/yprotocol` para composição local de sessão/protocolo com `Session`, `HandleProtocolMessage`, `HandleEncodedMessages`, `HandleEncodedMessagesContext` no provider e encode público de `ProtocolMessage`, ainda sem provider completo e sem suporte V2
-- camada mínima de provider em `pkg/yprotocol` com `Provider`, `Open`, `Connection`, `DispatchResult`, `Persist` e `Close`, ainda sem provider completo, sem transporte distribuído e sem suporte V2
+- exposição estável de `merge/diff/intersect`, `state vector` e `content ids` com V2 válido via conversão canônica para V1 em `pkg/yjsbridge`
+- exposição estável da superfície de protocolo sync em `pkg/yprotocol` para `SyncStep1`, `SyncStep2` e envelope de mensagens websocket, com payloads V2 válidos normalizados para V1 canônico nos caminhos mutáveis de sync
+- runtime in-process mínimo em `pkg/yprotocol` para composição local de sessão/protocolo com `Session`, `HandleProtocolMessage`, `HandleEncodedMessages`, `HandleEncodedMessagesContext` no provider e encode público de `ProtocolMessage`, ainda sem provider completo e com estado/snapshot sempre em V1 canônico
+- camada mínima de provider em `pkg/yprotocol` com `Provider`, `Open`, `Connection`, `DispatchResult`, `Persist` e `Close`, ainda sem provider completo/transporte distribuído próprio e com broadcast/update log/persistência sempre em V1 canônico
 - exposição estável da superfície awareness em `pkg/yawareness` para wire format e runtime básico em V1 (sem provider completo e sem suporte V2)
 
 ### Resultado esperado
@@ -216,11 +216,11 @@ que vão sustentar a próxima etapa:
 - `pkg/storage` agora também expõe a fronteira pública de fencing autoritativo com `AuthorityFence`, `AuthoritativeUpdateLogStore`, `AuthoritativeSnapshotStore` e `ErrAuthorityLost`;
 - `pkg/storage` também já expõe `ReplaySnapshot`, `RecoverSnapshot`, `ReplayUpdateLog`, `CompactUpdateLog` e `CompactUpdateLogAuthoritative` para reconstrução pública via `snapshot + update log` com compaction fenced quando há owner ativo;
 - `pkg/storage/memory` e `pkg/storage/postgres` já materializam esses contratos distribuídos de snapshot, update log, placement e lease, com `OwnerInfo.Epoch` obrigatório, `ErrLeaseConflict`/`ErrLeaseStaleEpoch`, preservação da última geração após release, `LeaseHandoffStore` para troca atômica de owner/epoch e validação de placement + lease + token + expiração para append/persist/trim autoritativos;
-- `pkg/ycluster` já expõe tipos estáveis de cluster, `DeterministicShardResolver`, `StaticLocalNode`, `PlacementOwnerLookup`, `StorageOwnerLookup`, `StorageLeaseStore`, `LeaseManager` com loop autônomo de renovação, `StorageOwnershipCoordinator`, `DocumentOwnershipRuntime`, métricas opcionais e interfaces mínimas de `Runtime`, resolvendo owner apenas a partir de lease ativa e válida e já compondo claim/promoção/handoff/lookup/fence/execução storage-backed compartilhada por documento;
+- `pkg/ycluster` já expõe tipos estáveis de cluster, `DeterministicShardResolver`, `StaticLocalNode`, `PlacementOwnerLookup`, `StorageOwnerLookup`, `StorageLeaseStore`, `StoragePlacementDocumentSource`, membership/health com seleção dinâmica de targets saudáveis, `LeaseManager` com loop autônomo de renovação, `StorageOwnershipCoordinator`, `DocumentOwnershipRuntime`, planner/executor/controller de rebalance, métricas opcionais e interfaces mínimas de `Runtime`, resolvendo owner apenas a partir de lease ativa e válida e já compondo claim/promoção/handoff/lookup/fence/execução storage-backed compartilhada por documento;
 - `pkg/ynodeproto` já expõe o framing binário versionado do wire inter-node e payloads tipados para handshake/ack com `clientID`, sync, document update, awareness, `query-awareness`, `disconnect`, `close` e ping/pong;
 - `pkg/yprotocol.Provider` já atua como runtime local de referência do owner, com bootstrap/recovery via `snapshot + update log`, caminho fenced e context-aware em `apply`/persist/cutover, checkpoint/high-water mark persistidos com metadata de `epoch` e hooks opcionais de observabilidade para persistência/revalidação/perda de autoridade;
-- `pkg/yhttp` já expõe `OwnerAwareServer` como borda pública HTTP/WebSocket para resolver owner antes do provider local, além de promoção local opt-in quando não há owner ativo, integração opcional com `DocumentOwnershipRuntime` no `Server` local, endpoint owner-side e takeover `remote -> local`, seam typed de forwarding remoto via `RemoteOwnerDialer`/`NodeMessageStream`, hook de autenticação e validação de epoch do handshake inter-node owner-side e observabilidade opcional para lookup de owner, decisão de rota e relay remoto;
-- `pkg/storage`, `pkg/yprotocol` e `pkg/ycluster` já também expõem adapters opcionais de observabilidade com labels constantes para replay/recovery/compaction, offsets, lag de tail, epoch observado, lifecycle local do owner e control plane de lease/owner lookup; `examples/owner-aware-http-edge/observability` entrega alertas Prometheus e dashboards Grafana operacional/oráculo de referência; a próxima etapa concentra rebalance acima do runtime local atual (`LeaseManager`/`StorageOwnershipCoordinator`/`DocumentOwnershipRuntime`) e coordenação final do lifecycle por `epoch`.
+- `pkg/yhttp` já expõe `OwnerAwareServer` como borda pública HTTP/WebSocket para resolver owner antes do provider local, além de promoção local opt-in quando não há owner ativo, integração opcional com `DocumentOwnershipRuntime` no `Server` local, endpoint owner-side e takeover `remote -> local`, seam typed de forwarding remoto via `RemoteOwnerDialer`/`NodeMessageStream` com normalização V2 -> V1 antes dos campos inter-node `UpdateV1`, hook de autenticação, validação de epoch do handshake inter-node owner-side, revalidação imediata de autoridade pós-rebalance e observabilidade opcional para lookup de owner, decisão de rota e relay remoto;
+- `pkg/storage`, `pkg/yprotocol` e `pkg/ycluster` já também expõem adapters opcionais de observabilidade com labels constantes para replay/recovery/compaction, offsets, lag de tail, epoch observado, lifecycle local do owner e control plane de lease/owner lookup; `examples/owner-aware-http-edge/observability` entrega alertas Prometheus e dashboards Grafana operacional/oráculo de referência; a próxima etapa operacional concentra SLOs reais por topologia/tenant e endurecimento para produção pública.
 
 ---
 
@@ -368,7 +368,7 @@ Exemplos:
 ### Fase 2 pronta quando:
 - [x] múltiplos updates podem ser mesclados em cenários amplos
 - [x] estado consolidado pode ser produzido e divergências estruturais conhecidas são registradas
-- [ ] writer lazy com compatibilidade estrutural suficiente para o escopo da Fase 2
+- [x] writer lazy com compatibilidade estrutural suficiente para o escopo da Fase 2
 - [x] corte funcional V1 de snapshot persistido disponível (`PersistedSnapshotFromUpdate(s)` com `UpdateV1` canônico)
 - [x] ciclo de hidratação reversa/restore de `PersistedSnapshot` V1 está encapsulado e validado para storage operacional
 - [ ] compatibilidade V2 e conversão de formato possuem corte funcional verificável
@@ -390,9 +390,9 @@ Exemplos:
 
 1. Consolidar cenários de `merge/diff/intersect` com composição estrutural mais rica.
 2. Ampliar e endurecer a integração do lazy writer no fluxo de atualização.
-3. Concluir o mapa de lacunas de compatibilidade para V2 e conversões de formato.
+3. Concluir o mapa de lacunas de compatibilidade para V2 e conversões de formato. Mapa inicial entregue em `docs/v2-compatibility-map.md`; o reader/conversão limitado já cobre operações públicas com saída V1 canônica, fixtures single-update para texto Unicode/Any aninhado/XML com atributo e fixtures multi-update upstream para texto/format/map/XML/array/subdoc/tipos aninhados, e a próxima decisão segura é se algum caminho público deve preservar saída V2.
 4. Ligar `AuthorityFence`/`ResolveAuthorityFence` ao caminho autoritativo do provider, incluindo `apply`, persist, recovery e respostas de handoff/cutover.
-5. Evoluir failover/rebalance end-to-end em cima do bootstrap/recovery já operacional por `snapshot + update log` e da troca atômica de `epoch` já definida no storage/control plane.
+5. Evoluir failover/rebalance end-to-end em cima do bootstrap/recovery já operacional por `snapshot + update log` e da troca atômica de `epoch` já definida no storage/control plane. O corte document-level está entregue em `StorageOwnershipCoordinator.RebalanceDocument`, com planner/executor determinístico, `RebalanceController`, source por placement store, targets dinâmicos por membership/health e callback yhttp para acionar cutover/rebind imediato após rebalance.
 6. Conectar o wire tipado já exposto em `pkg/ynodeproto` ao forwarding/cutover end-to-end entre edge e owner, reduzindo seams ad hoc.
 7. Evoluir o bundle de observabilidade para ambientes reais multi-nó, com labels de deployment e SLOs por tenant quando houver multi-tenancy.
 8. Atualizar continuamente os documentos principais conforme novas divergências ou invariantes distribuídas forem observadas.

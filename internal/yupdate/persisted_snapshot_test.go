@@ -108,7 +108,8 @@ func TestPersistedSnapshotFromUpdatesContext(t *testing.T) {
 		t.Fatalf("MergeUpdatesV1() unexpected error: %v", err)
 	}
 
-	v2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2 := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
+	v2AsV1 := mustDecodeHex(t, "010165000401017402686900")
 	tests := []struct {
 		name       string
 		updates    [][]byte
@@ -127,10 +128,9 @@ func TestPersistedSnapshotFromUpdatesContext(t *testing.T) {
 			wantUpdate: encodeEmptyUpdateV1(),
 		},
 		{
-			name:      "v2_rejected_with_original_index",
-			updates:   [][]byte{nil, []byte{}, v2},
-			wantErr:   ErrUnsupportedUpdateFormatV2,
-			wantIndex: "update[2]",
+			name:       "v2_converts_with_empty_prefix",
+			updates:    [][]byte{nil, []byte{}, v2},
+			wantUpdate: v2AsV1,
 		},
 	}
 

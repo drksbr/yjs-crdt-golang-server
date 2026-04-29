@@ -56,7 +56,11 @@ func SnapshotFromUpdate(update []byte) (*Snapshot, error) {
 	case UpdateFormatV1:
 		return SnapshotFromUpdateV1(update)
 	case UpdateFormatV2:
-		return nil, ErrUnsupportedUpdateFormatV2
+		converted, err := ConvertUpdateToV1(update)
+		if err != nil {
+			return nil, err
+		}
+		return SnapshotFromUpdateV1(converted)
 	default:
 		return nil, ErrUnknownUpdateFormat
 	}
@@ -78,7 +82,11 @@ func SnapshotFromUpdatesContext(ctx context.Context, updates ...[]byte) (*Snapsh
 	case UpdateFormatUnknown:
 		return NewSnapshot(), nil
 	case UpdateFormatV2:
-		return nil, wrapUnsupportedV2AtFirstNonEmpty(updates)
+		converted, err := ConvertUpdatesToV1Context(ctx, updates...)
+		if err != nil {
+			return nil, err
+		}
+		return SnapshotFromUpdateV1(converted)
 	}
 
 	filtered := make([][]byte, 0, len(updates))

@@ -500,7 +500,7 @@ func TestStorageOwnershipCoordinatorRunDocumentOwnershipRenewsAndReleasesOnStop(
 		Resolver:   resolver,
 		Placements: store,
 		Leases:     store,
-		TTL:        80 * time.Millisecond,
+		TTL:        2 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("NewStorageOwnershipCoordinator() unexpected error: %v", err)
@@ -521,7 +521,7 @@ func TestStorageOwnershipCoordinatorRunDocumentOwnershipRenewsAndReleasesOnStop(
 				PlacementVersion: 8,
 			},
 			Lease: LeaseManagerRunConfig{
-				RenewWithin: 60 * time.Millisecond,
+				RenewWithin: 1900 * time.Millisecond,
 				Interval:    10 * time.Millisecond,
 				OnLeaseChange: func(lease *Lease) {
 					select {

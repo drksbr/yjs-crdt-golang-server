@@ -32,8 +32,9 @@ type Server struct {
 	metrics                       Metrics
 	onError                       ErrorHandler
 
-	registry   roomRegistry
-	nextConnID atomic.Uint64
+	registry               roomRegistry
+	authorityRevalidations authorityRevalidationRegistry
+	nextConnID             atomic.Uint64
 }
 
 const (
@@ -115,6 +116,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		metrics:                       normalizeMetrics(cfg.Metrics),
 		onError:                       cfg.OnError,
 		registry:                      newRoomRegistry(),
+		authorityRevalidations:        newAuthorityRevalidationRegistry(),
 	}, nil
 }
 
@@ -353,6 +355,10 @@ func (s *Server) serveSwitchableConnectedSocket(
 	s.registry.add(req.DocumentKey, req.ConnectionID, peer)
 	revalidateCh := s.startAuthorityRevalidator(sessionCtx, req, connection, cancelSession, nil)
 	defer drainRemoteOwnerCloseSignal(revalidateCh)
+	notifyAuthorityLoss := func(signal remoteOwnerCloseSignal) {
+		signalRemoteOwnerClose(revalidateCh, signal)
+		cancelSession()
+	}
 
 	if options.bootstrap {
 		if err := s.bootstrapConnection(r, req, connection, peer); err != nil {
@@ -379,10 +385,11 @@ func (s *Server) serveSwitchableConnectedSocket(
 
 	upstreamPeer := newSwitchableRemoteStreamPeer(req.DocumentKey, req.ConnectionID)
 	upstreamPeer.switchTarget(&localConnectionPeer{
-		server:     s,
-		req:        req,
-		connection: connection,
-		peer:       peer,
+		server:          s,
+		req:             req,
+		connection:      connection,
+		peer:            peer,
+		onAuthorityLoss: notifyAuthorityLoss,
 	})
 
 	clientCtx, cancelClient := context.WithCancel(r.Context())
@@ -736,58 +743,63 @@ func (s *Server) startAuthorityRevalidator(
 	connection *yprotocol.Connection,
 	cancelSession context.CancelFunc,
 	onAuthorityLoss func(remoteOwnerCloseSignal),
-) <-chan remoteOwnerCloseSignal {
+) chan remoteOwnerCloseSignal {
 	signals := make(chan remoteOwnerCloseSignal, 1)
-	if s == nil || connection == nil || s.authorityRevalidationInterval <= 0 {
+	if s == nil || connection == nil {
 		return signals
 	}
 
+	session := &authorityRevalidationSession{
+		req:             req,
+		connection:      connection,
+		cancelSession:   cancelSession,
+		signals:         signals,
+		onAuthorityLoss: onAuthorityLoss,
+	}
+	connectionID := connection.ID()
+	s.authorityRevalidations.add(req.DocumentKey, connectionID, session)
+
 	go func() {
-		ticker := time.NewTicker(s.authorityRevalidationInterval)
-		defer ticker.Stop()
+		var ticker *time.Ticker
+		var tick <-chan time.Time
+		if s.authorityRevalidationInterval > 0 {
+			ticker = time.NewTicker(s.authorityRevalidationInterval)
+			tick = ticker.C
+		}
+		defer func() {
+			if ticker != nil {
+				ticker.Stop()
+			}
+			s.authorityRevalidations.remove(req.DocumentKey, connectionID)
+		}()
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case <-tick:
 				checkCtx, cancel := context.WithTimeout(context.Background(), s.writeTimeout)
-				start := time.Now()
-				err := connection.RevalidateAuthority(checkCtx)
+				err := s.revalidateAuthoritySession(checkCtx, session)
 				cancel()
-				duration := time.Since(start)
 				switch {
 				case err == nil, errors.Is(err, yprotocol.ErrConnectionClosed):
-					if err == nil {
-						observeAuthorityRevalidation(s.metrics, req, authorityRevalidationRoleLocal, duration, nil)
-					}
 					continue
 				case isAuthorityLostRetryableError(err):
-					observeAuthorityRevalidation(s.metrics, req, authorityRevalidationRoleLocal, duration, err)
-					s.metrics.Error(req, "revalidate_authority", err)
-					s.report(nil, req, err)
-					signal := remoteOwnerCloseSignalFromError(err, "revalidate_authority")
-					select {
-					case signals <- signal:
-					default:
-					}
-					if onAuthorityLoss != nil {
-						onAuthorityLoss(signal)
-					}
-					if cancelSession != nil {
-						cancelSession()
-					}
 					return
 				default:
-					observeAuthorityRevalidation(s.metrics, req, authorityRevalidationRoleLocal, duration, err)
-					s.metrics.Error(req, "revalidate_authority", err)
-					s.report(nil, req, err)
 				}
 			}
 		}
 	}()
 
 	return signals
+}
+
+func signalRemoteOwnerClose(ch chan<- remoteOwnerCloseSignal, signal remoteOwnerCloseSignal) {
+	select {
+	case ch <- signal:
+	default:
+	}
 }
 
 func drainRemoteOwnerCloseSignal(ch <-chan remoteOwnerCloseSignal) (remoteOwnerCloseSignal, bool) {

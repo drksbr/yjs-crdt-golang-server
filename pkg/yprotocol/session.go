@@ -9,10 +9,11 @@ import (
 )
 
 // Session mantém um estado mínimo em-processo para handshake e ingestão de
-// envelopes y-protocols em V1.
+// envelopes y-protocols com saída de documento em V1 canônico.
 //
 // O runtime cobre apenas:
 // - update V1 canônico do documento;
+// - normalização de updates V2 válidos para V1 canônico;
 // - awareness local/remoto via `StateManager`;
 // - resposta a `SyncStep1` com `SyncStep2`;
 // - resposta a `query-awareness` com snapshot de awareness.
@@ -174,7 +175,11 @@ func (s *Session) handleSyncMessage(message *SyncMessage) ([]*ProtocolMessage, e
 		}}, nil
 	case SyncMessageTypeStep2, SyncMessageTypeUpdate:
 		current := s.UpdateV1()
-		merged, err := yjsbridge.MergeUpdates(current, message.Payload)
+		updateV1, err := yjsbridge.ConvertUpdateToV1(message.Payload)
+		if err != nil {
+			return nil, err
+		}
+		merged, err := yjsbridge.MergeUpdates(current, updateV1)
 		if err != nil {
 			return nil, err
 		}

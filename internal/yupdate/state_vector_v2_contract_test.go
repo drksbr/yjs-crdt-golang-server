@@ -21,7 +21,7 @@ func TestStateVectorFromUpdatesContract(t *testing.T) {
 			},
 		},
 	)
-	v2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2 := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
 
 	type contractFn func(...[]byte) error
 	apiCalls := []struct {
@@ -50,13 +50,12 @@ func TestStateVectorFromUpdatesContract(t *testing.T) {
 		wantErr   error
 		wantIndex int
 		hasIndex  bool
+		wantOK    bool
 	}{
 		{
-			name:      "unsupported_v2_is_rejected_with_index",
-			updates:   [][]byte{nil, []byte{}, v2},
-			wantErr:   ErrUnsupportedUpdateFormatV2,
-			wantIndex: 2,
-			hasIndex:  true,
+			name:    "supported_v2_is_derived_after_empty_prefix",
+			updates: [][]byte{nil, []byte{}, v2},
+			wantOK:  true,
 		},
 		{
 			name:    "mixed_v1_v2_is_rejected_without_index",
@@ -83,6 +82,12 @@ func TestStateVectorFromUpdatesContract(t *testing.T) {
 					t.Parallel()
 
 					err := api.call(tt.updates...)
+					if tt.wantOK {
+						if err != nil {
+							t.Fatalf("%s() unexpected error: %v", api.name, err)
+						}
+						return
+					}
 					if err == nil {
 						t.Fatalf("%s() error = nil, want %v", api.name, tt.wantErr)
 					}

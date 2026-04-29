@@ -527,16 +527,21 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 	defer cancelSession()
 	revalidateCh := f.local.startAuthorityRevalidator(sessionCtx, req, connection, cancelSession, nil)
 	defer drainRemoteOwnerCloseSignal(revalidateCh)
+	notifyAuthorityLoss := func(signal remoteOwnerCloseSignal) {
+		signalRemoteOwnerClose(revalidateCh, signal)
+		cancelSession()
+	}
 
 	if err := f.local.bootstrapConnection(r, req, connection, peer); err != nil {
 		f.local.cleanupConnectionWithOwnership(r, req, connection, ownership)
 		return err
 	}
 	upstreamPeer.switchTarget(&localConnectionPeer{
-		server:     f.local,
-		req:        req,
-		connection: connection,
-		peer:       peer,
+		server:          f.local,
+		req:             req,
+		connection:      connection,
+		peer:            peer,
+		onAuthorityLoss: notifyAuthorityLoss,
 	})
 
 	for {
@@ -989,10 +994,11 @@ func (p *switchableRemoteStreamPeer) deliver(ctx context.Context, payload []byte
 }
 
 type localConnectionPeer struct {
-	server     *Server
-	req        Request
-	connection *yprotocol.Connection
-	peer       roomPeer
+	server          *Server
+	req             Request
+	connection      *yprotocol.Connection
+	peer            roomPeer
+	onAuthorityLoss func(remoteOwnerCloseSignal)
 }
 
 func (p *localConnectionPeer) deliver(ctx context.Context, payload []byte) error {
@@ -1004,6 +1010,9 @@ func (p *localConnectionPeer) deliver(ctx context.Context, payload []byte) error
 	result, err := p.connection.HandleEncodedMessagesContext(ctx, payload)
 	p.server.metrics.Handle(p.req, time.Since(handleStart), err)
 	if err != nil {
+		if isAuthorityLostRetryableError(err) && p.onAuthorityLoss != nil {
+			p.onAuthorityLoss(remoteOwnerCloseSignalFromError(err, "handle"))
+		}
 		p.server.metrics.Error(p.req, "handle", err)
 		p.server.report(nil, p.req, err)
 		return err

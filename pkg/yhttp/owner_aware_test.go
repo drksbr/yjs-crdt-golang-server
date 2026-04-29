@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -615,7 +616,7 @@ func TestOwnerAwareServerRemoteForwarderBridgesWebSocketFrames(t *testing.T) {
 		t.Fatal("DialRemoteOwner() was not called")
 	}
 
-	clientUpdate := []byte{0x01, 0x02, 0x03, 0x04}
+	clientUpdate := buildGCOnlyUpdate(707, 2)
 	writeBinary(t, conn, yprotocol.EncodeProtocolSyncUpdate(clientUpdate))
 
 	select {
@@ -666,7 +667,7 @@ func TestOwnerAwareServerRemoteForwarderBridgesWebSocketFrames(t *testing.T) {
 		t.Fatal("remote stream did not receive forwarded client frame")
 	}
 
-	remoteUpdate := []byte{0x05, 0x06, 0x07}
+	remoteUpdate := buildGCOnlyUpdate(708, 1)
 	stream.pushReceive(&ynodeproto.DocumentUpdate{
 		DocumentKey:  testDocumentKey("room-owner-forward-ws"),
 		ConnectionID: handshake.ConnectionID,
@@ -772,7 +773,7 @@ func TestOwnerAwareServerRemoteForwarderRecordsMetrics(t *testing.T) {
 		t.Fatalf("expected handshake to be forwarded to remote owner, got %T", handshakeMessage)
 	}
 
-	update := []byte{0x09, 0x08, 0x07}
+	update := buildGCOnlyUpdate(714, 1)
 	writeBinary(t, conn, yprotocol.EncodeProtocolSyncUpdate(update))
 	if _, ok := readRemoteStreamMessage(t, stream).(*ynodeproto.DocumentUpdate); !ok {
 		t.Fatal("expected document update to be forwarded to remote owner")
@@ -782,7 +783,7 @@ func TestOwnerAwareServerRemoteForwarderRecordsMetrics(t *testing.T) {
 		DocumentKey:  testDocumentKey("room-owner-forward-metrics"),
 		ConnectionID: handshake.ConnectionID,
 		Epoch:        33,
-		UpdateV1:     []byte{0x05, 0x04},
+		UpdateV1:     buildGCOnlyUpdate(715, 1),
 	})
 	_ = readBinary(t, conn)
 
@@ -1080,7 +1081,7 @@ func TestOwnerAwareServerRemoteForwarderRebindsAfterRetryableClose(t *testing.T)
 		t.Fatalf("bootstrap awareness epoch = %d, want %d", bootstrapAwareness.Epoch, 42)
 	}
 
-	remoteUpdate := []byte{0x0a, 0x0b, 0x0c}
+	remoteUpdate := buildGCOnlyUpdate(716, 1)
 	secondStream.pushReceive(&ynodeproto.DocumentUpdate{
 		DocumentKey:  testDocumentKey("room-owner-forward-rebind"),
 		ConnectionID: secondHandshake.ConnectionID,
@@ -1099,7 +1100,7 @@ func TestOwnerAwareServerRemoteForwarderRebindsAfterRetryableClose(t *testing.T)
 		t.Fatalf("sync payload = %v, want %v", messages[0].Sync.Payload, remoteUpdate)
 	}
 
-	clientUpdate := []byte{0x0d, 0x0e}
+	clientUpdate := buildGCOnlyUpdate(717, 1)
 	writeBinary(t, conn, yprotocol.EncodeProtocolSyncUpdate(clientUpdate))
 	forwardedUpdateMessage := readRemoteStreamMessage(t, secondStream)
 	forwardedUpdate, ok := forwardedUpdateMessage.(*ynodeproto.DocumentUpdate)
@@ -1448,6 +1449,54 @@ func TestStatusFromOwnerLookupError(t *testing.T) {
 				t.Fatalf("statusFromOwnerLookupError(%v) = %d, want %d", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRemoteOwnerForwarderRebindTimesOutWhenEpochDoesNotAdvance(t *testing.T) {
+	t.Parallel()
+
+	key := testDocumentKey("room-owner-rebind-stale-epoch")
+	var lookups atomic.Int32
+	lookup := ownerLookupFunc(func(_ context.Context, req ycluster.OwnerLookupRequest) (*ycluster.OwnerResolution, error) {
+		lookups.Add(1)
+		return &ycluster.OwnerResolution{
+			DocumentKey: req.DocumentKey,
+			Placement: ycluster.Placement{
+				ShardID: 25,
+				NodeID:  "node-b",
+				Lease: &ycluster.Lease{
+					ShardID: 25,
+					Holder:  "node-b",
+					Epoch:   7,
+					Token:   "lease-stale",
+				},
+			},
+		}, nil
+	})
+	forwarder := &remoteOwnerForwarder{
+		ownerLookup:    lookup,
+		rebindTimeout:  20 * time.Millisecond,
+		rebindInterval: time.Millisecond,
+		writeTimeout:   time.Second,
+		metrics:        normalizeMetrics(nil),
+	}
+
+	start := time.Now()
+	_, err := forwarder.rebindRemoteOwnerSession(context.Background(), Request{
+		DocumentKey:  key,
+		ConnectionID: "conn-stale",
+		ClientID:     901,
+	}, remoteOwnerSession{epoch: 7}, nil, false)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ycluster.ErrLeaseExpired) {
+		t.Fatalf("rebindRemoteOwnerSession() error = %v, want %v", err, ycluster.ErrLeaseExpired)
+	}
+	if lookups.Load() < 2 {
+		t.Fatalf("lookups = %d, want retry polling before timeout", lookups.Load())
+	}
+	if elapsed > time.Second {
+		t.Fatalf("rebindRemoteOwnerSession() took %s, want bounded timeout", elapsed)
 	}
 }
 

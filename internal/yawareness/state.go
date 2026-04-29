@@ -1,6 +1,7 @@
 package yawareness
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"sort"
@@ -21,6 +22,18 @@ const OutdatedTimeout = 30 * time.Second
 type ClientMeta struct {
 	Clock       uint32
 	LastUpdated time.Time
+}
+
+// Change descreve o delta produzido por uma operação de awareness.
+type Change struct {
+	Added   []uint32
+	Updated []uint32
+	Removed []uint32
+}
+
+// Empty informa se a operação não alterou nenhum client conhecido.
+func (c Change) Empty() bool {
+	return len(c.Added) == 0 && len(c.Updated) == 0 && len(c.Removed) == 0
 }
 
 // StateManager mantém o estado mais recente de awareness por cliente.
@@ -52,22 +65,34 @@ func (m *StateManager) SetLocalClientID(clientID uint32) {
 
 // Apply mescla uma atualização awareness por cliente, removendo tombstones (null).
 func (m *StateManager) Apply(update *Update) {
-	m.ApplyAt(update, m.nowTime())
+	_ = m.ApplyWithChangeAt(update, m.nowTime())
 }
 
 // ApplyAt é a variante determinística de Apply para testes e integração controlada.
 func (m *StateManager) ApplyAt(update *Update, now time.Time) {
+	_ = m.ApplyWithChangeAt(update, now)
+}
+
+// ApplyWithChange mescla uma atualização awareness e retorna o delta aceito.
+func (m *StateManager) ApplyWithChange(update *Update) Change {
+	return m.ApplyWithChangeAt(update, m.nowTime())
+}
+
+// ApplyWithChangeAt é a variante determinística de ApplyWithChange.
+func (m *StateManager) ApplyWithChangeAt(update *Update, now time.Time) Change {
 	if update == nil {
-		return
+		return Change{}
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureMapsLocked()
 
+	change := changeBuilder{}
 	for _, client := range update.Clients {
-		m.applyClientLocked(client, now)
+		change.add(m.applyClientLocked(client, now))
 	}
+	return change.finish()
 }
 
 // ApplyJSON aplica uma atualização serialized em JSON.
@@ -151,19 +176,32 @@ func (m *StateManager) SetLocalState(state json.RawMessage) error {
 
 // SetLocalStateAt é a variante determinística de SetLocalState para testes.
 func (m *StateManager) SetLocalStateAt(state json.RawMessage, now time.Time) error {
+	_, err := m.SetLocalStateWithChangeAt(state, now)
+	return err
+}
+
+// SetLocalStateWithChange atualiza o estado local e retorna o delta produzido.
+func (m *StateManager) SetLocalStateWithChange(state json.RawMessage) (Change, error) {
+	return m.SetLocalStateWithChangeAt(state, m.nowTime())
+}
+
+// SetLocalStateWithChangeAt é a variante determinística de
+// SetLocalStateWithChange.
+func (m *StateManager) SetLocalStateWithChangeAt(state json.RawMessage, now time.Time) (Change, error) {
 	state, err := normalizeState(state)
 	if err != nil {
-		return err
+		return Change{}, err
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.hasLocalClientID {
-		return ErrLocalClientIDNotConfigured
+		return Change{}, ErrLocalClientIDNotConfigured
 	}
 	m.ensureMapsLocked()
 
 	meta := m.meta[m.localClientID]
+	_, hadState := m.states[m.localClientID]
 	clock := uint32(0)
 	if _, ok := m.meta[m.localClientID]; ok {
 		clock = meta.Clock + 1
@@ -183,7 +221,58 @@ func (m *StateManager) SetLocalStateAt(state json.RawMessage, now time.Time) err
 		Clock:       clock,
 		LastUpdated: now,
 	}
-	return nil
+	return localChangeForState(client.ClientID, hadState, !client.IsNull()), nil
+}
+
+// SetLocalStateField atualiza um campo do estado local JSON object, criando o
+// objeto quando ainda não há estado local.
+func (m *StateManager) SetLocalStateField(key string, value json.RawMessage) error {
+	_, err := m.SetLocalStateFieldWithChangeAt(key, value, m.nowTime())
+	return err
+}
+
+// SetLocalStateFieldAt é a variante determinística de SetLocalStateField.
+func (m *StateManager) SetLocalStateFieldAt(key string, value json.RawMessage, now time.Time) error {
+	_, err := m.SetLocalStateFieldWithChangeAt(key, value, now)
+	return err
+}
+
+// SetLocalStateFieldWithChange atualiza um campo local e retorna o delta
+// produzido.
+func (m *StateManager) SetLocalStateFieldWithChange(key string, value json.RawMessage) (Change, error) {
+	return m.SetLocalStateFieldWithChangeAt(key, value, m.nowTime())
+}
+
+// SetLocalStateFieldWithChangeAt é a variante determinística de
+// SetLocalStateFieldWithChange.
+func (m *StateManager) SetLocalStateFieldWithChangeAt(key string, value json.RawMessage, now time.Time) (Change, error) {
+	value, err := normalizeState(value)
+	if err != nil {
+		return Change{}, err
+	}
+
+	m.mu.RLock()
+	state := json.RawMessage(nil)
+	if m.states != nil {
+		if current, ok := m.states[m.localClientID]; ok {
+			state = append([]byte(nil), current.State...)
+		}
+	}
+	m.mu.RUnlock()
+
+	fields := make(map[string]json.RawMessage)
+	if len(state) > 0 && !bytes.Equal(state, []byte("null")) {
+		if err := json.Unmarshal(state, &fields); err != nil {
+			return Change{}, ErrInvalidJSON
+		}
+	}
+	fields[key] = append([]byte(nil), value...)
+
+	next, err := json.Marshal(fields)
+	if err != nil {
+		return Change{}, ErrInvalidJSON
+	}
+	return m.SetLocalStateWithChangeAt(next, now)
 }
 
 // RenewLocalIfDue reaplica o estado local quando metade do timeout já passou.
@@ -216,10 +305,22 @@ func (m *StateManager) ExpireStale(timeout time.Duration) []uint32 {
 
 // ExpireStaleAt é a variante determinística de ExpireStale.
 func (m *StateManager) ExpireStaleAt(now time.Time, timeout time.Duration) []uint32 {
+	change := m.ExpireStaleWithChangeAt(now, timeout)
+	return change.Removed
+}
+
+// ExpireStaleWithChange remove estados remotos inativos e retorna o delta.
+func (m *StateManager) ExpireStaleWithChange(timeout time.Duration) Change {
+	return m.ExpireStaleWithChangeAt(m.nowTime(), timeout)
+}
+
+// ExpireStaleWithChangeAt é a variante determinística de
+// ExpireStaleWithChange.
+func (m *StateManager) ExpireStaleWithChangeAt(now time.Time, timeout time.Duration) Change {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.states) == 0 {
-		return nil
+		return Change{}
 	}
 
 	removed := make([]uint32, 0)
@@ -236,13 +337,81 @@ func (m *StateManager) ExpireStaleAt(now time.Time, timeout time.Duration) []uin
 	sort.Slice(removed, func(i, j int) bool {
 		return removed[i] < removed[j]
 	})
-	return removed
+	return Change{Removed: removed}
 }
 
-func (m *StateManager) applyClientLocked(client ClientState, now time.Time) {
+type changeEntry struct {
+	clientID uint32
+	kind     changeKind
+}
+
+type changeKind uint8
+
+const (
+	changeNone changeKind = iota
+	changeAdded
+	changeUpdated
+	changeRemoved
+)
+
+type changeBuilder struct {
+	added   map[uint32]struct{}
+	updated map[uint32]struct{}
+	removed map[uint32]struct{}
+}
+
+func (b *changeBuilder) add(entry changeEntry) {
+	switch entry.kind {
+	case changeAdded:
+		b.ensureAdded()
+		b.added[entry.clientID] = struct{}{}
+		delete(b.updated, entry.clientID)
+		delete(b.removed, entry.clientID)
+	case changeUpdated:
+		if _, added := b.added[entry.clientID]; added {
+			return
+		}
+		b.ensureUpdated()
+		b.updated[entry.clientID] = struct{}{}
+		delete(b.removed, entry.clientID)
+	case changeRemoved:
+		delete(b.added, entry.clientID)
+		delete(b.updated, entry.clientID)
+		b.ensureRemoved()
+		b.removed[entry.clientID] = struct{}{}
+	}
+}
+
+func (b *changeBuilder) ensureAdded() {
+	if b.added == nil {
+		b.added = make(map[uint32]struct{})
+	}
+}
+
+func (b *changeBuilder) ensureUpdated() {
+	if b.updated == nil {
+		b.updated = make(map[uint32]struct{})
+	}
+}
+
+func (b *changeBuilder) ensureRemoved() {
+	if b.removed == nil {
+		b.removed = make(map[uint32]struct{})
+	}
+}
+
+func (b changeBuilder) finish() Change {
+	return Change{
+		Added:   sortedChangeIDs(b.added),
+		Updated: sortedChangeIDs(b.updated),
+		Removed: sortedChangeIDs(b.removed),
+	}
+}
+
+func (m *StateManager) applyClientLocked(client ClientState, now time.Time) changeEntry {
 	state, err := normalizeState(client.State)
 	if err != nil {
-		return
+		return changeEntry{}
 	}
 	client.State = state
 
@@ -254,14 +423,16 @@ func (m *StateManager) applyClientLocked(client ClientState, now time.Time) {
 
 	currentState, hasState := m.states[client.ClientID]
 	if hasMeta && !(currentClock < client.Clock || (currentClock == client.Clock && client.IsNull() && hasState)) {
-		return
+		return changeEntry{}
 	}
 
+	nextHasState := !client.IsNull()
 	if client.IsNull() {
 		if m.hasLocalClientID && client.ClientID == m.localClientID && hasState {
 			currentState.Clock = client.Clock + 1
 			m.states[client.ClientID] = cloneClientState(currentState)
 			client.Clock++
+			nextHasState = true
 		} else {
 			delete(m.states, client.ClientID)
 		}
@@ -272,6 +443,10 @@ func (m *StateManager) applyClientLocked(client ClientState, now time.Time) {
 	m.meta[client.ClientID] = ClientMeta{
 		Clock:       client.Clock,
 		LastUpdated: now,
+	}
+	return changeEntry{
+		clientID: client.ClientID,
+		kind:     changeKindForStateTransition(hasState, nextHasState),
 	}
 }
 
@@ -294,4 +469,44 @@ func (m *StateManager) nowTime() time.Time {
 func cloneClientState(state ClientState) ClientState {
 	state.State = append([]byte(nil), state.State...)
 	return state
+}
+
+func localChangeForState(clientID uint32, hadState, hasState bool) Change {
+	switch changeKindForStateTransition(hadState, hasState) {
+	case changeAdded:
+		return Change{Added: []uint32{clientID}}
+	case changeUpdated:
+		return Change{Updated: []uint32{clientID}}
+	case changeRemoved:
+		return Change{Removed: []uint32{clientID}}
+	default:
+		return Change{}
+	}
+}
+
+func changeKindForStateTransition(hadState, hasState bool) changeKind {
+	switch {
+	case !hadState && hasState:
+		return changeAdded
+	case hadState && hasState:
+		return changeUpdated
+	case hadState && !hasState:
+		return changeRemoved
+	default:
+		return changeNone
+	}
+}
+
+func sortedChangeIDs(set map[uint32]struct{}) []uint32 {
+	if len(set) == 0 {
+		return nil
+	}
+	ids := make([]uint32, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return ids[i] < ids[j]
+	})
+	return ids
 }

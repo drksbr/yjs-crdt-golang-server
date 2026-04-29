@@ -99,12 +99,12 @@ func ConvertUpdatesToV1Context(ctx context.Context, updates ...[]byte) ([]byte, 
 	return yupdate.ConvertUpdatesToV1Context(ctx, updates...)
 }
 
-// MergeUpdates consolida múltiplos updates em um único payload.
+// MergeUpdates consolida múltiplos updates em um único payload canônico V1.
 func MergeUpdates(updates ...[]byte) ([]byte, error) {
 	return yupdate.MergeUpdates(updates...)
 }
 
-// MergeUpdatesContext consolida múltiplos updates respeitando cancelamento.
+// MergeUpdatesContext consolida múltiplos updates em V1 respeitando cancelamento.
 func MergeUpdatesContext(ctx context.Context, updates ...[]byte) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -112,12 +112,12 @@ func MergeUpdatesContext(ctx context.Context, updates ...[]byte) ([]byte, error)
 	return yupdate.MergeUpdatesContext(ctx, updates...)
 }
 
-// DiffUpdate retorna a parte de update ainda não coberta pelo state vector.
+// DiffUpdate retorna a parte do update ainda não coberta pelo state vector em V1.
 func DiffUpdate(update, stateVector []byte) ([]byte, error) {
 	return yupdate.DiffUpdate(update, stateVector)
 }
 
-// DiffUpdateContext retorna o diff respeitando cancelamento.
+// DiffUpdateContext retorna o diff em V1 respeitando cancelamento.
 func DiffUpdateContext(ctx context.Context, update, stateVector []byte) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -196,12 +196,12 @@ func ContentIDsFromUpdatesContext(ctx context.Context, updates ...[]byte) (*Cont
 	return wrapContentIDs(contentIDs), nil
 }
 
-// IntersectUpdateWithContentIDs filtra um update usando content ids públicos.
+// IntersectUpdateWithContentIDs filtra um update e retorna payload V1.
 func IntersectUpdateWithContentIDs(update []byte, contentIDs *ContentIDs) ([]byte, error) {
 	return yupdate.IntersectUpdateWithContentIDs(update, contentIDs.toInternal())
 }
 
-// IntersectUpdateWithContentIDsContext filtra um update respeitando cancelamento.
+// IntersectUpdateWithContentIDsContext filtra um update em V1 respeitando cancelamento.
 func IntersectUpdateWithContentIDsContext(ctx context.Context, update []byte, contentIDs *ContentIDs) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()

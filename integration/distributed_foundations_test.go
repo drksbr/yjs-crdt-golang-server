@@ -251,6 +251,85 @@ func TestClusterControlPlaneTracksStorageBackedOwnerHandoff(t *testing.T) {
 	}
 }
 
+func TestClusterControlPlaneRebalancesDocumentOwnership(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	resolver, err := ycluster.NewDeterministicShardResolver(32)
+	if err != nil {
+		t.Fatalf("NewDeterministicShardResolver() unexpected error: %v", err)
+	}
+	nodeA, err := ycluster.NewStorageOwnershipCoordinator(ycluster.StorageOwnershipCoordinatorConfig{
+		LocalNode:  "node-a",
+		Resolver:   resolver,
+		Placements: store,
+		Leases:     store,
+		TTL:        2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewStorageOwnershipCoordinator(node-a) unexpected error: %v", err)
+	}
+	nodeB, err := ycluster.NewStorageOwnershipCoordinator(ycluster.StorageOwnershipCoordinatorConfig{
+		LocalNode:  "node-b",
+		Resolver:   resolver,
+		Placements: store,
+		Leases:     store,
+		TTL:        2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewStorageOwnershipCoordinator(node-b) unexpected error: %v", err)
+	}
+
+	key := storage.DocumentKey{
+		Namespace:  "integration",
+		DocumentID: "cluster-rebalance",
+	}
+	claimed, err := nodeA.ClaimDocument(ctx, ycluster.ClaimDocumentRequest{
+		DocumentKey:      key,
+		Token:            "lease-node-a",
+		PlacementVersion: 3,
+	})
+	if err != nil {
+		t.Fatalf("ClaimDocument(node-a) unexpected error: %v", err)
+	}
+
+	rebalanced, err := nodeB.RebalanceDocument(ctx, ycluster.RebalanceDocumentRequest{
+		DocumentKey:  key,
+		TargetHolder: "node-b",
+		Token:        "lease-node-b",
+	})
+	if err != nil {
+		t.Fatalf("RebalanceDocument(node-b) unexpected error: %v", err)
+	}
+	if !rebalanced.Changed || rebalanced.From != "node-a" || rebalanced.To != "node-b" {
+		t.Fatalf("RebalanceDocument() = %#v, want changed node-a -> node-b", rebalanced)
+	}
+	if rebalanced.Ownership == nil || rebalanced.Ownership.Lease == nil {
+		t.Fatalf("RebalanceDocument().Ownership = %#v, want lease", rebalanced.Ownership)
+	}
+	if rebalanced.Ownership.Lease.Epoch != claimed.Lease.Epoch+1 ||
+		rebalanced.Ownership.Lease.Token != "lease-node-b" {
+		t.Fatalf("RebalanceDocument().Lease = %#v, want epoch %d token lease-node-b", rebalanced.Ownership.Lease, claimed.Lease.Epoch+1)
+	}
+
+	nodeAResolution, err := nodeA.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
+	if err != nil {
+		t.Fatalf("LookupOwner(node-a) unexpected error: %v", err)
+	}
+	if nodeAResolution.Local || nodeAResolution.Placement.NodeID != "node-b" {
+		t.Fatalf("LookupOwner(node-a) = %#v, want remote node-b", nodeAResolution)
+	}
+
+	fence, err := nodeB.ResolveAuthorityFence(ctx, key)
+	if err != nil {
+		t.Fatalf("ResolveAuthorityFence(node-b) unexpected error: %v", err)
+	}
+	if fence.Owner.NodeID != storage.NodeID("node-b") || fence.Owner.Epoch != rebalanced.Ownership.Lease.Epoch {
+		t.Fatalf("ResolveAuthorityFence(node-b) = %#v, want node-b epoch %d", fence, rebalanced.Ownership.Lease.Epoch)
+	}
+}
+
 func TestLeaseManagerRenewsAndReleasesStorageBackedOwnership(t *testing.T) {
 	t.Parallel()
 

@@ -5,6 +5,8 @@ import "errors"
 var (
 	// ErrInvalidNodeID sinaliza node id vazio ou invalido.
 	ErrInvalidNodeID = errors.New("ycluster: node id invalido")
+	// ErrInvalidNodeHealth sinaliza registro de saude de no inconsistente.
+	ErrInvalidNodeHealth = errors.New("ycluster: node health invalido")
 	// ErrNilLocalNode sinaliza ausencia da identidade local do cluster.
 	ErrNilLocalNode = errors.New("ycluster: local node obrigatorio")
 	// ErrNilShardResolver sinaliza ausencia de shard resolver no lookup.
@@ -39,4 +41,6 @@ var (
 	ErrLeaseHandoffUnsupported = errors.New("ycluster: handoff atomico de lease nao suportado")
 	// ErrOwnerNotFound sinaliza ausencia de owner resolvido para a chave consultada.
 	ErrOwnerNotFound = errors.New("ycluster: owner nao encontrado")
+	// ErrInvalidRebalancePlan sinaliza entrada invalida para planejamento de rebalance.
+	ErrInvalidRebalancePlan = errors.New("ycluster: plano de rebalance invalido")
 )

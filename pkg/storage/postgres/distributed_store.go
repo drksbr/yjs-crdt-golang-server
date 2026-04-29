@@ -14,6 +14,7 @@ import (
 
 var _ storage.DistributedStore = (*Store)(nil)
 var _ storage.AuthoritativeUpdateLogStore = (*Store)(nil)
+var _ storage.PlacementListStore = (*Store)(nil)
 var _ storage.LeaseHandoffStore = (*Store)(nil)
 
 func (s *Store) AppendUpdate(ctx context.Context, key storage.DocumentKey, update []byte) (*storage.UpdateLogRecord, error) {
@@ -342,6 +343,70 @@ WHERE namespace = $1 AND document_id = $2
 		Version:   normalizedVersion,
 		UpdatedAt: updatedAt,
 	}, nil
+}
+
+func (s *Store) ListPlacements(ctx context.Context, opts storage.PlacementListOptions) ([]*storage.PlacementRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	pool, err := s.requirePool()
+	if err != nil {
+		return nil, err
+	}
+
+	args := make([]any, 0, 2)
+	query := fmt.Sprintf(`
+SELECT namespace, document_id, shard_id, version, updated_at
+FROM %s.document_placements
+`, quoteIdentifier(s.schema))
+	if opts.Namespace != "" {
+		args = append(args, opts.Namespace)
+		query += fmt.Sprintf("WHERE namespace = $%d\n", len(args))
+	}
+	query += "ORDER BY namespace, document_id\n"
+	if opts.Limit > 0 {
+		args = append(args, opts.Limit)
+		query += fmt.Sprintf("LIMIT $%d\n", len(args))
+	}
+
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	placements := make([]*storage.PlacementRecord, 0)
+	for rows.Next() {
+		var namespace string
+		var documentID string
+		var shardID string
+		var version int64
+		var updatedAt time.Time
+		if err := rows.Scan(&namespace, &documentID, &shardID, &version, &updatedAt); err != nil {
+			return nil, err
+		}
+		normalizedVersion, err := int64ToUint64("version", version)
+		if err != nil {
+			return nil, err
+		}
+		record := &storage.PlacementRecord{
+			Key: storage.DocumentKey{
+				Namespace:  namespace,
+				DocumentID: documentID,
+			},
+			ShardID:   storage.ShardID(shardID),
+			Version:   normalizedVersion,
+			UpdatedAt: updatedAt,
+		}
+		if err := record.Validate(); err != nil {
+			return nil, err
+		}
+		placements = append(placements, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return placements, nil
 }
 
 func (s *Store) SaveLease(ctx context.Context, lease storage.LeaseRecord) (*storage.LeaseRecord, error) {

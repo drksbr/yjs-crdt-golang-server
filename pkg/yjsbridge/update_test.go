@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/drksbr/yjs-crdt-golang-server/internal/yupdate"
@@ -111,7 +112,7 @@ func TestPublicUpdateAPIRejectsUnsupportedAndRespectsContext(t *testing.T) {
 	t.Parallel()
 
 	emptyUpdate := NewPersistedSnapshot().UpdateV1
-	v2Update := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2Update := []byte{0x00, 0x00, 0x02, 0xa5, 0x01, 0x00, 0x00, 0x01, 0x04, 0x06, 0x03, 0x74, 0x68, 0x69, 0x01, 0x02, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00}
 
 	tests := []struct {
 		name string
@@ -121,34 +122,20 @@ func TestPublicUpdateAPIRejectsUnsupportedAndRespectsContext(t *testing.T) {
 		{
 			name: "merge_v2",
 			run: func(context.Context) error {
-				_, err := MergeUpdates(v2Update)
-				return err
+				got, err := MergeUpdates(v2Update)
+				if err != nil {
+					return err
+				}
+				want, err := ConvertUpdateToV1(v2Update)
+				if err != nil {
+					return err
+				}
+				if !bytes.Equal(got, want) {
+					return fmt.Errorf("MergeUpdates(v2) = %x, want %x", got, want)
+				}
+				return nil
 			},
-			want: ErrUnsupportedUpdateFormatV2,
-		},
-		{
-			name: "state_vector_v2",
-			run: func(context.Context) error {
-				_, err := StateVectorFromUpdate(v2Update)
-				return err
-			},
-			want: ErrUnsupportedUpdateFormatV2,
-		},
-		{
-			name: "content_ids_v2",
-			run: func(context.Context) error {
-				_, err := CreateContentIDsFromUpdate(v2Update)
-				return err
-			},
-			want: ErrUnsupportedUpdateFormatV2,
-		},
-		{
-			name: "snapshot_v2",
-			run: func(context.Context) error {
-				_, err := SnapshotFromUpdate(v2Update)
-				return err
-			},
-			want: ErrUnsupportedUpdateFormatV2,
+			want: nil,
 		},
 		{
 			name: "merge_context_cancelled",
@@ -200,6 +187,24 @@ func TestPublicUpdateAPIRejectsUnsupportedAndRespectsContext(t *testing.T) {
 				t.Fatalf("error = %v, want %v", err, tt.want)
 			}
 		})
+	}
+
+	if _, err := StateVectorFromUpdate(v2Update); err != nil {
+		t.Fatalf("StateVectorFromUpdate(v2) unexpected error: %v", err)
+	}
+	contentIDs, err := CreateContentIDsFromUpdate(v2Update)
+	if err != nil {
+		t.Fatalf("CreateContentIDsFromUpdate(v2) unexpected error: %v", err)
+	}
+	if contentIDs == nil || contentIDs.IsEmpty() {
+		t.Fatalf("CreateContentIDsFromUpdate(v2) = %#v, want non-empty content ids", contentIDs)
+	}
+	snapshot, err := SnapshotFromUpdate(v2Update)
+	if err != nil {
+		t.Fatalf("SnapshotFromUpdate(v2) unexpected error: %v", err)
+	}
+	if snapshot == nil || snapshot.IsEmpty() {
+		t.Fatalf("SnapshotFromUpdate(v2) = %#v, want non-empty snapshot", snapshot)
 	}
 }
 

@@ -197,3 +197,122 @@ func TestStateManagerApplyAcceptsFirstRemoteClockZero(t *testing.T) {
 		t.Fatalf("Meta(3) = (%+v, %v), want clock=0 lastUpdated=at", meta, ok)
 	}
 }
+
+func TestStateManagerApplyWithChangeReportsAcceptedDelta(t *testing.T) {
+	t.Parallel()
+
+	manager := NewStateManager(9)
+	start := time.Unix(1700000060, 0)
+	manager.ApplyAt(&Update{
+		Clients: []ClientState{
+			{ClientID: 1, Clock: 1, State: json.RawMessage(`{"name":"alice"}`)},
+			{ClientID: 2, Clock: 1, State: json.RawMessage(`{"name":"bob"}`)},
+		},
+	}, start)
+
+	change := manager.ApplyWithChangeAt(&Update{
+		Clients: []ClientState{
+			{ClientID: 1, Clock: 1, State: json.RawMessage(`{"name":"ignored"}`)},
+			{ClientID: 1, Clock: 2, State: json.RawMessage(`{"name":"alice2"}`)},
+			{ClientID: 2, Clock: 1, State: nil},
+			{ClientID: 3, Clock: 0, State: json.RawMessage(`{"name":"carla"}`)},
+			{ClientID: 4, Clock: 9, State: nil},
+		},
+	}, start.Add(time.Second))
+
+	assertChange(t, change, []uint32{3}, []uint32{1}, []uint32{2})
+	if change.Empty() {
+		t.Fatal("change.Empty() = true, want false")
+	}
+	if _, ok := manager.Get(2); ok {
+		t.Fatal("client 2 should be removed after accepted tombstone")
+	}
+	if _, ok := manager.Get(4); ok {
+		t.Fatal("client 4 tombstone without prior state should not create active state")
+	}
+}
+
+func TestStateManagerLocalOperatorsReturnChange(t *testing.T) {
+	t.Parallel()
+
+	manager := NewStateManager(77)
+	start := time.Unix(1700000070, 0)
+
+	change, err := manager.SetLocalStateWithChangeAt(json.RawMessage(`{"cursor":1}`), start)
+	if err != nil {
+		t.Fatalf("SetLocalStateWithChangeAt(add) unexpected error: %v", err)
+	}
+	assertChange(t, change, []uint32{77}, nil, nil)
+
+	change, err = manager.SetLocalStateFieldWithChangeAt("name", json.RawMessage(`"alice"`), start.Add(time.Second))
+	if err != nil {
+		t.Fatalf("SetLocalStateFieldWithChangeAt() unexpected error: %v", err)
+	}
+	assertChange(t, change, nil, []uint32{77}, nil)
+	client, ok := manager.Get(77)
+	if !ok {
+		t.Fatal("Get(77) = missing")
+	}
+	if !bytes.Equal(client.State, []byte(`{"cursor":1,"name":"alice"}`)) {
+		t.Fatalf("client.State = %s, want merged object", client.State)
+	}
+
+	change, err = manager.SetLocalStateWithChangeAt(nil, start.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("SetLocalStateWithChangeAt(remove) unexpected error: %v", err)
+	}
+	assertChange(t, change, nil, nil, []uint32{77})
+}
+
+func TestStateManagerExpireStaleWithChange(t *testing.T) {
+	t.Parallel()
+
+	manager := NewStateManager(99)
+	start := time.Unix(1700000080, 0)
+	if err := manager.SetLocalStateAt(json.RawMessage(`{"self":true}`), start); err != nil {
+		t.Fatalf("SetLocalStateAt() unexpected error: %v", err)
+	}
+	manager.ApplyAt(&Update{
+		Clients: []ClientState{
+			{ClientID: 4, Clock: 1, State: json.RawMessage(`{"name":"old"}`)},
+			{ClientID: 8, Clock: 1, State: json.RawMessage(`{"name":"older"}`)},
+		},
+	}, start)
+
+	change := manager.ExpireStaleWithChangeAt(start.Add(OutdatedTimeout), OutdatedTimeout)
+	assertChange(t, change, nil, nil, []uint32{4, 8})
+
+	if _, ok := manager.Get(99); !ok {
+		t.Fatal("local client should not expire")
+	}
+	update := manager.UpdateForClients(change.Removed)
+	if len(update.Clients) != 2 || !update.Clients[0].IsNull() || !update.Clients[1].IsNull() {
+		t.Fatalf("UpdateForClients(removed) = %#v, want tombstones", update.Clients)
+	}
+}
+
+func assertChange(t *testing.T, got Change, added, updated, removed []uint32) {
+	t.Helper()
+
+	if !uint32SlicesEqual(got.Added, added) {
+		t.Fatalf("change.Added = %v, want %v", got.Added, added)
+	}
+	if !uint32SlicesEqual(got.Updated, updated) {
+		t.Fatalf("change.Updated = %v, want %v", got.Updated, updated)
+	}
+	if !uint32SlicesEqual(got.Removed, removed) {
+		t.Fatalf("change.Removed = %v, want %v", got.Removed, removed)
+	}
+}
+
+func uint32SlicesEqual(left, right []uint32) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}

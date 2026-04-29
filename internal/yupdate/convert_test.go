@@ -22,7 +22,8 @@ func TestConvertUpdateToV1(t *testing.T) {
 		},
 		deleteRange{client: 6, clock: 10, length: 1},
 	)
-	v2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	v2 := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
+	v2AsV1 := mustDecodeHex(t, "010165000401017402686900")
 
 	tests := []struct {
 		name    string
@@ -41,9 +42,9 @@ func TestConvertUpdateToV1(t *testing.T) {
 			want:  encodeEmptyUpdateV1(),
 		},
 		{
-			name:    "v2_rejected",
-			input:   v2,
-			wantErr: ErrUnsupportedUpdateFormatV2,
+			name:  "v2_converted_to_v1",
+			input: v2,
+			want:  v2AsV1,
 		},
 		{
 			name:    "malformed_payload",
