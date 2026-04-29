@@ -4,14 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
-	"yjs-go-bridge/pkg/storage/memory"
-	"yjs-go-bridge/pkg/yawareness"
-	"yjs-go-bridge/pkg/ynodeproto"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage/memory"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ynodeproto"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 func TestRemoteOwnerEndpointSharesRoomWithLocalWebSocketPeers(t *testing.T) {
@@ -251,6 +253,177 @@ func TestRemoteOwnerEndpointSharesRoomWithLocalWebSocketPeers(t *testing.T) {
 	}
 }
 
+func TestRemoteOwnerEndpointAuthenticatesHandshake(t *testing.T) {
+	t.Parallel()
+
+	local := newLocalHTTPServer(t, nil)
+	authCalls := make(chan RemoteOwnerAuthRequest, 1)
+	endpoint, err := NewRemoteOwnerEndpoint(RemoteOwnerEndpointConfig{
+		Local:       local,
+		LocalNodeID: "node-owner",
+		Authenticate: func(_ context.Context, req RemoteOwnerAuthRequest) error {
+			authCalls <- req
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteOwnerEndpoint() unexpected error: %v", err)
+	}
+
+	stream := newFakeRemoteOwnerStream()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- endpoint.ServeStream(context.Background(), stream)
+	}()
+
+	key := testDocumentKey("room-remote-owner-auth")
+	stream.pushReceive(&ynodeproto.Handshake{
+		NodeID:       "node-edge",
+		DocumentKey:  key,
+		ConnectionID: "remote-auth",
+		ClientID:     910,
+		Epoch:        61,
+		Flags:        ynodeproto.FlagPersistOnClose,
+	})
+
+	if _, ok := readRemoteStreamMessage(t, stream).(*ynodeproto.HandshakeAck); !ok {
+		t.Fatal("first stream message is not HandshakeAck")
+	}
+
+	select {
+	case call := <-authCalls:
+		if call.NodeID != "node-edge" || call.DocumentKey != key || call.ConnectionID != "remote-auth" || call.ClientID != 910 || call.Epoch != 61 {
+			t.Fatalf("auth request = %#v, want node-edge/%#v/remote-auth/910/61", call, key)
+		}
+		if call.Flags&ynodeproto.FlagPersistOnClose == 0 {
+			t.Fatalf("auth request Flags = %v, want FlagPersistOnClose", call.Flags)
+		}
+	case <-time.After(testIOTimeout):
+		t.Fatal("authenticator was not called")
+	}
+
+	stream.pushReceive(&ynodeproto.Disconnect{
+		DocumentKey:  key,
+		ConnectionID: "remote-auth",
+		Epoch:        61,
+	})
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("ServeStream() unexpected error: %v", err)
+		}
+	case <-time.After(testIOTimeout):
+		t.Fatal("ServeStream() did not return after disconnect")
+	}
+}
+
+func TestRemoteOwnerEndpointOwnershipRuntimeClaimsAndReleasesRemoteSession(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	local, coordinator, _ := newOwnershipHTTPServer(t, store, "node-owner")
+	endpoint, err := NewRemoteOwnerEndpoint(RemoteOwnerEndpointConfig{
+		Local:       local,
+		LocalNodeID: "node-owner",
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteOwnerEndpoint() unexpected error: %v", err)
+	}
+
+	stream := newFakeRemoteOwnerStream()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- endpoint.ServeStream(ctx, stream)
+	}()
+
+	key := testDocumentKey("room-remote-owner-runtime")
+	stream.pushReceive(&ynodeproto.Handshake{
+		NodeID:       "node-edge",
+		DocumentKey:  key,
+		ConnectionID: "remote-runtime",
+		ClientID:     912,
+		Epoch:        1,
+	})
+	if _, ok := readRemoteStreamMessage(t, stream).(*ynodeproto.HandshakeAck); !ok {
+		t.Fatal("expected handshake ack after ownership claim")
+	}
+
+	resolution, err := coordinator.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
+	if err != nil {
+		t.Fatalf("LookupOwner(remote session open) unexpected error: %v", err)
+	}
+	if !resolution.Local || resolution.Placement.Lease == nil {
+		t.Fatalf("LookupOwner(remote session open) = %#v, want local owner with lease", resolution)
+	}
+
+	stream.pushReceive(&ynodeproto.Disconnect{
+		DocumentKey:  key,
+		ConnectionID: "remote-runtime",
+		Epoch:        1,
+	})
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("ServeStream() unexpected error: %v", err)
+		}
+	case <-time.After(testIOTimeout):
+		t.Fatal("ServeStream() did not return after disconnect")
+	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		_, err := coordinator.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
+		return errors.Is(err, ycluster.ErrOwnerNotFound)
+	})
+}
+
+func TestRemoteOwnerEndpointRejectsUnauthenticatedHandshake(t *testing.T) {
+	t.Parallel()
+
+	authErr := errors.New("node not allowed")
+	local := newLocalHTTPServer(t, nil)
+	endpoint, err := NewRemoteOwnerEndpoint(RemoteOwnerEndpointConfig{
+		Local:       local,
+		LocalNodeID: "node-owner",
+		Authenticate: func(context.Context, RemoteOwnerAuthRequest) error {
+			return authErr
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteOwnerEndpoint() unexpected error: %v", err)
+	}
+
+	stream := newFakeRemoteOwnerStream()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- endpoint.ServeStream(context.Background(), stream)
+	}()
+
+	stream.pushReceive(&ynodeproto.Handshake{
+		NodeID:       "node-edge",
+		DocumentKey:  testDocumentKey("room-remote-owner-auth-reject"),
+		ConnectionID: "remote-auth-reject",
+		ClientID:     911,
+		Epoch:        62,
+	})
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, authErr) {
+			t.Fatalf("ServeStream() error = %v, want %v", err, authErr)
+		}
+	case <-time.After(testIOTimeout):
+		t.Fatal("ServeStream() did not return after auth rejection")
+	}
+
+	select {
+	case message := <-stream.sends:
+		t.Fatalf("unexpected message sent after rejected auth: %T", message)
+	default:
+	}
+}
+
 func TestRemoteOwnerEndpointRejectsMismatchedRoute(t *testing.T) {
 	t.Parallel()
 
@@ -351,7 +524,7 @@ func TestRemoteOwnerEndpointRevalidatesAuthorityAndClosesIdleRemoteSession(t *te
 		DocumentKey:  key,
 		ConnectionID: "remote-conn",
 		ClientID:     904,
-		Epoch:        61,
+		Epoch:        1,
 	})
 	if _, ok := readRemoteStreamMessage(t, stream).(*ynodeproto.HandshakeAck); !ok {
 		t.Fatal("expected handshake ack before authority revalidation")
@@ -393,6 +566,67 @@ func TestRemoteOwnerEndpointRevalidatesAuthorityAndClosesIdleRemoteSession(t *te
 			result: "error",
 		}] == 1
 	})
+}
+
+func TestRemoteOwnerEndpointRejectsStaleHandshakeEpoch(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	local, resolver := newAuthoritativeLocalHTTPServer(t, "node-owner", store)
+	key := testDocumentKey("room-owner-stale-handshake")
+	seedAuthoritativeHTTPDocument(t, ctx, store, resolver, key, "node-owner", 2, "lease-owner-current")
+
+	endpoint, err := NewRemoteOwnerEndpoint(RemoteOwnerEndpointConfig{
+		Local:       local,
+		LocalNodeID: "node-owner",
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteOwnerEndpoint() unexpected error: %v", err)
+	}
+
+	stream := newFakeRemoteOwnerStream()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- endpoint.ServeStream(ctx, stream)
+	}()
+
+	stream.pushReceive(&ynodeproto.Handshake{
+		NodeID:       "node-edge",
+		DocumentKey:  key,
+		ConnectionID: "remote-stale",
+		ClientID:     913,
+		Epoch:        1,
+	})
+
+	closeMessage := readRemoteStreamMessage(t, stream)
+	closeFrame, ok := closeMessage.(*ynodeproto.Close)
+	if !ok {
+		t.Fatalf("first stream message = %T, want *ynodeproto.Close", closeMessage)
+	}
+	if !closeFrame.Retryable {
+		t.Fatal("closeFrame.Retryable = false, want true")
+	}
+	if closeFrame.Reason != authorityLostCloseReason {
+		t.Fatalf("closeFrame.Reason = %q, want %q", closeFrame.Reason, authorityLostCloseReason)
+	}
+	if closeFrame.Epoch != 1 {
+		t.Fatalf("closeFrame.Epoch = %d, want stale handshake epoch 1", closeFrame.Epoch)
+	}
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("ServeStream() unexpected error: %v", err)
+		}
+	case <-time.After(testIOTimeout):
+		t.Fatal("ServeStream() did not return after stale epoch close")
+	}
+	select {
+	case <-stream.closeCh:
+	case <-time.After(testIOTimeout):
+		t.Fatal("remote stream was not closed after stale epoch rejection")
+	}
 }
 
 func readRemoteStreamMessage(t *testing.T, stream *fakeRemoteOwnerStream) ynodeproto.Message {

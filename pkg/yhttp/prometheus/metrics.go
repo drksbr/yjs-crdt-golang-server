@@ -7,7 +7,7 @@ import (
 
 	prometheuslib "github.com/prometheus/client_golang/prometheus"
 
-	"yjs-go-bridge/pkg/yhttp"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp"
 )
 
 const (
@@ -20,6 +20,7 @@ type Config struct {
 	Namespace                   string
 	Subsystem                   string
 	Registerer                  prometheuslib.Registerer
+	ConstLabels                 prometheuslib.Labels
 	HandleDurationBuckets       []float64
 	PersistDurationBucket       []float64
 	OwnerLookupDurationBuckets  []float64
@@ -67,6 +68,7 @@ func New(cfg Config) (*Metrics, error) {
 	if subsystem == "" {
 		subsystem = defaultSubsystem
 	}
+	constLabels := cloneConstLabels(cfg.ConstLabels)
 
 	handleBuckets := cfg.HandleDurationBuckets
 	if len(handleBuckets) == 0 {
@@ -88,124 +90,143 @@ func New(cfg Config) (*Metrics, error) {
 
 	metrics := &Metrics{
 		connectionsOpened: prometheuslib.NewCounter(prometheuslib.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "connections_opened_total",
-			Help:      "Total de conexoes WebSocket abertas pelo handler yhttp.",
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "connections_opened_total",
+			Help:        "Total de conexoes WebSocket abertas pelo handler yhttp.",
+			ConstLabels: constLabels,
 		}),
 		connectionsActive: prometheuslib.NewGauge(prometheuslib.GaugeOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "connections_active",
-			Help:      "Numero atual de conexoes WebSocket ativas no handler yhttp.",
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "connections_active",
+			Help:        "Numero atual de conexoes WebSocket ativas no handler yhttp.",
+			ConstLabels: constLabels,
 		}),
 		framesRead: prometheuslib.NewCounter(prometheuslib.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "frames_read_total",
-			Help:      "Total de frames binarios lidos pelo handler yhttp.",
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "frames_read_total",
+			Help:        "Total de frames binarios lidos pelo handler yhttp.",
+			ConstLabels: constLabels,
 		}),
 		framesWritten: prometheuslib.NewCounterVec(prometheuslib.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "frames_written_total",
-			Help:      "Total de frames binarios escritos pelo handler yhttp.",
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "frames_written_total",
+			Help:        "Total de frames binarios escritos pelo handler yhttp.",
+			ConstLabels: constLabels,
 		}, []string{"kind"}),
 		bytesRead: prometheuslib.NewCounter(prometheuslib.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "bytes_read_total",
-			Help:      "Total de bytes recebidos em frames binarios pelo handler yhttp.",
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "bytes_read_total",
+			Help:        "Total de bytes recebidos em frames binarios pelo handler yhttp.",
+			ConstLabels: constLabels,
 		}),
 		bytesWritten: prometheuslib.NewCounterVec(prometheuslib.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "bytes_written_total",
-			Help:      "Total de bytes enviados em frames binarios pelo handler yhttp.",
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "bytes_written_total",
+			Help:        "Total de bytes enviados em frames binarios pelo handler yhttp.",
+			ConstLabels: constLabels,
 		}, []string{"kind"}),
 		handleDuration: prometheuslib.NewHistogramVec(prometheuslib.HistogramOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "handle_duration_seconds",
-			Help:      "Duracao de processamento de payloads do y-protocol pelo handler yhttp.",
-			Buckets:   handleBuckets,
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "handle_duration_seconds",
+			Help:        "Duracao de processamento de payloads do y-protocol pelo handler yhttp.",
+			ConstLabels: constLabels,
+			Buckets:     handleBuckets,
 		}, []string{"result"}),
 		persistDuration: prometheuslib.NewHistogramVec(prometheuslib.HistogramOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "persist_duration_seconds",
-			Help:      "Duracao da persistencia opcional de snapshot no fechamento da conexao.",
-			Buckets:   persistBuckets,
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "persist_duration_seconds",
+			Help:        "Duracao da persistencia opcional de snapshot no fechamento da conexao.",
+			ConstLabels: constLabels,
+			Buckets:     persistBuckets,
 		}, []string{"result"}),
 		errors: prometheuslib.NewCounterVec(prometheuslib.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "errors_total",
-			Help:      "Total de erros observados pela borda yhttp, rotulados por estagio.",
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "errors_total",
+			Help:        "Total de erros observados pela borda yhttp, rotulados por estagio.",
+			ConstLabels: constLabels,
 		}, []string{"stage"}),
 		ownerLookupDuration: prometheuslib.NewHistogramVec(prometheuslib.HistogramOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "owner_lookup_duration_seconds",
-			Help:      "Duracao da resolucao de owner na borda owner-aware.",
-			Buckets:   ownerLookupBuckets,
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "owner_lookup_duration_seconds",
+			Help:        "Duracao da resolucao de owner na borda owner-aware.",
+			ConstLabels: constLabels,
+			Buckets:     ownerLookupBuckets,
 		}, []string{"result"}),
 		routeDecisions: prometheuslib.NewCounterVec(prometheuslib.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "route_decisions_total",
-			Help:      "Total de decisoes de roteamento da borda owner-aware.",
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "route_decisions_total",
+			Help:        "Total de decisoes de roteamento da borda owner-aware.",
+			ConstLabels: constLabels,
 		}, []string{"decision"}),
 		remoteOwnerConnections: prometheuslib.NewCounterVec(prometheuslib.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "remote_owner_connections_opened_total",
-			Help:      "Total de streams remotos edge/owner abertos para relay inter-node.",
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "remote_owner_connections_opened_total",
+			Help:        "Total de streams remotos edge/owner abertos para relay inter-node.",
+			ConstLabels: constLabels,
 		}, []string{"role"}),
 		remoteOwnerConnectionsAct: prometheuslib.NewGaugeVec(prometheuslib.GaugeOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "remote_owner_connections_active",
-			Help:      "Numero atual de streams remotos edge/owner ativos no relay inter-node.",
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "remote_owner_connections_active",
+			Help:        "Numero atual de streams remotos edge/owner ativos no relay inter-node.",
+			ConstLabels: constLabels,
 		}, []string{"role"}),
 		remoteOwnerHandshake: prometheuslib.NewHistogramVec(prometheuslib.HistogramOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "remote_owner_handshake_duration_seconds",
-			Help:      "Duracao do handshake inicial entre edge e owner remoto.",
-			Buckets:   remoteOwnerHandshakeBuckets,
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "remote_owner_handshake_duration_seconds",
+			Help:        "Duracao do handshake inicial entre edge e owner remoto.",
+			ConstLabels: constLabels,
+			Buckets:     remoteOwnerHandshakeBuckets,
 		}, []string{"role", "result"}),
 		remoteOwnerMessages: prometheuslib.NewCounterVec(prometheuslib.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "remote_owner_messages_total",
-			Help:      "Total de mensagens tipadas trafegadas no relay inter-node.",
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "remote_owner_messages_total",
+			Help:        "Total de mensagens tipadas trafegadas no relay inter-node.",
+			ConstLabels: constLabels,
 		}, []string{"role", "direction", "kind"}),
 		remoteOwnerCloses: prometheuslib.NewCounterVec(prometheuslib.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "remote_owner_closes_total",
-			Help:      "Total de encerramentos observados no relay inter-node.",
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "remote_owner_closes_total",
+			Help:        "Total de encerramentos observados no relay inter-node.",
+			ConstLabels: constLabels,
 		}, []string{"role", "reason"}),
 		authorityRevalidation: prometheuslib.NewHistogramVec(prometheuslib.HistogramOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "authority_revalidation_duration_seconds",
-			Help:      "Duracao das revalidacoes periodicas de autoridade local/owner-side.",
-			Buckets:   prometheuslib.DefBuckets,
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "authority_revalidation_duration_seconds",
+			Help:        "Duracao das revalidacoes periodicas de autoridade local/owner-side.",
+			ConstLabels: constLabels,
+			Buckets:     prometheuslib.DefBuckets,
 		}, []string{"role", "result"}),
 		ownershipTransitions: prometheuslib.NewCounterVec(prometheuslib.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "ownership_transitions_total",
-			Help:      "Total de transicoes de ownership observadas durante handoff e rebind.",
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "ownership_transitions_total",
+			Help:        "Total de transicoes de ownership observadas durante handoff e rebind.",
+			ConstLabels: constLabels,
 		}, []string{"from", "to", "result"}),
 		ownershipTransitionDur: prometheuslib.NewHistogramVec(prometheuslib.HistogramOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "ownership_transition_duration_seconds",
-			Help:      "Duracao das transicoes de ownership local/remoto.",
-			Buckets:   prometheuslib.DefBuckets,
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "ownership_transition_duration_seconds",
+			Help:        "Duracao das transicoes de ownership local/remoto.",
+			ConstLabels: constLabels,
+			Buckets:     prometheuslib.DefBuckets,
 		}, []string{"from", "to", "result"}),
 	}
 
@@ -367,4 +388,15 @@ func resultLabel(err error) string {
 		return "error"
 	}
 	return "ok"
+}
+
+func cloneConstLabels(labels prometheuslib.Labels) prometheuslib.Labels {
+	if len(labels) == 0 {
+		return nil
+	}
+	cloned := make(prometheuslib.Labels, len(labels))
+	for key, value := range labels {
+		cloned[key] = value
+	}
+	return cloned
 }

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"yjs-go-bridge/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
 )
 
 var (
@@ -14,6 +14,7 @@ var (
 	_ storage.AuthoritativeUpdateLogStore = (*Store)(nil)
 	_ storage.PlacementStore              = (*Store)(nil)
 	_ storage.LeaseStore                  = (*Store)(nil)
+	_ storage.LeaseHandoffStore           = (*Store)(nil)
 	_ storage.DistributedStore            = (*Store)(nil)
 )
 
@@ -307,26 +308,14 @@ func (s *Store) SaveLease(ctx context.Context, lease storage.LeaseRecord) (*stor
 	switch {
 	case current == nil:
 		if record.Owner.Epoch <= lastEpoch {
-			return nil, fmt.Errorf(
-				"%w: shard %s current=%d incoming=%d",
-				storage.ErrLeaseStaleEpoch,
-				record.ShardID,
-				lastEpoch,
-				record.Owner.Epoch,
-			)
+			return nil, storage.NewLeaseStaleEpochError(record.ShardID, lastEpoch, record.Owner.Epoch)
 		}
 	case sameLeaseRecord(current, record):
 		// Renewals keep the original generation start time.
 		record.AcquiredAt = current.AcquiredAt
 	case current.ExpiresAt.After(opTime):
 		if record.Owner.Epoch <= current.Owner.Epoch {
-			return nil, fmt.Errorf(
-				"%w: shard %s current=%d incoming=%d",
-				storage.ErrLeaseStaleEpoch,
-				record.ShardID,
-				current.Owner.Epoch,
-				record.Owner.Epoch,
-			)
+			return nil, storage.NewLeaseStaleEpochError(record.ShardID, current.Owner.Epoch, record.Owner.Epoch)
 		}
 		return nil, fmt.Errorf(
 			"%w: shard %s token %q",
@@ -340,13 +329,7 @@ func (s *Store) SaveLease(ctx context.Context, lease storage.LeaseRecord) (*stor
 			if lastEpoch > currentEpoch {
 				currentEpoch = lastEpoch
 			}
-			return nil, fmt.Errorf(
-				"%w: shard %s current=%d incoming=%d",
-				storage.ErrLeaseStaleEpoch,
-				record.ShardID,
-				currentEpoch,
-				record.Owner.Epoch,
-			)
+			return nil, storage.NewLeaseStaleEpochError(record.ShardID, currentEpoch, record.Owner.Epoch)
 		}
 	}
 	if !record.ExpiresAt.After(record.AcquiredAt) {
@@ -357,6 +340,70 @@ func (s *Store) SaveLease(ctx context.Context, lease storage.LeaseRecord) (*stor
 		s.leaseLast[record.ShardID] = record.Owner.Epoch
 	}
 	s.leases[record.ShardID] = record
+	return record.Clone(), nil
+}
+
+// HandoffLease transfere atomicamente a lease ativa para o próximo owner,
+// exigindo token atual correto e epoch exatamente monotônico.
+func (s *Store) HandoffLease(
+	ctx context.Context,
+	shardID storage.ShardID,
+	currentToken string,
+	next storage.LeaseRecord,
+) (*storage.LeaseRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s == nil {
+		return nil, errNilStore
+	}
+	if err := shardID.Validate(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(currentToken) == "" {
+		return nil, fmt.Errorf("%w: currentToken obrigatorio", storage.ErrInvalidLeaseToken)
+	}
+
+	record := next.Clone()
+	if record.ShardID != shardID {
+		return nil, fmt.Errorf("%w: next shard %q != %q", storage.ErrInvalidShardID, record.ShardID, shardID)
+	}
+	now := s.nowTime()
+	if record.AcquiredAt.IsZero() {
+		record.AcquiredAt = now
+	}
+	if err := record.Validate(); err != nil {
+		return nil, err
+	}
+	if !record.ExpiresAt.After(record.AcquiredAt) {
+		return nil, fmt.Errorf("%w: expiresAt deve ser apos acquiredAt", storage.ErrInvalidLeaseExpiry)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.ensureStoreInitializedLocked()
+	current := s.leases[shardID]
+	if current == nil {
+		return nil, storage.ErrLeaseNotFound
+	}
+	if current.Token != currentToken {
+		return nil, fmt.Errorf("%w: shard %s token %q", storage.ErrLeaseConflict, shardID, current.Token)
+	}
+	if !current.ExpiresAt.After(record.AcquiredAt) {
+		return nil, fmt.Errorf("%w: shard %s lease expirada", storage.ErrLeaseConflict, shardID)
+	}
+	expectedEpoch := current.Owner.Epoch + 1
+	if record.Owner.Epoch != expectedEpoch {
+		return nil, storage.NewLeaseStaleEpochError(shardID, current.Owner.Epoch, record.Owner.Epoch)
+	}
+
+	lastEpoch := s.leaseLast[shardID]
+	if record.Owner.Epoch <= lastEpoch {
+		return nil, storage.NewLeaseStaleEpochError(shardID, lastEpoch, record.Owner.Epoch)
+	}
+	s.leaseLast[shardID] = record.Owner.Epoch
+	s.leases[shardID] = record
 	return record.Clone(), nil
 }
 

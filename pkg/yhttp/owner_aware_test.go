@@ -14,11 +14,12 @@ import (
 
 	"github.com/coder/websocket"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/yawareness"
-	"yjs-go-bridge/pkg/ycluster"
-	"yjs-go-bridge/pkg/ynodeproto"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage/memory"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ynodeproto"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 func TestOwnerAwareServerDelegatesToLocalOwner(t *testing.T) {
@@ -76,6 +77,119 @@ func TestOwnerAwareServerDelegatesToLocalOwner(t *testing.T) {
 	}
 	if len(messages[0].Awareness.Clients) != 1 {
 		t.Fatalf("len(messages[0].Awareness.Clients) = %d, want 1", len(messages[0].Awareness.Clients))
+	}
+}
+
+func TestOwnerAwareServerPromotesLocalOwnerWhenLookupIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	recorder := newRecordingMetrics()
+	local, coordinator, _ := newOwnershipHTTPServer(t, store, "node-a")
+	local.metrics = recorder
+
+	handler, err := NewOwnerAwareServer(OwnerAwareServerConfig{
+		Local:                          local,
+		OwnerLookup:                    coordinator,
+		PromoteLocalOnOwnerUnavailable: true,
+	})
+	if err != nil {
+		t.Fatalf("NewOwnerAwareServer() unexpected error: %v", err)
+	}
+
+	srv := newHTTPTestServerWithHandler(t, handler)
+	key := testDocumentKey("room-owner-promote")
+	conn := dialWS(t, srv.URL+"/ws?doc=room-owner-promote&client=720&conn=promote")
+	writeBinary(t, conn, yprotocol.EncodeProtocolSyncStep1([]byte{0x00}))
+	_ = readBinary(t, conn)
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		resolution, err := coordinator.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
+		return err == nil && resolution.Local && resolution.Placement.Lease != nil
+	})
+	waitForCondition(t, 2*time.Second, func() bool {
+		snapshot := recorder.snapshot()
+		return snapshot.ownerLookupResults[ownerLookupResultNotFound] == 1 &&
+			snapshot.routeDecisions[routeDecisionLocalPromote] == 1
+	})
+
+	if err := conn.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Fatalf("conn.Close() unexpected error: %v", err)
+	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		_, err := coordinator.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
+		return errors.Is(err, ycluster.ErrOwnerNotFound)
+	})
+}
+
+func TestOwnerAwareServerDoesNotPromoteUnavailableOwnerByDefault(t *testing.T) {
+	t.Parallel()
+
+	store := memory.New()
+	local, coordinator, _ := newOwnershipHTTPServer(t, store, "node-a")
+
+	handler, err := NewOwnerAwareServer(OwnerAwareServerConfig{
+		Local:       local,
+		OwnerLookup: coordinator,
+	})
+	if err != nil {
+		t.Fatalf("NewOwnerAwareServer() unexpected error: %v", err)
+	}
+
+	srv := newHTTPTestServerWithHandler(t, handler)
+	resp, err := http.Get(srv.URL + "/ws?doc=room-owner-no-promote&client=721")
+	if err != nil {
+		t.Fatalf("http.Get() unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("resp.StatusCode = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
+	}
+	if got := resp.Header.Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want %q", got, "1")
+	}
+}
+
+func TestOwnerAwareServerPromoteRequiresOwnershipRuntime(t *testing.T) {
+	t.Parallel()
+
+	recorder := newRecordingMetrics()
+	local := newLocalHTTPServerWithMetrics(t, memory.New(), recorder)
+	lookup := ownerLookupFunc(func(context.Context, ycluster.OwnerLookupRequest) (*ycluster.OwnerResolution, error) {
+		return nil, ycluster.ErrOwnerNotFound
+	})
+
+	handler, err := NewOwnerAwareServer(OwnerAwareServerConfig{
+		Local:                          local,
+		OwnerLookup:                    lookup,
+		PromoteLocalOnOwnerUnavailable: true,
+	})
+	if err != nil {
+		t.Fatalf("NewOwnerAwareServer() unexpected error: %v", err)
+	}
+
+	srv := newHTTPTestServerWithHandler(t, handler)
+	resp, err := http.Get(srv.URL + "/ws?doc=room-owner-no-runtime&client=722")
+	if err != nil {
+		t.Fatalf("http.Get() unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("resp.StatusCode = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
+	}
+	if got := resp.Header.Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want %q", got, "1")
+	}
+
+	snapshot := recorder.snapshot()
+	if snapshot.routeDecisions[routeDecisionLocalPromote] != 0 {
+		t.Fatalf("routeDecisions[local_promote] = %d, want 0", snapshot.routeDecisions[routeDecisionLocalPromote])
+	}
+	if len(snapshot.errorStages) != 1 || snapshot.errorStages[0] != "lookup_owner" {
+		t.Fatalf("errorStages = %v, want [lookup_owner]", snapshot.errorStages)
 	}
 }
 
@@ -1019,6 +1133,233 @@ func TestOwnerAwareServerRemoteForwarderRebindsAfterRetryableClose(t *testing.T)
 			result: "ok",
 		}] == 1
 	})
+}
+
+func TestOwnerAwareServerRemoteForwarderTakesOverLocalOwnerWithOwnershipRuntime(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	recorder := newRecordingMetrics()
+	local, coordinator, resolver := newOwnershipHTTPServer(t, store, "node-edge-local")
+	local.metrics = recorder
+
+	key := testDocumentKey("room-owner-forward-local-takeover")
+	var (
+		lookupMu    sync.Mutex
+		lookupCount int
+	)
+	lookup := ownerLookupFunc(func(ctx context.Context, req ycluster.OwnerLookupRequest) (*ycluster.OwnerResolution, error) {
+		lookupMu.Lock()
+		lookupCount++
+		current := lookupCount
+		lookupMu.Unlock()
+		if current == 1 {
+			return &ycluster.OwnerResolution{
+				DocumentKey: req.DocumentKey,
+				Placement: ycluster.Placement{
+					ShardID: 22,
+					NodeID:  "node-remote-old",
+					Lease: &ycluster.Lease{
+						ShardID: 22,
+						Holder:  "node-remote-old",
+						Epoch:   41,
+						Token:   "lease-old",
+					},
+				},
+				Local: false,
+			}, nil
+		}
+		return coordinator.LookupOwner(ctx, req)
+	})
+
+	firstStream := newFakeRemoteOwnerStream()
+	dialer := &fakeRemoteOwnerDialer{
+		requests: make(chan RemoteOwnerDialRequest, 1),
+		streams:  []NodeMessageStream{firstStream},
+	}
+	forwardRemoteOwner, err := NewRemoteOwnerForwardHandler(RemoteOwnerForwardConfig{
+		LocalNodeID:    "node-edge-local",
+		Local:          local,
+		Dialer:         dialer,
+		OwnerLookup:    lookup,
+		Metrics:        recorder,
+		RebindTimeout:  time.Second,
+		RebindInterval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteOwnerForwardHandler() unexpected error: %v", err)
+	}
+
+	handler, err := NewOwnerAwareServer(OwnerAwareServerConfig{
+		Local:         local,
+		OwnerLookup:   lookup,
+		OnRemoteOwner: forwardRemoteOwner,
+	})
+	if err != nil {
+		t.Fatalf("NewOwnerAwareServer() unexpected error: %v", err)
+	}
+
+	srv := newHTTPTestServerWithHandler(t, handler)
+	conn := dialWS(t, srv.URL+"/ws?doc=room-owner-forward-local-takeover&client=717&conn=edge-local")
+
+	select {
+	case <-dialer.requests:
+	case <-time.After(testIOTimeout):
+		t.Fatal("initial DialRemoteOwner() was not called")
+	}
+	firstHandshakeMessage := readRemoteStreamMessage(t, firstStream)
+	firstHandshake, ok := firstHandshakeMessage.(*ynodeproto.Handshake)
+	if !ok {
+		t.Fatalf("first stream first message = %T, want *ynodeproto.Handshake", firstHandshakeMessage)
+	}
+
+	seedAuthoritativeHTTPDocument(t, ctx, store, resolver, key, "node-edge-local", 42, "lease-local")
+	firstStream.pushReceive(&ynodeproto.Close{
+		DocumentKey:  firstHandshake.DocumentKey,
+		ConnectionID: firstHandshake.ConnectionID,
+		Epoch:        firstHandshake.Epoch,
+		Retryable:    true,
+		Reason:       authorityLostCloseReason,
+	})
+
+	_ = readBinary(t, conn)
+	waitForCondition(t, 2*time.Second, func() bool {
+		snapshot := recorder.snapshot()
+		return snapshot.ownershipTransitions[recordingOwnershipTransitionKey{
+			from:   ownershipStateRemote,
+			to:     ownershipStateLocal,
+			result: "ok",
+		}] == 1
+	})
+
+	if err := conn.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Fatalf("conn.Close() unexpected error: %v", err)
+	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		_, err := coordinator.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
+		return errors.Is(err, ycluster.ErrOwnerNotFound)
+	})
+}
+
+func TestRemoteOwnerForwarderReceiveHandshakeAckHandlesInitialClose(t *testing.T) {
+	t.Parallel()
+
+	key := testDocumentKey("room-owner-forward-initial-close")
+	req := Request{
+		DocumentKey:  key,
+		ConnectionID: "edge-initial-close",
+		ClientID:     718,
+	}
+	resolution := ycluster.OwnerResolution{
+		DocumentKey: key,
+		Placement: ycluster.Placement{
+			ShardID: 23,
+			NodeID:  "node-remote-close",
+			Lease: &ycluster.Lease{
+				ShardID: 23,
+				Holder:  "node-remote-close",
+				Epoch:   43,
+				Token:   "lease-close",
+			},
+		},
+	}
+
+	stream := newFakeRemoteOwnerStream()
+	stream.pushReceive(&ynodeproto.Close{
+		DocumentKey:  key,
+		ConnectionID: req.ConnectionID,
+		Epoch:        43,
+		Retryable:    true,
+		Reason:       authorityLostCloseReason,
+	})
+
+	forwarder := &remoteOwnerForwarder{
+		writeTimeout: time.Second,
+		metrics:      normalizeMetrics(nil),
+	}
+	err := forwarder.receiveHandshakeAck(context.Background(), req, resolution, stream, 43)
+
+	var closeErr *remoteOwnerClosedError
+	if !errors.As(err, &closeErr) {
+		t.Fatalf("receiveHandshakeAck() error = %v, want remoteOwnerClosedError", err)
+	}
+	if closeErr.signal.metricReason("") != authorityLostCloseReason || !closeErr.signal.retryable {
+		t.Fatalf("close signal = %#v, want retryable authority loss", closeErr.signal)
+	}
+}
+
+func TestOwnerAwareServerRemoteForwarderMapsRetryableHandshakeCloseToUnavailable(t *testing.T) {
+	t.Parallel()
+
+	key := testDocumentKey("room-owner-forward-handshake-close")
+	local := newLocalHTTPServer(t, nil)
+	lookup := ownerLookupFunc(func(_ context.Context, req ycluster.OwnerLookupRequest) (*ycluster.OwnerResolution, error) {
+		return &ycluster.OwnerResolution{
+			DocumentKey: req.DocumentKey,
+			Placement: ycluster.Placement{
+				ShardID: 24,
+				NodeID:  "node-remote-close",
+				Lease: &ycluster.Lease{
+					ShardID: 24,
+					Holder:  "node-remote-close",
+					Epoch:   44,
+					Token:   "lease-close",
+				},
+			},
+			Local: false,
+		}, nil
+	})
+
+	stream := newFakeRemoteOwnerStream()
+	stream.handshakeAckFactory = func(handshake *ynodeproto.Handshake) ynodeproto.Message {
+		return &ynodeproto.Close{
+			DocumentKey:  handshake.DocumentKey,
+			ConnectionID: handshake.ConnectionID,
+			Epoch:        handshake.Epoch,
+			Retryable:    true,
+			Reason:       authorityLostCloseReason,
+		}
+	}
+	dialer := &fakeRemoteOwnerDialer{
+		requests: make(chan RemoteOwnerDialRequest, 1),
+		streams:  []NodeMessageStream{stream},
+	}
+	forwardRemoteOwner, err := NewRemoteOwnerForwardHandler(RemoteOwnerForwardConfig{
+		LocalNodeID: "node-edge-close",
+		Local:       local,
+		Dialer:      dialer,
+		OwnerLookup: lookup,
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteOwnerForwardHandler() unexpected error: %v", err)
+	}
+	handler, err := NewOwnerAwareServer(OwnerAwareServerConfig{
+		Local:         local,
+		OwnerLookup:   lookup,
+		OnRemoteOwner: forwardRemoteOwner,
+	})
+	if err != nil {
+		t.Fatalf("NewOwnerAwareServer() unexpected error: %v", err)
+	}
+
+	srv := newHTTPTestServerWithHandler(t, handler)
+	dialCtx, cancel := context.WithTimeout(context.Background(), testIOTimeout)
+	defer cancel()
+	conn, response, err := websocket.Dial(dialCtx, "ws"+strings.TrimPrefix(srv.URL+"/ws?doc="+key.DocumentID+"&client=719&conn=edge-close", "http"), nil)
+	if err == nil {
+		_ = conn.CloseNow()
+		t.Fatal("websocket.Dial() succeeded, want retryable handshake close")
+	}
+	if response == nil {
+		t.Fatalf("websocket.Dial() response = nil, error = %v", err)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("response.StatusCode = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+	}
+	if response.Header.Get("Retry-After") != "1" {
+		t.Fatalf("Retry-After = %q, want 1", response.Header.Get("Retry-After"))
+	}
 }
 
 func TestOwnerAwareServerReturnsMappedLookupErrors(t *testing.T) {

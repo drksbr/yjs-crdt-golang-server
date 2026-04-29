@@ -10,9 +10,9 @@ import (
 
 	"github.com/coder/websocket"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/yhttp"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 const (

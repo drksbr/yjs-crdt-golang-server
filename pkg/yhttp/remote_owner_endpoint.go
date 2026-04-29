@@ -10,10 +10,10 @@ import (
 
 	"github.com/coder/websocket"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/ycluster"
-	"yjs-go-bridge/pkg/ynodeproto"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ynodeproto"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 // RemoteOwnerEndpointConfig define o endpoint owner-side que consome streams
@@ -21,8 +21,24 @@ import (
 type RemoteOwnerEndpointConfig struct {
 	Local          *Server
 	LocalNodeID    ycluster.NodeID
+	Authenticate   RemoteOwnerAuthenticator
 	AcceptOptions  *websocket.AcceptOptions
 	ReadLimitBytes int64
+}
+
+// RemoteOwnerAuthenticator valida se um handshake inter-node pode materializar
+// uma conexão no owner local.
+type RemoteOwnerAuthenticator func(ctx context.Context, req RemoteOwnerAuthRequest) error
+
+// RemoteOwnerAuthRequest descreve os campos autenticáveis do handshake
+// inter-node inicial.
+type RemoteOwnerAuthRequest struct {
+	NodeID       ycluster.NodeID
+	DocumentKey  storage.DocumentKey
+	ConnectionID string
+	ClientID     uint32
+	Epoch        uint64
+	Flags        ynodeproto.Flags
 }
 
 // RemoteOwnerEndpoint materializa conexões roteadas vindas de outros nós
@@ -30,6 +46,7 @@ type RemoteOwnerEndpointConfig struct {
 type RemoteOwnerEndpoint struct {
 	local          *Server
 	localNodeID    ycluster.NodeID
+	authenticate   RemoteOwnerAuthenticator
 	acceptOptions  *websocket.AcceptOptions
 	readLimitBytes int64
 }
@@ -51,6 +68,7 @@ func NewRemoteOwnerEndpoint(cfg RemoteOwnerEndpointConfig) (*RemoteOwnerEndpoint
 	return &RemoteOwnerEndpoint{
 		local:          cfg.Local,
 		localNodeID:    cfg.LocalNodeID,
+		authenticate:   cfg.Authenticate,
 		acceptOptions:  cloneAcceptOptions(cfg.AcceptOptions),
 		readLimitBytes: readLimit,
 	}, nil
@@ -99,8 +117,32 @@ func (e *RemoteOwnerEndpoint) ServeStream(ctx context.Context, stream NodeMessag
 
 	req := requestFromHandshake(handshake)
 	observeRemoteOwnerMessage(e.local.metrics, req, remoteOwnerMetricsRoleOwner, remoteOwnerMetricsDirectionIn, nodeMessageMetricKind(handshake))
+	if err := e.authenticateHandshake(ctx, handshake); err != nil {
+		observeRemoteOwnerHandshake(e.local.metrics, req, remoteOwnerMetricsRoleOwner, time.Since(handshakeStart), err)
+		e.local.metrics.Error(req, "remote_owner_authenticate", err)
+		e.local.report(nil, req, err)
+		return err
+	}
+	ownership, err := e.local.acquireRequestOwnership(ctx, req)
+	if err != nil {
+		observeRemoteOwnerHandshake(e.local.metrics, req, remoteOwnerMetricsRoleOwner, time.Since(handshakeStart), err)
+		if statusFromOwnershipError(err) == http.StatusServiceUnavailable {
+			signal := remoteOwnerCloseSignal{
+				reason:    authorityLostCloseReason,
+				retryable: true,
+			}
+			e.sendRemoteOwnerClose(req, handshake.Epoch, stream, signal)
+			if closeErr := stream.Close(); closeErr != nil && !isIgnorableNodeStreamError(closeErr) {
+				e.local.metrics.Error(req, "remote_owner_close_stream", closeErr)
+				e.local.report(nil, req, closeErr)
+			}
+			return nil
+		}
+		return err
+	}
 	connection, err := e.local.provider.Open(ctx, req.DocumentKey, req.ConnectionID, req.ClientID)
 	if err != nil {
+		e.local.releaseRequestOwnership(nil, req, ownership)
 		observeRemoteOwnerHandshake(e.local.metrics, req, remoteOwnerMetricsRoleOwner, time.Since(handshakeStart), err)
 		if isAuthorityLostRetryableError(err) {
 			signal := remoteOwnerCloseSignalFromError(err, "open_error")
@@ -113,6 +155,26 @@ func (e *RemoteOwnerEndpoint) ServeStream(ctx context.Context, stream NodeMessag
 		}
 		return err
 	}
+	if err := validateRemoteOwnerAuthorityEpoch(handshake.Epoch, connection.AuthorityEpoch()); err != nil {
+		e.local.releaseRequestOwnership(nil, req, ownership)
+		observeRemoteOwnerHandshake(e.local.metrics, req, remoteOwnerMetricsRoleOwner, time.Since(handshakeStart), err)
+		e.local.metrics.Error(req, "remote_owner_authority_epoch", err)
+		e.local.report(nil, req, err)
+		if _, closeErr := connection.Close(); closeErr != nil {
+			e.local.metrics.Error(req, "remote_owner_close_connection", closeErr)
+			e.local.report(nil, req, closeErr)
+		}
+		signal := remoteOwnerCloseSignal{
+			reason:    authorityLostCloseReason,
+			retryable: true,
+		}
+		e.sendRemoteOwnerClose(req, handshake.Epoch, stream, signal)
+		if closeErr := stream.Close(); closeErr != nil && !isIgnorableNodeStreamError(closeErr) {
+			e.local.metrics.Error(req, "remote_owner_close_stream", closeErr)
+			e.local.report(nil, req, closeErr)
+		}
+		return nil
+	}
 
 	closeClient := false
 	closeSignal := remoteOwnerCloseSignal{}
@@ -120,7 +182,7 @@ func (e *RemoteOwnerEndpoint) ServeStream(ctx context.Context, stream NodeMessag
 	remoteConnectionOpened := false
 	e.local.metrics.ConnectionOpened(req)
 	defer func() {
-		e.cleanupRemoteOwnerStream(req, handshake.Epoch, connection, stream, closeClient, closeSignal, remoteConnectionOpened, closeReason)
+		e.cleanupRemoteOwnerStream(req, handshake.Epoch, connection, stream, ownership, closeClient, closeSignal, remoteConnectionOpened, closeReason)
 	}()
 
 	if err := e.sendHandshakeAck(ctx, stream, handshake); err != nil {
@@ -210,6 +272,20 @@ func (e *RemoteOwnerEndpoint) receiveHandshake(ctx context.Context, stream NodeM
 	return handshake, nil
 }
 
+func (e *RemoteOwnerEndpoint) authenticateHandshake(ctx context.Context, handshake *ynodeproto.Handshake) error {
+	if e == nil || e.authenticate == nil {
+		return nil
+	}
+	return e.authenticate(ctx, RemoteOwnerAuthRequest{
+		NodeID:       ycluster.NodeID(handshake.NodeID),
+		DocumentKey:  handshake.DocumentKey,
+		ConnectionID: handshake.ConnectionID,
+		ClientID:     handshake.ClientID,
+		Epoch:        handshake.Epoch,
+		Flags:        handshake.Flags,
+	})
+}
+
 func requestFromHandshake(handshake *ynodeproto.Handshake) Request {
 	req := Request{
 		DocumentKey:  handshake.DocumentKey,
@@ -280,7 +356,7 @@ func (e *RemoteOwnerEndpoint) handleRemoteOwnerMessage(
 	e.local.metrics.FrameRead(req, len(payload))
 
 	handleStart := time.Now()
-	result, err := connection.HandleEncodedMessages(payload)
+	result, err := connection.HandleEncodedMessagesContext(ctx, payload)
 	e.local.metrics.Handle(req, time.Since(handleStart), err)
 	if err != nil {
 		if !isAuthorityLostRetryableError(err) {
@@ -337,6 +413,7 @@ func (e *RemoteOwnerEndpoint) cleanupRemoteOwnerStream(
 	epoch uint64,
 	connection *yprotocol.Connection,
 	stream NodeMessageStream,
+	ownership *ycluster.DocumentOwnershipHandle,
 	closeClient bool,
 	closeSignal remoteOwnerCloseSignal,
 	remoteConnectionOpened bool,
@@ -371,6 +448,7 @@ func (e *RemoteOwnerEndpoint) cleanupRemoteOwnerStream(
 	} else if len(result.Broadcast) > 0 {
 		e.local.fanout(nil, req, result.Broadcast)
 	}
+	e.local.releaseRequestOwnership(nil, req, ownership)
 
 	if err := stream.Close(); err != nil && !isIgnorableNodeStreamError(err) {
 		e.local.metrics.Error(req, "remote_owner_close_stream", err)
@@ -502,6 +580,13 @@ func validateRemoteOwnerRouteFields(
 		return fmt.Errorf("yhttp: remote owner route mismatch: epoch got %d want %d", messageEpoch, epoch)
 	}
 	return nil
+}
+
+func validateRemoteOwnerAuthorityEpoch(handshakeEpoch uint64, authorityEpoch uint64) error {
+	if authorityEpoch == 0 || handshakeEpoch == authorityEpoch {
+		return nil
+	}
+	return fmt.Errorf("yhttp: remote owner authority epoch mismatch: handshake got %d want %d", handshakeEpoch, authorityEpoch)
 }
 
 func isIgnorableNodeStreamError(err error) bool {

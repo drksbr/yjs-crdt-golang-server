@@ -4,7 +4,7 @@ import (
 	"context"
 	"sort"
 
-	"yjs-go-bridge/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
 )
 
 // DecodeStateVector decodifica um state vector em mapa por client.

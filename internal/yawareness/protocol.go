@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 
-	ybinary "yjs-go-bridge/internal/binary"
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/internal/yprotocol"
+	ybinary "github.com/drksbr/yjs-crdt-golang-server/internal/binary"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yprotocol"
 )
 
 var (

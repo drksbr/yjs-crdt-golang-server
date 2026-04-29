@@ -9,8 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	"yjs-go-bridge/pkg/yjsbridge"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 func main() {

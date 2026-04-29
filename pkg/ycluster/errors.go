@@ -13,6 +13,10 @@ var (
 	ErrNilPlacementStore = errors.New("ycluster: placement store obrigatorio")
 	// ErrNilLeaseStore sinaliza ausencia de lease store em wiring storage-backed.
 	ErrNilLeaseStore = errors.New("ycluster: lease store obrigatorio")
+	// ErrNilOwnershipCoordinator sinaliza ausencia do coordenador de ownership.
+	ErrNilOwnershipCoordinator = errors.New("ycluster: ownership coordinator obrigatorio")
+	// ErrOwnershipRuntimeClosed sinaliza uso de runtime de ownership encerrado.
+	ErrOwnershipRuntimeClosed = errors.New("ycluster: ownership runtime encerrado")
 	// ErrInvalidShardCount sinaliza espaco de shards vazio.
 	ErrInvalidShardCount = errors.New("ycluster: shard count invalido")
 	// ErrInvalidOwnerLookupRequest sinaliza request invalido para resolucao de owner.
@@ -31,6 +35,8 @@ var (
 	ErrLeaseTokenMismatch = errors.New("ycluster: lease token nao corresponde ao owner atual")
 	// ErrLeaseExpired sinaliza tentativa de operar sobre lease ja expirada.
 	ErrLeaseExpired = errors.New("ycluster: lease expirada")
+	// ErrLeaseHandoffUnsupported sinaliza storage sem troca atomica de lease.
+	ErrLeaseHandoffUnsupported = errors.New("ycluster: handoff atomico de lease nao suportado")
 	// ErrOwnerNotFound sinaliza ausencia de owner resolvido para a chave consultada.
 	ErrOwnerNotFound = errors.New("ycluster: owner nao encontrado")
 )

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	internalProtocol "yjs-go-bridge/internal/yprotocol"
+	internalProtocol "github.com/drksbr/yjs-crdt-golang-server/internal/yprotocol"
 )
 
 func TestPublicAwarenessEncodeDecodeContract(t *testing.T) {

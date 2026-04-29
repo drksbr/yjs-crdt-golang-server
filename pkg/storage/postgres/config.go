@@ -28,7 +28,7 @@ func (c Config) normalized() Config {
 		c.Schema = defaultSchema
 	}
 	if strings.TrimSpace(c.ApplicationName) == "" {
-		c.ApplicationName = "yjs-go-bridge"
+		c.ApplicationName = "yjs-crdt-golang-server"
 	}
 	return c
 }

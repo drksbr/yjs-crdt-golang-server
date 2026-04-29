@@ -3,9 +3,9 @@ package yprotocol
 import (
 	"fmt"
 
-	ybinary "yjs-go-bridge/internal/binary"
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/internal/yupdate"
+	ybinary "github.com/drksbr/yjs-crdt-golang-server/internal/binary"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yupdate"
 )
 
 // SyncMessageType identifica a mensagem interna do protocolo de sync.

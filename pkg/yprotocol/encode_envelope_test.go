@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"yjs-go-bridge/pkg/yawareness"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
 )
 
 func TestPublicEncodeProtocolEnvelope_RoundTrip(t *testing.T) {

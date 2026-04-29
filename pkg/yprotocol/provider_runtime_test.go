@@ -7,10 +7,10 @@ import (
 	"sort"
 	"testing"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/storage/memory"
-	"yjs-go-bridge/pkg/yawareness"
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage/memory"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 func TestProviderRuntimeContracts(t *testing.T) {

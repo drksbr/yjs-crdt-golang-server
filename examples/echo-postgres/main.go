@@ -5,8 +5,8 @@ import (
 
 	labstackecho "github.com/labstack/echo/v4"
 
-	"yjs-go-bridge/examples/internal/httpdemo"
-	yhttpecho "yjs-go-bridge/pkg/yhttp/echo"
+	"github.com/drksbr/yjs-crdt-golang-server/examples/internal/httpdemo"
+	yhttpecho "github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp/echo"
 )
 
 func main() {

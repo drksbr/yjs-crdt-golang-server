@@ -12,19 +12,30 @@ import (
 	"strings"
 	"time"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/storage/memory"
-	"yjs-go-bridge/pkg/ycluster"
-	"yjs-go-bridge/pkg/yhttp"
-	"yjs-go-bridge/pkg/yprotocol"
+	prometheuslib "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage/memory"
+	storageprometheus "github.com/drksbr/yjs-crdt-golang-server/pkg/storage/prometheus"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	yclusterprometheus "github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster/prometheus"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp"
+	yhttpprometheus "github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp/prometheus"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
+	yprotocolprometheus "github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol/prometheus"
 )
 
 const (
-	address       = "127.0.0.1:8080"
-	remoteAddress = "127.0.0.1:9090"
-	wsPath        = "/ws"
-	nodePath      = "/node"
-	shardCount    = 32
+	address                  = "127.0.0.1:8080"
+	remoteAddress            = "127.0.0.1:9090"
+	wsPath                   = "/ws"
+	nodePath                 = "/node"
+	shardCount               = 32
+	ownershipTTL             = 30 * time.Minute
+	ownershipRenewWithin     = 10 * time.Minute
+	ownershipCheckInterval   = 30 * time.Second
+	ownershipShutdownTimeout = 5 * time.Second
 )
 
 var (
@@ -35,9 +46,20 @@ var (
 type demoApp struct {
 	localNode           ycluster.NodeID
 	docs                []demoDocument
+	ownershipHandles    []*ycluster.DocumentOwnershipHandle
+	edgeMetrics         *demoMetrics
+	remoteMetrics       *demoMetrics
 	edge                *ownerAwareEdge
 	remoteBrowserHandle http.Handler
 	remoteNodeHandle    http.Handler
+}
+
+type demoMetrics struct {
+	registry *prometheuslib.Registry
+	storage  *storageprometheus.Metrics
+	protocol *yprotocolprometheus.Metrics
+	cluster  *yclusterprometheus.Metrics
+	http     *yhttpprometheus.Metrics
 }
 
 type demoDocument struct {
@@ -60,7 +82,6 @@ type ownerRouteResponse struct {
 	OwnerNode      string    `json:"owner_node"`
 	OwnerEpoch     uint64    `json:"owner_epoch,omitempty"`
 	Local          bool      `json:"local"`
-	LeaseToken     string    `json:"lease_token,omitempty"`
 	LeaseExpiresAt time.Time `json:"lease_expires_at,omitempty"`
 	WebSocketURL   string    `json:"websocket_url"`
 	Note           string    `json:"note,omitempty"`
@@ -76,12 +97,14 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle(wsPath, app.edge)
+	mux.Handle("/metrics", app.edgeMetrics.handler())
 	mux.HandleFunc("/owner", app.handleOwner)
 	mux.HandleFunc("/", app.handleRoot)
 
 	remoteMux := http.NewServeMux()
 	remoteMux.Handle(wsPath, app.remoteBrowserHandle)
 	remoteMux.Handle(nodePath, app.remoteNodeHandle)
+	remoteMux.Handle("/metrics", app.remoteMetrics.handler())
 	remoteMux.HandleFunc("/", app.handleRemoteRoot)
 
 	go func() {
@@ -128,13 +151,51 @@ func newDemoApp(ctx context.Context) (*demoApp, error) {
 	}
 
 	store := memory.New()
-
-	leaseStore, err := ycluster.NewStorageLeaseStore(store)
+	edgeMetrics, err := newDemoMetrics(localNode.LocalNodeID(), "edge")
+	if err != nil {
+		return nil, err
+	}
+	remoteMetrics, err := newDemoMetrics(remoteNodeID, "owner")
 	if err != nil {
 		return nil, err
 	}
 
-	docs, err := seedDemoDocuments(ctx, store, leaseStore, resolver)
+	localOwnership, err := ycluster.NewStorageOwnershipCoordinator(ycluster.StorageOwnershipCoordinatorConfig{
+		LocalNode:  localNode.LocalNodeID(),
+		Resolver:   resolver,
+		Placements: store,
+		Leases:     store,
+		TTL:        ownershipTTL,
+		Metrics:    edgeMetrics.cluster,
+	})
+	if err != nil {
+		return nil, err
+	}
+	remoteOwnership, err := ycluster.NewStorageOwnershipCoordinator(ycluster.StorageOwnershipCoordinatorConfig{
+		LocalNode:  remoteNodeID,
+		Resolver:   resolver,
+		Placements: store,
+		Leases:     store,
+		TTL:        ownershipTTL,
+		Metrics:    remoteMetrics.cluster,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	docs, err := seedDemoDocuments(ctx, localOwnership, remoteOwnership, resolver)
+	if err != nil {
+		return nil, err
+	}
+	localOwnershipRuntime, err := newDemoOwnershipRuntime(localOwnership)
+	if err != nil {
+		return nil, err
+	}
+	remoteOwnershipRuntime, err := newDemoOwnershipRuntime(remoteOwnership)
+	if err != nil {
+		return nil, err
+	}
+	ownershipHandles, err := acquireDemoOwnerships(ctx, docs, localOwnershipRuntime, remoteOwnershipRuntime)
 	if err != nil {
 		return nil, err
 	}
@@ -147,13 +208,20 @@ func newDemoApp(ctx context.Context) (*demoApp, error) {
 		remoteNodeID: fmt.Sprintf("ws://%s%s", remoteAddress, nodePath),
 	}
 
-	edgeWSHandler, ownerLookup, err := newOwnerAwareWSHandler(localNode.LocalNodeID(), store, resolver, nodeRoutes)
+	edgeWSHandler, ownerLookup, err := newOwnerAwareWSHandler(localNode.LocalNodeID(), store, localOwnership, localOwnershipRuntime, nodeRoutes, edgeMetrics)
 	if err != nil {
 		return nil, err
 	}
 	remoteBrowserHandler, err := yhttp.NewServer(yhttp.ServerConfig{
-		Provider:       yprotocol.NewProvider(yprotocol.ProviderConfig{Store: store}),
-		ResolveRequest: resolveWSRequest,
+		Provider: yprotocol.NewProvider(yprotocol.ProviderConfig{
+			Store:                 store,
+			ResolveAuthorityFence: remoteOwnership.ResolveAuthorityFence,
+			Metrics:               remoteMetrics.protocol,
+			StorageMetrics:        remoteMetrics.storage,
+		}),
+		OwnershipRuntime: remoteOwnershipRuntime,
+		ResolveRequest:   resolveWSRequest,
+		Metrics:          remoteMetrics.http,
 	})
 	if err != nil {
 		return nil, err
@@ -161,6 +229,12 @@ func newDemoApp(ctx context.Context) (*demoApp, error) {
 	remoteNodeHandler, err := yhttp.NewRemoteOwnerEndpoint(yhttp.RemoteOwnerEndpointConfig{
 		Local:       remoteBrowserHandler,
 		LocalNodeID: remoteNodeID,
+		Authenticate: func(_ context.Context, req yhttp.RemoteOwnerAuthRequest) error {
+			if req.NodeID != localNode.LocalNodeID() {
+				return fmt.Errorf("remote owner rejeitou node %q", req.NodeID)
+			}
+			return nil
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -174,8 +248,11 @@ func newDemoApp(ctx context.Context) (*demoApp, error) {
 	})
 
 	return &demoApp{
-		localNode: localNode.LocalNodeID(),
-		docs:      docs,
+		localNode:        localNode.LocalNodeID(),
+		docs:             docs,
+		ownershipHandles: ownershipHandles,
+		edgeMetrics:      edgeMetrics,
+		remoteMetrics:    remoteMetrics,
 		edge: &ownerAwareEdge{
 			ownerLookup: ownerLookup,
 			wsHandler:   edgeWSHandler,
@@ -186,10 +263,63 @@ func newDemoApp(ctx context.Context) (*demoApp, error) {
 	}, nil
 }
 
+func newDemoMetrics(nodeID ycluster.NodeID, deploymentRole string) (*demoMetrics, error) {
+	registry := prometheuslib.NewRegistry()
+	constLabels := prometheuslib.Labels{
+		"deployment_role": strings.TrimSpace(deploymentRole),
+		"env":             "demo",
+		"node_id":         string(nodeID),
+	}
+
+	storageMetrics, err := storageprometheus.New(storageprometheus.Config{
+		Registerer:  registry,
+		ConstLabels: constLabels,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("storage metrics: %w", err)
+	}
+	protocolMetrics, err := yprotocolprometheus.New(yprotocolprometheus.Config{
+		Registerer:  registry,
+		ConstLabels: constLabels,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("protocol metrics: %w", err)
+	}
+	clusterMetrics, err := yclusterprometheus.New(yclusterprometheus.Config{
+		Registerer:  registry,
+		ConstLabels: constLabels,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cluster metrics: %w", err)
+	}
+	httpMetrics, err := yhttpprometheus.New(yhttpprometheus.Config{
+		Registerer:  registry,
+		ConstLabels: constLabels,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("http metrics: %w", err)
+	}
+
+	return &demoMetrics{
+		registry: registry,
+		storage:  storageMetrics,
+		protocol: protocolMetrics,
+		cluster:  clusterMetrics,
+		http:     httpMetrics,
+	}, nil
+}
+
+func (m *demoMetrics) handler() http.Handler {
+	if m == nil || m.registry == nil {
+		return http.NotFoundHandler()
+	}
+	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+}
+
 func seedDemoDocuments(
 	ctx context.Context,
-	store *memory.Store,
-	leaseStore ycluster.LeaseStore,
+	localOwnership *ycluster.StorageOwnershipCoordinator,
+	remoteOwnership *ycluster.StorageOwnershipCoordinator,
 	resolver ycluster.ShardResolver,
 ) ([]demoDocument, error) {
 	localKey, remoteKey, err := selectDemoKeys(resolver)
@@ -197,11 +327,11 @@ func seedDemoDocuments(
 		return nil, err
 	}
 
-	localDoc, err := seedDocument(ctx, store, leaseStore, resolver, localKey, localNodeID, "lease-node-a", 1)
+	localDoc, err := seedDocument(ctx, localOwnership, localKey, localNodeID, "lease-node-a", 1)
 	if err != nil {
 		return nil, err
 	}
-	remoteDoc, err := seedDocument(ctx, store, leaseStore, resolver, remoteKey, remoteNodeID, "lease-node-b", 2)
+	remoteDoc, err := seedDocument(ctx, remoteOwnership, remoteKey, remoteNodeID, "lease-node-b", 2)
 	if err != nil {
 		return nil, err
 	}
@@ -209,42 +339,72 @@ func seedDemoDocuments(
 	return []demoDocument{localDoc, remoteDoc}, nil
 }
 
+func newDemoOwnershipRuntime(ownership *ycluster.StorageOwnershipCoordinator) (*ycluster.DocumentOwnershipRuntime, error) {
+	return ycluster.NewDocumentOwnershipRuntime(ycluster.DocumentOwnershipRuntimeConfig{
+		Coordinator: ownership,
+		Lease: ycluster.LeaseManagerRunConfig{
+			RenewWithin: ownershipRenewWithin,
+			Interval:    ownershipCheckInterval,
+		},
+		ReleaseTimeout: ownershipShutdownTimeout,
+	})
+}
+
+func acquireDemoOwnerships(
+	ctx context.Context,
+	docs []demoDocument,
+	localRuntime *ycluster.DocumentOwnershipRuntime,
+	remoteRuntime *ycluster.DocumentOwnershipRuntime,
+) ([]*ycluster.DocumentOwnershipHandle, error) {
+	handles := make([]*ycluster.DocumentOwnershipHandle, 0, len(docs))
+	for _, doc := range docs {
+		runtime := remoteRuntime
+		if doc.Local {
+			runtime = localRuntime
+		}
+		handle, err := runtime.AcquireDocumentOwnership(ctx, ycluster.ClaimDocumentRequest{
+			DocumentKey: doc.Key,
+		})
+		if err != nil {
+			releaseDemoOwnerships(handles)
+			return nil, err
+		}
+		handles = append(handles, handle)
+	}
+	return handles, nil
+}
+
+func releaseDemoOwnerships(handles []*ycluster.DocumentOwnershipHandle) {
+	ctx, cancel := context.WithTimeout(context.Background(), ownershipShutdownTimeout)
+	defer cancel()
+	for _, handle := range handles {
+		if err := handle.Release(ctx); err != nil {
+			log.Printf("owner-aware-http-edge: release demo ownership: %v", err)
+		}
+	}
+}
+
 func seedDocument(
 	ctx context.Context,
-	store *memory.Store,
-	leaseStore ycluster.LeaseStore,
-	resolver ycluster.ShardResolver,
+	ownership *ycluster.StorageOwnershipCoordinator,
 	key storage.DocumentKey,
 	owner ycluster.NodeID,
 	token string,
 	version uint64,
 ) (demoDocument, error) {
-	shardID, err := resolver.ResolveShard(key)
+	claimed, err := ownership.ClaimDocument(ctx, ycluster.ClaimDocumentRequest{
+		DocumentKey:      key,
+		Holder:           owner,
+		Token:            token,
+		PlacementVersion: version,
+	})
 	if err != nil {
-		return demoDocument{}, err
-	}
-
-	if _, err := store.SavePlacement(ctx, storage.PlacementRecord{
-		Key:       key,
-		ShardID:   ycluster.StorageShardID(shardID),
-		Version:   version,
-		UpdatedAt: time.Now().UTC(),
-	}); err != nil {
-		return demoDocument{}, err
-	}
-
-	if _, err := leaseStore.AcquireLease(ctx, ycluster.LeaseRequest{
-		ShardID: shardID,
-		Holder:  owner,
-		TTL:     30 * time.Minute,
-		Token:   token,
-	}); err != nil {
 		return demoDocument{}, err
 	}
 
 	return demoDocument{
 		Key:   key,
-		Shard: shardID,
+		Shard: claimed.ShardID,
 		Owner: owner,
 		Local: owner == localNodeID,
 	}, nil
@@ -286,25 +446,30 @@ func selectDemoKeys(resolver ycluster.ShardResolver) (storage.DocumentKey, stora
 func newOwnerAwareWSHandler(
 	localNode ycluster.NodeID,
 	store *memory.Store,
-	resolver ycluster.ShardResolver,
+	ownership *ycluster.StorageOwnershipCoordinator,
+	ownershipRuntime *ycluster.DocumentOwnershipRuntime,
 	nodeRoutes map[ycluster.NodeID]string,
+	metrics *demoMetrics,
 ) (http.Handler, ycluster.OwnerLookup, error) {
 	localWSHandler, err := yhttp.NewServer(yhttp.ServerConfig{
-		Provider:       yprotocol.NewProvider(yprotocol.ProviderConfig{Store: store}),
-		ResolveRequest: resolveWSRequest,
+		Provider: yprotocol.NewProvider(yprotocol.ProviderConfig{
+			Store:                 store,
+			ResolveAuthorityFence: ownership.ResolveAuthorityFence,
+			Metrics:               metrics.protocol,
+			StorageMetrics:        metrics.storage,
+		}),
+		OwnershipRuntime: ownershipRuntime,
+		ResolveRequest:   resolveWSRequest,
+		Metrics:          metrics.http,
 	})
 	if err != nil {
 		return nil, nil, err
 	}
 
-	ownerLookup, err := ycluster.NewStorageOwnerLookup(localNode, resolver, store, store)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	cfg := yhttp.OwnerAwareServerConfig{
-		Local:       localWSHandler,
-		OwnerLookup: ownerLookup,
+		Local:                          localWSHandler,
+		OwnerLookup:                    ownership,
+		PromoteLocalOnOwnerUnavailable: true,
 	}
 	if len(nodeRoutes) > 0 {
 		dialer, err := yhttp.NewWebSocketRemoteOwnerDialer(yhttp.WebSocketRemoteOwnerDialerConfig{
@@ -323,7 +488,8 @@ func newOwnerAwareWSHandler(
 			LocalNodeID: localNode,
 			Local:       localWSHandler,
 			Dialer:      dialer,
-			OwnerLookup: ownerLookup,
+			OwnerLookup: ownership,
+			Metrics:     metrics.http,
 		})
 		if err != nil {
 			return nil, nil, err
@@ -334,7 +500,7 @@ func newOwnerAwareWSHandler(
 	if err != nil {
 		return nil, nil, err
 	}
-	return handler, ownerLookup, nil
+	return handler, ownership, nil
 }
 
 func (a *demoApp) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -347,8 +513,11 @@ func (a *demoApp) handleRoot(w http.ResponseWriter, r *http.Request) {
 		"owner-aware-http-edge",
 		"",
 		fmt.Sprintf("local node: %s", a.localNode),
+		fmt.Sprintf("active demo ownership handles: %d", len(a.ownershipHandles)),
 		fmt.Sprintf("remote owner browser ws: ws://%s%s", remoteAddress, wsPath),
 		fmt.Sprintf("remote owner node endpoint: ws://%s%s", remoteAddress, nodePath),
+		fmt.Sprintf("edge metrics: http://%s/metrics", address),
+		fmt.Sprintf("remote metrics: http://%s/metrics", remoteAddress),
 		"",
 		"owner resolution samples:",
 	}
@@ -368,6 +537,7 @@ func (a *demoApp) handleRoot(w http.ResponseWriter, r *http.Request) {
 	lines = append(lines,
 		"",
 		"Edge /ws uses yhttp.OwnerAwareServer plus RemoteOwnerForwardHandler.",
+		"Unknown documents can be promoted locally when no active owner exists.",
 		"Remote-owner documents are proxied to node-b through the typed /node endpoint.",
 	)
 
@@ -432,7 +602,6 @@ func (h *ownerAwareEdge) routeForRequest(
 	}
 	if resolution.Placement.Lease != nil {
 		response.OwnerEpoch = resolution.Placement.Lease.Epoch
-		response.LeaseToken = resolution.Placement.Lease.Token
 		response.LeaseExpiresAt = resolution.Placement.Lease.ExpiresAt
 	}
 	return response, nil

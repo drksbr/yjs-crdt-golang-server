@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/storage/memory"
-	"yjs-go-bridge/pkg/ycluster"
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage/memory"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 func TestProviderOpenRecoversSnapshotPlusTail(t *testing.T) {
@@ -268,6 +268,42 @@ func TestProviderSyncUpdateDoesNotAdvanceSessionsWhenAppendFails(t *testing.T) {
 	}
 	if !bytes.Equal(peer.session.UpdateV1(), beforePeer) {
 		t.Fatalf("peer.session.UpdateV1() = %v, want %v", peer.session.UpdateV1(), beforePeer)
+	}
+}
+
+func TestConnectionHandleEncodedMessagesContextCancellationPreventsAppend(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	key := storage.DocumentKey{
+		Namespace:  "tests",
+		DocumentID: "provider-context-cancel-append",
+	}
+	store := memory.New()
+	provider := NewProvider(ProviderConfig{Store: store})
+
+	conn, err := provider.Open(ctx, key, "conn-a", 807)
+	if err != nil {
+		t.Fatalf("provider.Open() unexpected error: %v", err)
+	}
+	before := conn.session.UpdateV1()
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	if _, err := conn.HandleEncodedMessagesContext(cancelled, EncodeProtocolSyncUpdate(buildGCOnlyUpdate(42, 2))); !errors.Is(err, context.Canceled) {
+		t.Fatalf("conn.HandleEncodedMessagesContext() error = %v, want %v", err, context.Canceled)
+	}
+	if !bytes.Equal(conn.session.UpdateV1(), before) {
+		t.Fatalf("conn.session.UpdateV1() = %v, want %v", conn.session.UpdateV1(), before)
+	}
+
+	records, err := store.ListUpdates(ctx, key, 0, 0)
+	if err != nil {
+		t.Fatalf("store.ListUpdates() unexpected error: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("len(store.ListUpdates()) = %d, want 0", len(records))
 	}
 }
 

@@ -6,8 +6,8 @@ import (
 	"errors"
 	"testing"
 
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
 )
 
 func TestEncodePersistedSnapshotV1(t *testing.T) {

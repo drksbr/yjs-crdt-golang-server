@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"log"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/storage/memory"
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage/memory"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 func main() {

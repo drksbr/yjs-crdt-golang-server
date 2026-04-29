@@ -3,8 +3,8 @@ package yhttp
 import (
 	"fmt"
 
-	"yjs-go-bridge/pkg/ynodeproto"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ynodeproto"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 const (

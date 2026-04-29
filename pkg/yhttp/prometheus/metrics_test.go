@@ -8,7 +8,7 @@ import (
 	prometheuslib "github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"yjs-go-bridge/pkg/yhttp"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp"
 )
 
 func TestMetricsRecordsTransportLifecycle(t *testing.T) {
@@ -90,6 +90,41 @@ func TestMetricsRecordsTransportLifecycle(t *testing.T) {
 	assertHistogramCount(t, registry, "testbridge_yhttp_authority_revalidation_duration_seconds", map[string]string{"role": "owner", "result": "error"}, 1)
 	assertHistogramCount(t, registry, "testbridge_yhttp_ownership_transition_duration_seconds", map[string]string{"from": "remote", "to": "local", "result": "ok"}, 1)
 	assertHistogramCount(t, registry, "testbridge_yhttp_ownership_transition_duration_seconds", map[string]string{"from": "local", "to": "closed", "result": "error"}, 1)
+}
+
+func TestMetricsIncludesConstLabels(t *testing.T) {
+	t.Parallel()
+
+	registry := prometheuslib.NewRegistry()
+	metrics, err := New(Config{
+		Namespace:  "testbridge",
+		Subsystem:  "yhttp",
+		Registerer: registry,
+		ConstLabels: prometheuslib.Labels{
+			"deployment_role": "edge",
+			"env":             "test",
+			"node_id":         "node-a",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() unexpected error: %v", err)
+	}
+
+	req := yhttp.Request{}
+	metrics.ConnectionOpened(req)
+	metrics.RouteDecision(req, "local")
+
+	assertCounterValue(t, registry, "testbridge_yhttp_connections_opened_total", map[string]string{
+		"deployment_role": "edge",
+		"env":             "test",
+		"node_id":         "node-a",
+	}, 1)
+	assertCounterValue(t, registry, "testbridge_yhttp_route_decisions_total", map[string]string{
+		"decision":        "local",
+		"deployment_role": "edge",
+		"env":             "test",
+		"node_id":         "node-a",
+	}, 1)
 }
 
 func assertCounterValue(t *testing.T, registry *prometheuslib.Registry, name string, labels map[string]string, want float64) {

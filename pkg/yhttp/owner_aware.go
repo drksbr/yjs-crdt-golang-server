@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
 )
 
 const (
@@ -24,6 +24,7 @@ const (
 	ownerLookupResultError       = "error"
 
 	routeDecisionLocal              = "local"
+	routeDecisionLocalPromote       = "local_promote"
 	routeDecisionRemoteForwardWS    = "remote_forward_ws"
 	routeDecisionRemoteHTTPMetadata = "remote_http_metadata"
 	routeDecisionRemoteHTTPHandler  = "remote_http_handler"
@@ -40,11 +41,17 @@ type RemoteOwnerHandler func(w http.ResponseWriter, r *http.Request, req Request
 
 // OwnerAwareServerConfig descreve o wiring do handler owner-aware.
 type OwnerAwareServerConfig struct {
-	Local         *Server
-	OwnerLookup   ycluster.OwnerLookup
-	OnRemoteOwner RemoteOwnerHandler
+	Local       *Server
+	OwnerLookup ycluster.OwnerLookup
+
+	// PromoteLocalOnOwnerUnavailable permite que a borda local aceite o
+	// WebSocket quando o lookup indicar ausencia de owner ativo. A promoção só
+	// é feita se o Server local tiver OwnershipRuntime configurado.
+	PromoteLocalOnOwnerUnavailable bool
+
+	OnRemoteOwner        RemoteOwnerHandler
 	OnLocalAuthorityLost AuthorityLossHandler
-	RetryAfter    time.Duration
+	RetryAfter           time.Duration
 }
 
 // OwnerAwareServer resolve ownership antes de encaminhar a conexão ao
@@ -55,12 +62,14 @@ type OwnerAwareServerConfig struct {
 // customizado ou responder com metadados retryable até que o proxy inter-node
 // seja implementado.
 type OwnerAwareServer struct {
-	local         *Server
-	metrics       Metrics
-	ownerLookup   ycluster.OwnerLookup
-	onRemoteOwner RemoteOwnerHandler
+	local        *Server
+	metrics      Metrics
+	ownerLookup  ycluster.OwnerLookup
+	promoteLocal bool
+
+	onRemoteOwner        RemoteOwnerHandler
 	onLocalAuthorityLost AuthorityLossHandler
-	retryAfter    time.Duration
+	retryAfter           time.Duration
 }
 
 // NewOwnerAwareServer valida a configuração e constrói um handler owner-aware
@@ -79,12 +88,14 @@ func NewOwnerAwareServer(cfg OwnerAwareServerConfig) (*OwnerAwareServer, error) 
 	}
 
 	return &OwnerAwareServer{
-		local:         cfg.Local,
-		metrics:       normalizeMetrics(cfg.Local.metrics),
-		ownerLookup:   cfg.OwnerLookup,
-		onRemoteOwner: cfg.OnRemoteOwner,
+		local:        cfg.Local,
+		metrics:      normalizeMetrics(cfg.Local.metrics),
+		ownerLookup:  cfg.OwnerLookup,
+		promoteLocal: cfg.PromoteLocalOnOwnerUnavailable,
+
+		onRemoteOwner:        cfg.OnRemoteOwner,
 		onLocalAuthorityLost: cfg.OnLocalAuthorityLost,
-		retryAfter:    retryAfter,
+		retryAfter:           retryAfter,
 	}, nil
 }
 
@@ -108,6 +119,10 @@ func (s *OwnerAwareServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	lookupDuration := time.Since(lookupStart)
 	if err != nil {
 		observeOwnerLookup(s.metrics, req, lookupDuration, ownerLookupResultFromLookupError(err))
+		if s.canPromoteLocalOwner(err) {
+			s.serveLocalOwner(w, r, req, routeDecisionLocalPromote)
+			return
+		}
 		s.metrics.Error(req, "lookup_owner", err)
 		s.writeLookupError(w, err)
 		return
@@ -115,17 +130,17 @@ func (s *OwnerAwareServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if resolution == nil {
 		err = ycluster.ErrOwnerNotFound
 		observeOwnerLookup(s.metrics, req, lookupDuration, ownerLookupResultNotFound)
+		if s.canPromoteLocalOwner(err) {
+			s.serveLocalOwner(w, r, req, routeDecisionLocalPromote)
+			return
+		}
 		s.metrics.Error(req, "lookup_owner", err)
 		s.writeLookupError(w, err)
 		return
 	}
 	observeOwnerLookup(s.metrics, req, lookupDuration, ownerLookupResultFromResolution(*resolution))
 	if resolution.Local {
-		observeRouteDecision(s.metrics, req, routeDecisionLocal)
-		s.local.serveResolvedHTTPWithOptions(w, r, req, serverSocketSessionOptions{
-			observeConnectionLifecycle: true,
-			authorityLossHandler:      s.onLocalAuthorityLost,
-		})
+		s.serveLocalOwner(w, r, req, routeDecisionLocal)
 		return
 	}
 	if strings.TrimSpace(req.ConnectionID) == "" {
@@ -138,6 +153,21 @@ func (s *OwnerAwareServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	observeRouteDecision(s.metrics, req, routeDecisionRemoteHTTPMetadata)
 	s.writeRemoteOwnerResponse(w, req, *resolution)
+}
+
+func (s *OwnerAwareServer) canPromoteLocalOwner(err error) bool {
+	return s.promoteLocal &&
+		s.local != nil &&
+		s.local.ownershipRuntime != nil &&
+		isOwnerUnavailableForLocalPromotion(err)
+}
+
+func (s *OwnerAwareServer) serveLocalOwner(w http.ResponseWriter, r *http.Request, req Request, routeDecision string) {
+	observeRouteDecision(s.metrics, req, routeDecision)
+	s.local.serveResolvedHTTPWithOptions(w, r, req, serverSocketSessionOptions{
+		observeConnectionLifecycle: true,
+		authorityLossHandler:       s.onLocalAuthorityLost,
+	})
 }
 
 func (s *OwnerAwareServer) writeLookupError(w http.ResponseWriter, err error) {
@@ -238,6 +268,12 @@ func ownerLookupResultFromLookupError(err error) string {
 	default:
 		return ownerLookupResultError
 	}
+}
+
+func isOwnerUnavailableForLocalPromotion(err error) bool {
+	return errors.Is(err, ycluster.ErrOwnerNotFound) ||
+		errors.Is(err, ycluster.ErrPlacementNotFound) ||
+		errors.Is(err, ycluster.ErrLeaseExpired)
 }
 
 func routeDecisionFromRemoteOwnerHandler(r *http.Request) string {

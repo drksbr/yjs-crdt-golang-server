@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 
-	ybinary "yjs-go-bridge/internal/binary"
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/internal/yidset"
-	"yjs-go-bridge/internal/ytypes"
+	ybinary "github.com/drksbr/yjs-crdt-golang-server/internal/binary"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yidset"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
 )
 
 // UpdateFormat identifica o formato binário detectado para um update Yjs.

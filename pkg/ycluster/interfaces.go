@@ -3,7 +3,7 @@ package ycluster
 import (
 	"context"
 
-	"yjs-go-bridge/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
 )
 
 // ShardResolver mapeia uma `storage.DocumentKey` para um shard logico estavel.
@@ -33,6 +33,15 @@ type LeaseStore interface {
 
 	// ReleaseLease devolve explicitamente uma lease previamente adquirida.
 	ReleaseLease(ctx context.Context, lease Lease) error
+}
+
+// LeaseHandoffStore adiciona troca atomica de lease entre owners.
+type LeaseHandoffStore interface {
+	LeaseStore
+
+	// HandoffLease transfere uma lease ativa para outro holder, exigindo que a
+	// lease atual e o token ainda sejam a autoridade persistida do shard.
+	HandoffLease(ctx context.Context, current Lease, req LeaseRequest) (*Lease, error)
 }
 
 // LocalNode expoe a identidade estavel do no local.

@@ -4,9 +4,9 @@ import (
 	"context"
 	"io"
 
-	internal "yjs-go-bridge/internal/yprotocol"
-	"yjs-go-bridge/pkg/yawareness"
-	"yjs-go-bridge/pkg/yjsbridge"
+	internal "github.com/drksbr/yjs-crdt-golang-server/internal/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 // ProtocolType identifica o envelope externo usado pelos providers websocket.

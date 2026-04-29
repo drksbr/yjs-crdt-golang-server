@@ -5,8 +5,8 @@ import (
 
 	gingonic "github.com/gin-gonic/gin"
 
-	"yjs-go-bridge/examples/internal/httpdemo"
-	yhttpgin "yjs-go-bridge/pkg/yhttp/gin"
+	"github.com/drksbr/yjs-crdt-golang-server/examples/internal/httpdemo"
+	yhttpgin "github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp/gin"
 )
 
 func main() {

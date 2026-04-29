@@ -14,15 +14,15 @@ import (
 
 	"github.com/coder/websocket"
 
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/internal/ytypes"
-	"yjs-go-bridge/internal/yupdate"
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/storage/memory"
-	"yjs-go-bridge/pkg/yawareness"
-	"yjs-go-bridge/pkg/ycluster"
-	"yjs-go-bridge/pkg/yjsbridge"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yupdate"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage/memory"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 const testIOTimeout = 15 * time.Second
@@ -178,6 +178,108 @@ func TestHTTPServerRevalidatesAuthorityAndClosesIdleConnection(t *testing.T) {
 	})
 }
 
+func TestHTTPServerOwnershipRuntimeClaimsAndReleasesOnConnectionClose(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	srv, coordinator, _ := newOwnershipHTTPTestServer(t, store, "node-a")
+	key := testDocumentKey("doc-http-ownership")
+
+	conn := dialWS(t, srv.URL+"/ws?doc=doc-http-ownership&client=701&conn=owned")
+	writeBinary(t, conn, yprotocol.EncodeProtocolSyncStep1([]byte{0x00}))
+	_ = readBinary(t, conn)
+
+	resolution, err := coordinator.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
+	if err != nil {
+		t.Fatalf("LookupOwner(open connection) unexpected error: %v", err)
+	}
+	if !resolution.Local || resolution.Placement.Lease == nil {
+		t.Fatalf("LookupOwner(open connection) = %#v, want local owner with lease", resolution)
+	}
+
+	if err := conn.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Fatalf("conn.Close() unexpected error: %v", err)
+	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		_, err := coordinator.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
+		return errors.Is(err, ycluster.ErrOwnerNotFound)
+	})
+}
+
+func TestHTTPServerOwnershipRuntimeSharesLeaseAcrossConnections(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	srv, coordinator, _ := newOwnershipHTTPTestServer(t, store, "node-a")
+	key := testDocumentKey("doc-http-ownership-shared")
+
+	first := dialWS(t, srv.URL+"/ws?doc=doc-http-ownership-shared&client=711&conn=first")
+	writeBinary(t, first, yprotocol.EncodeProtocolSyncStep1([]byte{0x00}))
+	_ = readBinary(t, first)
+
+	second := dialWS(t, srv.URL+"/ws?doc=doc-http-ownership-shared&client=712&conn=second")
+	writeBinary(t, second, yprotocol.EncodeProtocolSyncStep1([]byte{0x00}))
+	_ = readBinary(t, second)
+
+	initial, err := coordinator.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
+	if err != nil {
+		t.Fatalf("LookupOwner(two connections) unexpected error: %v", err)
+	}
+	if !initial.Local || initial.Placement.Lease == nil {
+		t.Fatalf("LookupOwner(two connections) = %#v, want local owner with lease", initial)
+	}
+	initialToken := initial.Placement.Lease.Token
+	if initialToken == "" {
+		t.Fatal("LookupOwner(two connections).Placement.Lease.Token is empty")
+	}
+
+	if err := first.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Fatalf("first.Close() unexpected error: %v", err)
+	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		resolution, err := coordinator.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
+		return err == nil && resolution.Local && resolution.Placement.Lease.Token == initialToken
+	})
+
+	if err := second.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Fatalf("second.Close() unexpected error: %v", err)
+	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		_, err := coordinator.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
+		return errors.Is(err, ycluster.ErrOwnerNotFound)
+	})
+}
+
+func TestHTTPServerOwnershipRuntimeReturnsUnavailableWhenLeaseHeld(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	srv, _, resolver := newOwnershipHTTPTestServer(t, store, "node-a")
+	key := testDocumentKey("doc-http-ownership-held")
+	seedAuthoritativeHTTPDocument(t, ctx, store, resolver, key, "node-b", 1, "lease-node-b")
+
+	dialCtx, cancel := context.WithTimeout(ctx, testIOTimeout)
+	defer cancel()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL+"/ws?doc=doc-http-ownership-held&client=721&conn=blocked", "http")
+	conn, response, err := websocket.Dial(dialCtx, wsURL, nil)
+	if err == nil {
+		_ = conn.CloseNow()
+		t.Fatal("websocket.Dial() succeeded, want lease-held failure")
+	}
+	if response == nil {
+		t.Fatalf("websocket.Dial() response = nil, error = %v", err)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("websocket.Dial() status = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+	}
+	if response.Header.Get("Retry-After") != "1" {
+		t.Fatalf("Retry-After = %q, want 1", response.Header.Get("Retry-After"))
+	}
+}
+
 func newHTTPTestServer(t *testing.T, store storage.SnapshotStore) *httptest.Server {
 	t.Helper()
 
@@ -195,6 +297,76 @@ func newHTTPTestServer(t *testing.T, store storage.SnapshotStore) *httptest.Serv
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+func newOwnershipHTTPTestServer(
+	t *testing.T,
+	store *memory.Store,
+	localNode ycluster.NodeID,
+) (*httptest.Server, *ycluster.StorageOwnershipCoordinator, ycluster.ShardResolver) {
+	t.Helper()
+
+	handler, coordinator, resolver := newOwnershipHTTPServer(t, store, localNode)
+	mux := http.NewServeMux()
+	mux.Handle("/ws", handler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, coordinator, resolver
+}
+
+func newOwnershipHTTPServer(
+	t *testing.T,
+	store *memory.Store,
+	localNode ycluster.NodeID,
+) (*Server, *ycluster.StorageOwnershipCoordinator, ycluster.ShardResolver) {
+	t.Helper()
+
+	resolver, err := ycluster.NewDeterministicShardResolver(32)
+	if err != nil {
+		t.Fatalf("NewDeterministicShardResolver() unexpected error: %v", err)
+	}
+	coordinator, err := ycluster.NewStorageOwnershipCoordinator(ycluster.StorageOwnershipCoordinatorConfig{
+		LocalNode:  localNode,
+		Resolver:   resolver,
+		Placements: store,
+		Leases:     store,
+		TTL:        time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewStorageOwnershipCoordinator() unexpected error: %v", err)
+	}
+	runtime, err := ycluster.NewDocumentOwnershipRuntime(ycluster.DocumentOwnershipRuntimeConfig{
+		Coordinator: coordinator,
+		Lease: ycluster.LeaseManagerRunConfig{
+			RenewWithin: 30 * time.Second,
+			Interval:    10 * time.Millisecond,
+		},
+		ReleaseTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewDocumentOwnershipRuntime() unexpected error: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = runtime.Close(ctx)
+	})
+
+	provider := yprotocol.NewProvider(yprotocol.ProviderConfig{
+		Store: store,
+		ResolveAuthorityFence: func(ctx context.Context, key storage.DocumentKey) (*storage.AuthorityFence, error) {
+			return coordinator.ResolveAuthorityFence(ctx, key)
+		},
+	})
+	handler, err := NewServer(ServerConfig{
+		Provider:         provider,
+		OwnershipRuntime: runtime,
+		ResolveRequest:   resolveTestRequest,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() unexpected error: %v", err)
+	}
+	return handler, coordinator, resolver
 }
 
 func resolveTestRequest(r *http.Request) (Request, error) {
@@ -390,20 +562,25 @@ func handoffAuthoritativeHTTPDocument(
 	if err != nil {
 		t.Fatalf("ResolveShard(%#v) unexpected error: %v", key, err)
 	}
-	if err := store.ReleaseLease(ctx, ycluster.StorageShardID(shardID), oldToken); err != nil {
-		t.Fatalf("store.ReleaseLease() unexpected error: %v", err)
+	current, err := store.LoadLease(ctx, ycluster.StorageShardID(shardID))
+	if err != nil {
+		t.Fatalf("store.LoadLease() unexpected error: %v", err)
 	}
-	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
+	if current.Token != oldToken {
+		t.Fatalf("store.LoadLease().Token = %q, want %q", current.Token, oldToken)
+	}
+	now := time.Now().UTC()
+	if _, err := store.HandoffLease(ctx, ycluster.StorageShardID(shardID), oldToken, storage.LeaseRecord{
 		ShardID: ycluster.StorageShardID(shardID),
 		Owner: storage.OwnerInfo{
 			NodeID: ycluster.StorageNodeID(nextNode),
 			Epoch:  nextEpoch,
 		},
 		Token:      nextToken,
-		AcquiredAt: time.Now().UTC(),
-		ExpiresAt:  time.Now().UTC().Add(2 * time.Hour),
+		AcquiredAt: now,
+		ExpiresAt:  now.Add(2 * time.Hour),
 	}); err != nil {
-		t.Fatalf("store.SaveLease() unexpected error: %v", err)
+		t.Fatalf("store.HandoffLease() unexpected error: %v", err)
 	}
 }
 

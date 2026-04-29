@@ -150,7 +150,7 @@ function App() {
               Texto compartilhado com sync em tempo real, awareness e persistência em Postgres.
             </h1>
             <p className="max-w-xl text-sm leading-6 text-[var(--muted)] md:text-base">
-              Este demo usa Vite + React + Tailwind no frontend e Gin + yjs-go-bridge + PostgreSQL no backend.
+              Este demo usa Vite + React + Tailwind no frontend e Gin + yjs-crdt-golang-server + PostgreSQL no backend.
             </p>
           </div>
           <div className="flex items-center gap-3 rounded-full border border-[var(--line)] bg-[var(--surface-strong)] px-4 py-3 font-mono-ui text-xs uppercase tracking-[0.24em] text-[var(--muted)]">

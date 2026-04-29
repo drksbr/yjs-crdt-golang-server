@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"yjs-go-bridge/pkg/yawareness"
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 func TestPublicProtocolSyncAndEnvelopeRoundTrip(t *testing.T) {

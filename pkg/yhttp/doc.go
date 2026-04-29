@@ -11,6 +11,11 @@
 //   - roteamento de conexão para um `storage.DocumentKey`;
 //   - resolução opcional de owner antes do provider local via
 //     `OwnerAwareServer`;
+//   - promoção local opt-in via
+//     `OwnerAwareServerConfig.PromoteLocalOnOwnerUnavailable`, exigindo
+//     `ServerConfig.OwnershipRuntime`;
+//   - claim/release opcional de ownership local por conexão/stream via
+//     `ServerConfig.OwnershipRuntime`;
 //   - seam opcional de forwarding remoto via `RemoteOwnerDialer`/
 //     `NodeMessageStream`, plugável atrás de `OwnerAwareServerConfig.OnRemoteOwner`;
 //   - terminador owner-side via `RemoteOwnerEndpoint`, permitindo anexar peers
@@ -19,7 +24,7 @@
 //     `NewWebSocketRemoteOwnerDialer`;
 //   - leitura/escrita de frames binários do protocolo Yjs;
 //   - fanout local de broadcasts produzidos por `pkg/yprotocol.Provider`;
-//   - persistência opcional do snapshot no fechamento da conexão.
+//   - persistência opcional do snapshot no fechamento da conexão;
 //   - hooks opcionais de observabilidade via `Metrics`, com adapter Prometheus
 //     disponível em `pkg/yhttp/prometheus`.
 //

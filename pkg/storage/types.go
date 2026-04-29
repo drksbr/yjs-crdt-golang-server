@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 // DocumentKey identifica um documento persistível.

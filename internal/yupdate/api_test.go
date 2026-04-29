@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"yjs-go-bridge/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
 )
 
 func TestDecodeUpdateDispatchesV1(t *testing.T) {

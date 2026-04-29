@@ -15,8 +15,8 @@ func TestConfigNormalizationAndValidation(t *testing.T) {
 		if cfg.Schema != defaultSchema {
 			t.Fatalf("normalized().Schema = %q, want %q", cfg.Schema, defaultSchema)
 		}
-		if cfg.ApplicationName != "yjs-go-bridge" {
-			t.Fatalf("normalized().ApplicationName = %q, want yjs-go-bridge", cfg.ApplicationName)
+		if cfg.ApplicationName != "yjs-crdt-golang-server" {
+			t.Fatalf("normalized().ApplicationName = %q, want yjs-crdt-golang-server", cfg.ApplicationName)
 		}
 	})
 

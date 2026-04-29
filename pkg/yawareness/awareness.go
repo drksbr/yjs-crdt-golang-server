@@ -1,6 +1,6 @@
 package yawareness
 
-import internal "yjs-go-bridge/internal/yawareness"
+import internal "github.com/drksbr/yjs-crdt-golang-server/internal/yawareness"
 
 // ClientState representa uma entrada do awareness protocol para um cliente.
 type ClientState = internal.ClientState

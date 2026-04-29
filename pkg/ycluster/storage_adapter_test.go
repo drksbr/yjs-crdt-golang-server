@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/storage/memory"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage/memory"
 )
 
 func TestStorageIDConversions(t *testing.T) {
@@ -424,6 +424,131 @@ func TestStorageLeaseStoreExpiredTakeoverIncrementsEpoch(t *testing.T) {
 	}
 }
 
+func TestStorageLeaseStoreReacquireAfterReleaseIncrementsStoredGeneration(t *testing.T) {
+	t.Parallel()
+
+	store := memory.New()
+	leases, err := NewStorageLeaseStore(store)
+	if err != nil {
+		t.Fatalf("NewStorageLeaseStore() unexpected error: %v", err)
+	}
+
+	now := time.Unix(1100, 0).UTC()
+	leases.now = func() time.Time { return now }
+
+	acquired, err := leases.AcquireLease(context.Background(), LeaseRequest{
+		ShardID: 11,
+		Holder:  "node-a",
+		TTL:     time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease(node-a) unexpected error: %v", err)
+	}
+	if err := leases.ReleaseLease(context.Background(), *acquired); err != nil {
+		t.Fatalf("ReleaseLease(node-a) unexpected error: %v", err)
+	}
+
+	now = now.Add(time.Second)
+	reacquired, err := leases.AcquireLease(context.Background(), LeaseRequest{
+		ShardID: 11,
+		Holder:  "node-b",
+		TTL:     time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease(node-b after release) unexpected error: %v", err)
+	}
+	if reacquired.Epoch != acquired.Epoch+1 {
+		t.Fatalf("AcquireLease(node-b after release).Epoch = %d, want %d", reacquired.Epoch, acquired.Epoch+1)
+	}
+	if reacquired.Holder != "node-b" {
+		t.Fatalf("AcquireLease(node-b after release).Holder = %q, want %q", reacquired.Holder, "node-b")
+	}
+}
+
+func TestStorageLeaseStoreHandoffLeaseTransfersActiveLease(t *testing.T) {
+	t.Parallel()
+
+	store := memory.New()
+	leases, err := NewStorageLeaseStore(store)
+	if err != nil {
+		t.Fatalf("NewStorageLeaseStore() unexpected error: %v", err)
+	}
+
+	now := time.Unix(1300, 0).UTC()
+	leases.now = func() time.Time { return now }
+
+	acquired, err := leases.AcquireLease(context.Background(), LeaseRequest{
+		ShardID: 7,
+		Holder:  "node-a",
+		TTL:     30 * time.Second,
+		Token:   "lease-a",
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease(node-a) unexpected error: %v", err)
+	}
+
+	now = now.Add(10 * time.Second)
+	handoff, err := leases.HandoffLease(context.Background(), *acquired, LeaseRequest{
+		Holder: "node-b",
+		TTL:    45 * time.Second,
+		Token:  "lease-b",
+	})
+	if err != nil {
+		t.Fatalf("HandoffLease(node-b) unexpected error: %v", err)
+	}
+	if handoff.Holder != "node-b" || handoff.Epoch != acquired.Epoch+1 || handoff.Token != "lease-b" {
+		t.Fatalf("HandoffLease(node-b) = %#v, want node-b epoch %d token lease-b", handoff, acquired.Epoch+1)
+	}
+	if !handoff.AcquiredAt.Equal(now) {
+		t.Fatalf("HandoffLease(node-b).AcquiredAt = %v, want %v", handoff.AcquiredAt, now)
+	}
+	if !handoff.ExpiresAt.Equal(now.Add(45 * time.Second)) {
+		t.Fatalf("HandoffLease(node-b).ExpiresAt = %v, want %v", handoff.ExpiresAt, now.Add(45*time.Second))
+	}
+
+	stored, err := store.LoadLease(context.Background(), StorageShardID(7))
+	if err != nil {
+		t.Fatalf("LoadLease() unexpected error: %v", err)
+	}
+	if stored.Owner.NodeID != storage.NodeID("node-b") || stored.Owner.Epoch != 2 || stored.Token != "lease-b" {
+		t.Fatalf("LoadLease() = %#v, want owner=node-b epoch=2 token=lease-b", stored)
+	}
+
+	if _, err := leases.HandoffLease(context.Background(), *acquired, LeaseRequest{
+		Holder: "node-c",
+		TTL:    time.Minute,
+		Token:  "lease-c",
+	}); !errors.Is(err, ErrLeaseTokenMismatch) {
+		t.Fatalf("HandoffLease(stale current) error = %v, want %v", err, ErrLeaseTokenMismatch)
+	}
+}
+
+func TestStorageLeaseStoreMapsStorageLeaseConflictToHeld(t *testing.T) {
+	t.Parallel()
+
+	store := storageLeaseStoreStub{
+		loadLease: func(context.Context, storage.ShardID) (*storage.LeaseRecord, error) {
+			return nil, storage.ErrLeaseNotFound
+		},
+		saveLease: func(context.Context, storage.LeaseRecord) (*storage.LeaseRecord, error) {
+			return nil, storage.ErrLeaseConflict
+		},
+	}
+	leases, err := NewStorageLeaseStore(store)
+	if err != nil {
+		t.Fatalf("NewStorageLeaseStore() unexpected error: %v", err)
+	}
+
+	_, err = leases.AcquireLease(context.Background(), LeaseRequest{
+		ShardID: 13,
+		Holder:  "node-a",
+		TTL:     time.Minute,
+	})
+	if !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf("AcquireLease() error = %v, want %v", err, ErrLeaseHeld)
+	}
+}
+
 func TestStorageLeaseStoreErrors(t *testing.T) {
 	t.Parallel()
 
@@ -442,6 +567,25 @@ func TestStorageLeaseStoreErrors(t *testing.T) {
 	}
 	if err := leases.ReleaseLease(context.Background(), Lease{}); !errors.Is(err, ErrInvalidLease) {
 		t.Fatalf("ReleaseLease() error = %v, want %v", err, ErrInvalidLease)
+	}
+
+	unsupportedLeases, err := NewStorageLeaseStore(storageLeaseStoreStub{})
+	if err != nil {
+		t.Fatalf("NewStorageLeaseStore(unsupported) unexpected error: %v", err)
+	}
+	current := Lease{
+		ShardID:   7,
+		Holder:    "node-a",
+		Epoch:     1,
+		Token:     "lease-a",
+		ExpiresAt: time.Now().UTC().Add(time.Minute),
+	}
+	if _, err := unsupportedLeases.HandoffLease(context.Background(), current, LeaseRequest{
+		Holder: "node-b",
+		TTL:    time.Minute,
+		Token:  "lease-b",
+	}); !errors.Is(err, ErrLeaseHandoffUnsupported) {
+		t.Fatalf("HandoffLease(unsupported) error = %v, want %v", err, ErrLeaseHandoffUnsupported)
 	}
 }
 

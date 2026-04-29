@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"yjs-go-bridge/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
 )
 
 func TestDecodeV1ReadsStructsAndDeleteSet(t *testing.T) {

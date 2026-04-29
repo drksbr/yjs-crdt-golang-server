@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"yjs-go-bridge/internal/yupdate"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yupdate"
 )
 
 func TestPublicUpdateAPIStableV1Paths(t *testing.T) {

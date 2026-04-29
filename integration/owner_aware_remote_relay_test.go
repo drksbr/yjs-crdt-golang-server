@@ -15,13 +15,13 @@ import (
 
 	"github.com/coder/websocket"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/storage/memory"
-	"yjs-go-bridge/pkg/yawareness"
-	"yjs-go-bridge/pkg/ycluster"
-	"yjs-go-bridge/pkg/yhttp"
-	"yjs-go-bridge/pkg/ynodeproto"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage/memory"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ynodeproto"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 func TestOwnerAwareEdgeRelaysRemoteOwnerTraffic(t *testing.T) {
@@ -248,21 +248,13 @@ func TestOwnerAwareEdgeRebindsRemoteOwnerWithoutClientReconnect(t *testing.T) {
 		t.Fatal("initial remote dial was not observed")
 	}
 
-	if err := leases.ReleaseLease(ctx, *initialLease); err != nil {
-		t.Fatalf("ReleaseLease(node-b) unexpected error: %v", err)
-	}
-	handoffAt := time.Now().UTC()
-	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
-		ShardID: ycluster.StorageShardID(shardID),
-		Owner: storage.OwnerInfo{
-			NodeID: ycluster.StorageNodeID("node-c"),
-			Epoch:  initialLease.Epoch + 1,
-		},
-		Token:      "lease-node-c-rebind",
-		AcquiredAt: handoffAt,
-		ExpiresAt:  handoffAt.Add(2 * time.Minute),
+	if _, err := leases.HandoffLease(ctx, *initialLease, ycluster.LeaseRequest{
+		ShardID: shardID,
+		Holder:  "node-c",
+		TTL:     2 * time.Minute,
+		Token:   "lease-node-c-rebind",
 	}); err != nil {
-		t.Fatalf("SaveLease(node-c handoff) unexpected error: %v", err)
+		t.Fatalf("HandoffLease(node-c) unexpected error: %v", err)
 	}
 	select {
 	case req := <-dialer.requests:
@@ -274,13 +266,13 @@ func TestOwnerAwareEdgeRebindsRemoteOwnerWithoutClientReconnect(t *testing.T) {
 	}
 
 	ownerPeer := dialSmokeWS(t, ownerC.URL+"/ws?doc=owner-aware-remote-rebind&client=805&conn=owner-c")
-	ownerUpdate := buildIntegrationGCOnlyUpdate(111, 2)
-	writeSmokeBinary(t, ownerPeer, yprotocol.EncodeProtocolSyncUpdate(ownerUpdate))
-	assertSyncUpdateMatchesUpdate(t, readSmokeSyncUpdate(t, edgePeer, ownerUpdate), ownerUpdate)
-
 	edgeUpdate := buildIntegrationGCOnlyUpdate(222, 2)
 	writeSmokeBinary(t, edgePeer, yprotocol.EncodeProtocolSyncUpdate(edgeUpdate))
 	assertSyncUpdateMatchesUpdate(t, readSmokeSyncUpdate(t, ownerPeer, edgeUpdate), edgeUpdate)
+
+	ownerUpdate := buildIntegrationGCOnlyUpdate(111, 2)
+	writeSmokeBinary(t, ownerPeer, yprotocol.EncodeProtocolSyncUpdate(ownerUpdate))
+	assertSyncUpdateMatchesUpdate(t, readSmokeSyncUpdate(t, edgePeer, ownerUpdate), ownerUpdate)
 }
 
 func TestOwnerAwareEdgeTakesOverLocalOwnerWithoutClientReconnect(t *testing.T) {
@@ -493,9 +485,6 @@ func newTypedOwnerAwareTestServer(
 		}),
 		ResolveRequest:                resolveSmokeRequest,
 		AuthorityRevalidationInterval: 20 * time.Millisecond,
-		OnError: func(_ *http.Request, req yhttp.Request, err error) {
-			t.Logf("edge[%s] doc=%s/%s conn=%s: %v", localNode, req.DocumentKey.Namespace, req.DocumentKey.DocumentID, req.ConnectionID, err)
-		},
 	})
 	if err != nil {
 		t.Fatalf("yhttp.NewServer() unexpected error: %v", err)
@@ -511,9 +500,6 @@ func newTypedOwnerAwareTestServer(
 			Local:       localHandler,
 			Dialer:      dialer,
 			OwnerLookup: lookup,
-			OnError: func(_ *http.Request, req yhttp.Request, err error) {
-				t.Logf("forward[%s] doc=%s/%s conn=%s: %v", localNode, req.DocumentKey.Namespace, req.DocumentKey.DocumentID, req.ConnectionID, err)
-			},
 		})
 		if err != nil {
 			t.Fatalf("yhttp.NewRemoteOwnerForwardHandlers() unexpected error: %v", err)
@@ -563,9 +549,6 @@ func newTypedOwnerTestServer(
 		}),
 		ResolveRequest:                resolveSmokeRequest,
 		AuthorityRevalidationInterval: revalidationInterval,
-		OnError: func(_ *http.Request, req yhttp.Request, err error) {
-			t.Logf("owner[%s] doc=%s/%s conn=%s: %v", localNode, req.DocumentKey.Namespace, req.DocumentKey.DocumentID, req.ConnectionID, err)
-		},
 	})
 	if err != nil {
 		t.Fatalf("yhttp.NewServer() unexpected error: %v", err)
@@ -706,7 +689,7 @@ func (d *memoryRemoteOwnerDialer) DialRemoteOwner(ctx context.Context, req yhttp
 	client, server := newMemoryNodeStreamPair()
 	go func() {
 		if err := endpoint.ServeNodeStream(context.Background(), server); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
-			d.t.Logf("memory remote owner serve stream: %v", err)
+			return
 		}
 	}()
 	return client, nil
@@ -725,7 +708,7 @@ func (d *scriptedMemoryRemoteOwnerDialer) DialRemoteOwner(ctx context.Context, _
 			return
 		}
 		if err := d.script(context.Background(), server); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
-			d.t.Logf("scripted remote owner stream: %v", err)
+			return
 		}
 	}()
 	return client, nil
@@ -795,6 +778,8 @@ func (s *memoryNodeStream) Receive(ctx context.Context) (ynodeproto.Message, err
 func (s *memoryNodeStream) Close() error {
 	s.once.Do(func() {
 		close(s.closed)
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
 		close(s.outgoing)
 	})
 	return nil

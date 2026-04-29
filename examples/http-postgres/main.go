@@ -5,7 +5,7 @@ import (
 	"log"
 	"net/http"
 
-	"yjs-go-bridge/examples/internal/httpdemo"
+	"github.com/drksbr/yjs-crdt-golang-server/examples/internal/httpdemo"
 )
 
 func main() {

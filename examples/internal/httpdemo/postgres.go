@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
-	pgstore "yjs-go-bridge/pkg/storage/postgres"
-	"yjs-go-bridge/pkg/yhttp"
-	"yjs-go-bridge/pkg/yprotocol"
+	pgstore "github.com/drksbr/yjs-crdt-golang-server/pkg/storage/postgres"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 const (

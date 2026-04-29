@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 var (
@@ -28,6 +29,14 @@ var (
 type SnapshotLogStore interface {
 	SnapshotStore
 	UpdateLogStore
+}
+
+// AuthoritativeSnapshotLogStore narrows the contracts required to compact a
+// snapshot and trim its update log while validating the same authority fence for
+// both writes.
+type AuthoritativeSnapshotLogStore interface {
+	AuthoritativeSnapshotCheckpointStore
+	AuthoritativeUpdateLogStore
 }
 
 // RecoveryResult materializes the result of loading a base snapshot and replaying
@@ -123,14 +132,26 @@ func ReplayUpdateLog(store UpdateLogStore, key DocumentKey, base *yjsbridge.Pers
 // The helper paginates through `ListUpdates`, validates that every record
 // belongs to `key`, and requires strictly increasing offsets across pages.
 // `limit <= 0` is passed through to every `ListUpdates` call.
-func ReplayUpdateLogContext(ctx context.Context, store UpdateLogStore, key DocumentKey, base *yjsbridge.PersistedSnapshot, after UpdateOffset, limit int) (*UpdateLogReplayResult, error) {
+func ReplayUpdateLogContext(ctx context.Context, store UpdateLogStore, key DocumentKey, base *yjsbridge.PersistedSnapshot, after UpdateOffset, limit int) (result *UpdateLogReplayResult, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	start := time.Now()
+	defer func() {
+		applied := 0
+		through := after
+		lastEpoch := uint64(0)
+		if result != nil {
+			applied = result.Applied
+			through = result.Through
+			lastEpoch = result.LastEpoch
+		}
+		observeReplayUpdateLog(ctx, key, time.Since(start), applied, through, lastEpoch, err)
+	}()
 	if store == nil {
 		return nil, ErrNilUpdateLogStore
 	}
-	if err := key.Validate(); err != nil {
+	if err = key.Validate(); err != nil {
 		return nil, err
 	}
 
@@ -139,7 +160,7 @@ func ReplayUpdateLogContext(ctx context.Context, store UpdateLogStore, key Docum
 		return nil, err
 	}
 
-	result := &UpdateLogReplayResult{
+	result = &UpdateLogReplayResult{
 		Through: after,
 	}
 
@@ -183,11 +204,25 @@ func RecoverSnapshot(
 	key DocumentKey,
 	after UpdateOffset,
 	limit int,
-) (*RecoveryResult, error) {
+) (result *RecoveryResult, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := key.Validate(); err != nil {
+	start := time.Now()
+	defer func() {
+		updatesApplied := 0
+		checkpointThrough := UpdateOffset(0)
+		lastOffset := after
+		lastEpoch := uint64(0)
+		if result != nil {
+			updatesApplied = len(result.Updates)
+			checkpointThrough = result.CheckpointThrough
+			lastOffset = result.LastOffset
+			lastEpoch = result.LastEpoch
+		}
+		observeRecoverSnapshot(ctx, key, time.Since(start), updatesApplied, checkpointThrough, lastOffset, lastEpoch, err)
+	}()
+	if err = key.Validate(); err != nil {
 		return nil, err
 	}
 
@@ -204,7 +239,7 @@ func RecoverSnapshot(
 		replayAfter = checkpointThrough
 	}
 
-	result := &RecoveryResult{
+	result = &RecoveryResult{
 		Snapshot:          base,
 		CheckpointThrough: checkpointThrough,
 		CheckpointEpoch:   checkpointEpoch,
@@ -228,14 +263,15 @@ func RecoverSnapshot(
 		return nil, err
 	}
 
-	return &RecoveryResult{
+	result = &RecoveryResult{
 		Snapshot:          snapshot,
 		Updates:           cloneUpdateLogRecords(tail),
 		CheckpointThrough: checkpointThrough,
 		CheckpointEpoch:   checkpointEpoch,
 		LastOffset:        lastOffset,
 		LastEpoch:         lastEpoch,
-	}, nil
+	}
+	return result, nil
 }
 
 // CompactUpdateLog replays and persists a compacted snapshot, then trims the
@@ -253,10 +289,22 @@ func CompactUpdateLog(store SnapshotLogStore, key DocumentKey, base *yjsbridge.P
 // backing store makes them so. If trimming fails after a successful save, the
 // returned result still exposes the rebuilt snapshot and saved record together
 // with the error.
-func CompactUpdateLogContext(ctx context.Context, store SnapshotLogStore, key DocumentKey, base *yjsbridge.PersistedSnapshot, after UpdateOffset, limit int) (*UpdateLogCompactionResult, error) {
+func CompactUpdateLogContext(ctx context.Context, store SnapshotLogStore, key DocumentKey, base *yjsbridge.PersistedSnapshot, after UpdateOffset, limit int) (result *UpdateLogCompactionResult, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	start := time.Now()
+	defer func() {
+		applied := 0
+		through := after
+		lastEpoch := uint64(0)
+		if result != nil {
+			applied = result.Applied
+			through = result.Through
+			lastEpoch = result.LastEpoch
+		}
+		observeCompactUpdateLog(ctx, key, time.Since(start), applied, through, lastEpoch, err)
+	}()
 	if store == nil {
 		return nil, ErrNilSnapshotLogStore
 	}
@@ -266,7 +314,7 @@ func CompactUpdateLogContext(ctx context.Context, store SnapshotLogStore, key Do
 		return nil, err
 	}
 
-	result := &UpdateLogCompactionResult{
+	result = &UpdateLogCompactionResult{
 		Snapshot:  replay.Snapshot,
 		Through:   replay.Through,
 		Applied:   replay.Applied,
@@ -282,6 +330,90 @@ func CompactUpdateLogContext(ctx context.Context, store SnapshotLogStore, key Do
 		return result, fmt.Errorf("save compacted snapshot: %w", err)
 	}
 	if err := store.TrimUpdates(ctx, key, replay.Through); err != nil {
+		return result, fmt.Errorf("trim compacted updates through %d: %w", replay.Through, err)
+	}
+
+	return result, nil
+}
+
+// CompactUpdateLogAuthoritative replays and persists a compacted snapshot, then
+// trims the corresponding log tail through the applied high-water mark while
+// validating the provided authority fence for snapshot save and trim.
+func CompactUpdateLogAuthoritative(
+	store AuthoritativeSnapshotLogStore,
+	key DocumentKey,
+	base *yjsbridge.PersistedSnapshot,
+	after UpdateOffset,
+	limit int,
+	fence AuthorityFence,
+) (*UpdateLogCompactionResult, error) {
+	return CompactUpdateLogAuthoritativeContext(context.Background(), store, key, base, after, limit, fence)
+}
+
+// CompactUpdateLogAuthoritativeContext is the context-aware variant of
+// CompactUpdateLogAuthoritative.
+//
+// Replay reads are intentionally unfenced, but both mutating steps use the same
+// fence. If trim fails after a successful checkpoint save, the returned result
+// still exposes the rebuilt snapshot and saved record together with the error.
+func CompactUpdateLogAuthoritativeContext(
+	ctx context.Context,
+	store AuthoritativeSnapshotLogStore,
+	key DocumentKey,
+	base *yjsbridge.PersistedSnapshot,
+	after UpdateOffset,
+	limit int,
+	fence AuthorityFence,
+) (result *UpdateLogCompactionResult, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	start := time.Now()
+	defer func() {
+		applied := 0
+		through := after
+		lastEpoch := uint64(0)
+		if result != nil {
+			applied = result.Applied
+			through = result.Through
+			lastEpoch = result.LastEpoch
+		}
+		observeCompactUpdateLog(ctx, key, time.Since(start), applied, through, lastEpoch, err)
+	}()
+	if store == nil {
+		return nil, ErrNilSnapshotLogStore
+	}
+	if err := fence.Validate(); err != nil {
+		return nil, err
+	}
+
+	replay, err := ReplayUpdateLogContext(ctx, store, key, base, after, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	result = &UpdateLogCompactionResult{
+		Snapshot:  replay.Snapshot,
+		Through:   replay.Through,
+		Applied:   replay.Applied,
+		LastEpoch: replay.LastEpoch,
+	}
+	if replay.Applied == 0 {
+		return result, nil
+	}
+	if result.LastEpoch < fence.Owner.Epoch {
+		result.LastEpoch = fence.Owner.Epoch
+	}
+
+	record, err := store.SaveSnapshotCheckpointAuthoritative(ctx, key, replay.Snapshot, replay.Through, fence)
+	result.Record = record
+	if err != nil {
+		return result, fmt.Errorf("save compacted snapshot: %w", err)
+	}
+	if record != nil && record.Epoch > result.LastEpoch {
+		result.LastEpoch = record.Epoch
+	}
+	if err := store.TrimUpdatesAuthoritative(ctx, key, replay.Through, fence); err != nil {
 		return result, fmt.Errorf("trim compacted updates through %d: %w", replay.Through, err)
 	}
 

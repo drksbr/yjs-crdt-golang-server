@@ -1,4 +1,4 @@
-module yjs-go-bridge
+module github.com/drksbr/yjs-crdt-golang-server
 
 go 1.26
 

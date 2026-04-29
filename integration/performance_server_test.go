@@ -11,12 +11,12 @@ import (
 	chirouter "github.com/go-chi/chi/v5"
 	labstackecho "github.com/labstack/echo/v4"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/storage/memory"
-	pgstore "yjs-go-bridge/pkg/storage/postgres"
-	yhttpchi "yjs-go-bridge/pkg/yhttp/chi"
-	yhttpecho "yjs-go-bridge/pkg/yhttp/echo"
-	yhttpgin "yjs-go-bridge/pkg/yhttp/gin"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage/memory"
+	pgstore "github.com/drksbr/yjs-crdt-golang-server/pkg/storage/postgres"
+	yhttpchi "github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp/chi"
+	yhttpecho "github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp/echo"
+	yhttpgin "github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp/gin"
 )
 
 type perfBackend struct {

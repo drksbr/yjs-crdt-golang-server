@@ -9,7 +9,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"yjs-go-bridge/pkg/ynodeproto"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ynodeproto"
 )
 
 // RemoteOwnerURLResolver resolve a URL do endpoint owner-side para um owner
@@ -103,7 +103,7 @@ func (s *webSocketNodeMessageStream) Receive(ctx context.Context) (ynodeproto.Me
 		return nil, err
 	}
 	if msgType != websocket.MessageBinary {
-		_ = s.conn.Close(websocket.StatusUnsupportedData, "yjs-go-bridge aceita apenas frames binarios")
+		_ = s.conn.Close(websocket.StatusUnsupportedData, "yjs-crdt-golang-server aceita apenas frames binarios")
 		return nil, fmt.Errorf("yhttp: node stream recebeu frame nao-binario: %v", msgType)
 	}
 	return ynodeproto.DecodeMessageFrame(payload)

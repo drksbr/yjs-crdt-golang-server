@@ -7,9 +7,9 @@ import (
 	"testing"
 	"unicode/utf16"
 
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/internal/ytypes"
-	"yjs-go-bridge/internal/yupdate"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yupdate"
 )
 
 var (

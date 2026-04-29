@@ -3,7 +3,7 @@ package yupdate
 import (
 	"fmt"
 
-	"yjs-go-bridge/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
 )
 
 const (

@@ -1,5 +1,5 @@
 // Package ynodeproto define o framing binário e os payloads tipados do
-// protocolo inter-node do yjs-go-bridge.
+// protocolo inter-node do yjs-crdt-golang-server.
 //
 // A versão inicial (v1) usa um header fixo de 8 bytes em big-endian:
 // - 1 byte de versão do wire format;

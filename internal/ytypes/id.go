@@ -3,7 +3,7 @@ package ytypes
 import (
 	"math"
 
-	"yjs-go-bridge/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
 )
 
 // ID representa o endereço lógico básico usado pelo Yjs: cliente + clock.

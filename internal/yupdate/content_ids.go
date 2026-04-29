@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/internal/yidset"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yidset"
 )
 
 // ContentIDs representa os ranges de inserts e deletes presentes em um update.

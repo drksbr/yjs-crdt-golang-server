@@ -14,11 +14,11 @@ import (
 	"github.com/coder/websocket"
 	gingonic "github.com/gin-gonic/gin"
 
-	"yjs-go-bridge/pkg/storage"
-	pgstore "yjs-go-bridge/pkg/storage/postgres"
-	"yjs-go-bridge/pkg/yhttp"
-	yhttpgin "yjs-go-bridge/pkg/yhttp/gin"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	pgstore "github.com/drksbr/yjs-crdt-golang-server/pkg/storage/postgres"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp"
+	yhttpgin "github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp/gin"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 const (

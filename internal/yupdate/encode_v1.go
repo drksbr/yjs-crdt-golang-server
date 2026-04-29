@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"slices"
 
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
 )
 
 // EncodeV1 serializa novamente um update V1 já materializado.

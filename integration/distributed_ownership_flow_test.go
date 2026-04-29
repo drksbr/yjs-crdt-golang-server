@@ -3,17 +3,16 @@ package integration
 import (
 	"bytes"
 	"context"
-	"errors"
 	"testing"
 	"time"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/storage/memory"
-	"yjs-go-bridge/pkg/ycluster"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage/memory"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
-func TestDistributedOwnerFailoverRecoversSnapshotTailAndEpoch(t *testing.T) {
+func TestDistributedOwnerHandoffRecoversSnapshotTailAndEpoch(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -30,7 +29,7 @@ func TestDistributedOwnerFailoverRecoversSnapshotTailAndEpoch(t *testing.T) {
 
 	key := storage.DocumentKey{
 		Namespace:  "integration",
-		DocumentID: "distributed-owner-failover-recovery",
+		DocumentID: "distributed-owner-handoff-recovery",
 	}
 	shardID, err := resolver.ResolveShard(key)
 	if err != nil {
@@ -54,7 +53,6 @@ func TestDistributedOwnerFailoverRecoversSnapshotTailAndEpoch(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	leaseExpiry := now.Add(750 * time.Millisecond)
 	if _, err := store.SaveLease(ctx, storage.LeaseRecord{
 		ShardID: ycluster.StorageShardID(shardID),
 		Owner: storage.OwnerInfo{
@@ -63,7 +61,7 @@ func TestDistributedOwnerFailoverRecoversSnapshotTailAndEpoch(t *testing.T) {
 		},
 		Token:      "lease-node-a-epoch-1",
 		AcquiredAt: now.Add(-15 * time.Second),
-		ExpiresAt:  leaseExpiry,
+		ExpiresAt:  now.Add(2 * time.Minute),
 	}); err != nil {
 		t.Fatalf("SaveLease(node-a active) unexpected error: %v", err)
 	}
@@ -136,24 +134,17 @@ func TestDistributedOwnerFailoverRecoversSnapshotTailAndEpoch(t *testing.T) {
 		t.Fatalf("ownerAConn.Close() unexpected error: %v", err)
 	}
 
-	wait := time.Until(leaseExpiry) + 20*time.Millisecond
-	if wait > 0 {
-		time.Sleep(wait)
-	}
-	if _, err := nodeALookup.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key}); !errors.Is(err, ycluster.ErrLeaseExpired) {
-		t.Fatalf("LookupOwner(node-a expired) error = %v, want %v", err, ycluster.ErrLeaseExpired)
-	}
-
-	acquiredB, err := leases.AcquireLease(ctx, ycluster.LeaseRequest{
+	acquiredB, err := leases.HandoffLease(ctx, *initialResolution.Placement.Lease, ycluster.LeaseRequest{
 		ShardID: shardID,
 		Holder:  "node-b",
 		TTL:     2 * time.Minute,
+		Token:   "lease-node-b-epoch-2",
 	})
 	if err != nil {
-		t.Fatalf("AcquireLease(node-b) unexpected error: %v", err)
+		t.Fatalf("HandoffLease(node-b) unexpected error: %v", err)
 	}
 	if acquiredB.Epoch != 2 {
-		t.Fatalf("AcquireLease(node-b).Epoch = %d, want 2", acquiredB.Epoch)
+		t.Fatalf("HandoffLease(node-b).Epoch = %d, want 2", acquiredB.Epoch)
 	}
 
 	persistedLease, err := store.LoadLease(ctx, ycluster.StorageShardID(shardID))

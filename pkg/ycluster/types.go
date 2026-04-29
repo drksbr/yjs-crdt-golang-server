@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"yjs-go-bridge/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
 )
 
 // NodeID identifica de forma estavel um no participante do cluster.
@@ -73,6 +73,16 @@ type Lease struct {
 	Token      string
 	AcquiredAt time.Time
 	ExpiresAt  time.Time
+}
+
+// Clone retorna uma cópia independente da lease.
+func (l *Lease) Clone() *Lease {
+	if l == nil {
+		return nil
+	}
+
+	cloned := *l
+	return &cloned
 }
 
 // Validate confirma se a lease esta completa e consistente.

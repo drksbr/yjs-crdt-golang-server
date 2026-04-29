@@ -11,5 +11,6 @@
 // Awareness payload/runtime continua em `pkg/yawareness`, e a `Session` compõe
 // esse runtime para um fluxo local mínimo. O `Provider` sobe um nível acima da
 // `Session`, mantendo snapshot autoritativo por documento, fanout local entre
-// conexões do mesmo processo e persistência explícita opcional via `pkg/storage`.
+// conexões do mesmo processo, apply context-aware e persistência explícita
+// opcional via `pkg/storage`.
 package yprotocol

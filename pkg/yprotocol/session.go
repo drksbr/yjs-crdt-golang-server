@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sync"
 
-	"yjs-go-bridge/pkg/yawareness"
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 // Session mantém um estado mínimo em-processo para handshake e ingestão de

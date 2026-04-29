@@ -12,15 +12,17 @@ import (
 
 	"github.com/coder/websocket"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/ynodeproto"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ynodeproto"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 // Server implementa `http.Handler` para acoplar o provider local a qualquer
 // stack HTTP compatível com `net/http`.
 type Server struct {
 	provider                      *yprotocol.Provider
+	ownershipRuntime              *ycluster.DocumentOwnershipRuntime
 	resolveRequest                ResolveRequestFunc
 	acceptOptions                 *websocket.AcceptOptions
 	readLimitBytes                int64
@@ -48,12 +50,13 @@ type serverSocketSessionOptions struct {
 	observeConnectionLifecycle bool
 	bootstrap                  bool
 	authorityLossHandler       AuthorityLossHandler
+	ownership                  *ycluster.DocumentOwnershipHandle
 }
 
 type authorityLossHandoffContextKey struct{}
 
 type authorityLossHandoffState struct {
-	clientErrCh <-chan error
+	clientErrCh  <-chan error
 	cancelClient context.CancelFunc
 	upstreamPeer *switchableRemoteStreamPeer
 }
@@ -102,6 +105,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 	return &Server{
 		provider:                      cfg.Provider,
+		ownershipRuntime:              cfg.OwnershipRuntime,
 		resolveRequest:                cfg.ResolveRequest,
 		acceptOptions:                 cloneAcceptOptions(cfg.AcceptOptions),
 		readLimitBytes:                readLimit,
@@ -151,8 +155,21 @@ func (s *Server) serveResolvedHTTPWithOptions(
 		req.ConnectionID = s.newConnectionID()
 	}
 
+	ownership, err := s.acquireRequestOwnership(r.Context(), req)
+	if err != nil {
+		s.metrics.Error(req, "acquire_ownership", err)
+		status := statusFromOwnershipError(err)
+		if status == http.StatusServiceUnavailable {
+			w.Header().Set("Retry-After", "1")
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	options.ownership = ownership
+
 	connection, err := s.provider.Open(r.Context(), req.DocumentKey, req.ConnectionID, req.ClientID)
 	if err != nil {
+		s.releaseRequestOwnership(r, req, ownership)
 		s.metrics.Error(req, "open", err)
 		status := statusFromOpenError(err)
 		if status == http.StatusServiceUnavailable {
@@ -170,6 +187,7 @@ func (s *Server) serveResolvedHTTPWithOptions(
 		if _, closeErr := connection.Close(); closeErr != nil {
 			s.report(r, req, closeErr)
 		}
+		s.releaseRequestOwnership(r, req, ownership)
 	}()
 
 	socket, err := websocket.Accept(w, r, s.acceptOptions)
@@ -217,7 +235,7 @@ func (s *Server) serveConnectedSocket(
 	if options.bootstrap {
 		if err := s.bootstrapConnection(r, req, connection, peer); err != nil {
 			if isAuthorityLostRetryableError(err) {
-				s.cleanupConnection(r, req, connection)
+				s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
 				s.handleAuthorityLoss(r, req, socket, connection.AuthorityEpoch(), options.authorityLossHandler)
 				return
 			}
@@ -232,7 +250,7 @@ func (s *Server) serveConnectedSocket(
 				s.metrics.Error(req, "close_bootstrap", closeErr)
 				s.report(r, req, closeErr)
 			}
-			s.cleanupConnection(r, req, connection)
+			s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
 			s.closeSocket(r, req, socket)
 			return
 		}
@@ -242,35 +260,35 @@ func (s *Server) serveConnectedSocket(
 		msgType, payload, err := socket.Read(sessionCtx)
 		if err != nil {
 			if signal, ok := drainRemoteOwnerCloseSignal(revalidateCh); ok {
-				s.cleanupConnection(r, req, connection)
+				s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
 				s.handleAuthorityLoss(r, req, socket, connection.AuthorityEpoch(), options.authorityLossHandler, signal)
 				return
 			}
-			if status := websocket.CloseStatus(err); status != websocket.StatusNormalClosure && status != websocket.StatusGoingAway && !isIgnorableTransportError(err) {
+			if status := websocket.CloseStatus(err); !isExpectedClientCloseStatus(status) && !isIgnorableTransportError(err) {
 				s.metrics.Error(req, "read", err)
 				s.report(r, req, err)
 			}
-			s.cleanupConnection(r, req, connection)
+			s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
 			s.closeSocket(r, req, socket)
 			return
 		}
 		s.metrics.FrameRead(req, len(payload))
 		if msgType != websocket.MessageBinary {
-			if closeErr := socket.Close(websocket.StatusUnsupportedData, "yjs-go-bridge aceita apenas frames binarios"); closeErr != nil {
+			if closeErr := socket.Close(websocket.StatusUnsupportedData, "yjs-crdt-golang-server aceita apenas frames binarios"); closeErr != nil {
 				s.metrics.Error(req, "close_unsupported_data", closeErr)
 				s.report(r, req, closeErr)
 			}
-			s.cleanupConnection(r, req, connection)
+			s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
 			s.closeSocket(r, req, socket)
 			return
 		}
 
 		handleStart := time.Now()
-		result, err := connection.HandleEncodedMessages(payload)
+		result, err := connection.HandleEncodedMessagesContext(sessionCtx, payload)
 		s.metrics.Handle(req, time.Since(handleStart), err)
 		if err != nil {
 			if isAuthorityLostRetryableError(err) {
-				s.cleanupConnection(r, req, connection)
+				s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
 				s.handleAuthorityLoss(
 					r,
 					req,
@@ -292,7 +310,7 @@ func (s *Server) serveConnectedSocket(
 				s.metrics.Error(req, "close_policy_violation", closeErr)
 				s.report(r, req, closeErr)
 			}
-			s.cleanupConnection(r, req, connection)
+			s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
 			s.closeSocket(r, req, socket)
 			return
 		}
@@ -303,7 +321,7 @@ func (s *Server) serveConnectedSocket(
 					s.metrics.Error(req, "write_direct", err)
 					s.report(r, req, err)
 				}
-				s.cleanupConnection(r, req, connection)
+				s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
 				s.closeSocket(r, req, socket)
 				return
 			}
@@ -339,7 +357,7 @@ func (s *Server) serveSwitchableConnectedSocket(
 	if options.bootstrap {
 		if err := s.bootstrapConnection(r, req, connection, peer); err != nil {
 			if isAuthorityLostRetryableError(err) {
-				s.cleanupConnection(r, req, connection)
+				s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
 				s.handleAuthorityLoss(r, req, socket, connection.AuthorityEpoch(), options.authorityLossHandler)
 				return
 			}
@@ -354,7 +372,7 @@ func (s *Server) serveSwitchableConnectedSocket(
 				s.metrics.Error(req, "close_bootstrap", closeErr)
 				s.report(r, req, closeErr)
 			}
-			s.cleanupConnection(r, req, connection)
+			s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
 			return
 		}
 	}
@@ -375,7 +393,7 @@ func (s *Server) serveSwitchableConnectedSocket(
 	}()
 
 	handoffReq := r.WithContext(context.WithValue(r.Context(), authorityLossHandoffContextKey{}, &authorityLossHandoffState{
-		clientErrCh: clientErrCh,
+		clientErrCh:  clientErrCh,
 		cancelClient: cancelClient,
 		upstreamPeer: upstreamPeer,
 	}))
@@ -386,11 +404,11 @@ func (s *Server) serveSwitchableConnectedSocket(
 			if signal, ok := drainRemoteOwnerCloseSignal(revalidateCh); ok {
 				previousEpoch := connection.AuthorityEpoch()
 				upstreamPeer.clearSession()
-				s.cleanupConnection(r, req, connection)
+				s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
 				s.handleAuthorityLoss(handoffReq, req, socket, previousEpoch, options.authorityLossHandler, signal)
 				return
 			}
-			s.cleanupConnection(r, req, connection)
+			s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
 			if err != nil && !isIgnorableTransportError(err) {
 				s.metrics.Error(req, "read", err)
 				s.report(r, req, err)
@@ -401,11 +419,11 @@ func (s *Server) serveSwitchableConnectedSocket(
 			if signal, ok := drainRemoteOwnerCloseSignal(revalidateCh); ok {
 				previousEpoch := connection.AuthorityEpoch()
 				upstreamPeer.clearSession()
-				s.cleanupConnection(r, req, connection)
+				s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
 				s.handleAuthorityLoss(handoffReq, req, socket, previousEpoch, options.authorityLossHandler, signal)
 				return
 			}
-			s.cleanupConnection(r, req, connection)
+			s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
 			cancelClient()
 			s.closeSocket(r, req, socket)
 			return
@@ -432,8 +450,15 @@ func (s *Server) serveAttachedSocketWithOptions(
 		req.ConnectionID = s.newConnectionID()
 	}
 
+	ownership, err := s.acquireRequestOwnership(r.Context(), req)
+	if err != nil {
+		return err
+	}
+	options.ownership = ownership
+
 	connection, err := s.provider.Open(r.Context(), req.DocumentKey, req.ConnectionID, req.ClientID)
 	if err != nil {
+		s.releaseRequestOwnership(r, req, ownership)
 		return err
 	}
 	s.serveConnectedSocket(r, req, connection, socket, options)
@@ -446,7 +471,7 @@ func (s *Server) bootstrapConnection(r *http.Request, req Request, connection *y
 		yprotocol.EncodeProtocolQueryAwareness(),
 	} {
 		handleStart := time.Now()
-		result, err := connection.HandleEncodedMessages(payload)
+		result, err := connection.HandleEncodedMessagesContext(r.Context(), payload)
 		s.metrics.Handle(req, time.Since(handleStart), err)
 		if err != nil {
 			return err
@@ -464,7 +489,25 @@ func (s *Server) bootstrapConnection(r *http.Request, req Request, connection *y
 	return nil
 }
 
+func (s *Server) acquireRequestOwnership(ctx context.Context, req Request) (*ycluster.DocumentOwnershipHandle, error) {
+	if s.ownershipRuntime == nil {
+		return nil, nil
+	}
+	return s.ownershipRuntime.AcquireDocumentOwnership(ctx, ycluster.ClaimDocumentRequest{
+		DocumentKey: req.DocumentKey,
+	})
+}
+
 func (s *Server) cleanupConnection(r *http.Request, req Request, connection *yprotocol.Connection) {
+	s.cleanupConnectionWithOwnership(r, req, connection, nil)
+}
+
+func (s *Server) cleanupConnectionWithOwnership(
+	r *http.Request,
+	req Request,
+	connection *yprotocol.Connection,
+	ownership *ycluster.DocumentOwnershipHandle,
+) {
 	s.registry.remove(req.DocumentKey, req.ConnectionID)
 
 	if req.PersistOnClose && !connection.AuthorityLost() {
@@ -486,6 +529,23 @@ func (s *Server) cleanupConnection(r *http.Request, req Request, connection *ypr
 	} else if len(result.Broadcast) > 0 {
 		s.fanout(r, req, result.Broadcast)
 	}
+
+	s.releaseRequestOwnership(r, req, ownership)
+}
+
+func (s *Server) releaseRequestOwnership(r *http.Request, req Request, ownership *ycluster.DocumentOwnershipHandle) {
+	if ownership == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), s.persistTimeout)
+	err := ownership.Release(ctx)
+	cancel()
+	if err == nil {
+		return
+	}
+	s.metrics.Error(req, "release_ownership", err)
+	s.report(r, req, err)
 }
 
 func (s *Server) closeSocket(r *http.Request, req Request, socket *websocket.Conn) {
@@ -507,7 +567,7 @@ func (s *Server) pipeClientToLocal(
 	for {
 		msgType, payload, err := socket.Read(ctx)
 		if err != nil {
-			if status := websocket.CloseStatus(err); status != websocket.StatusNormalClosure && status != websocket.StatusGoingAway && !isIgnorableTransportError(err) {
+			if status := websocket.CloseStatus(err); !isExpectedClientCloseStatus(status) && !isIgnorableTransportError(err) {
 				return err
 			}
 			return nil
@@ -515,7 +575,7 @@ func (s *Server) pipeClientToLocal(
 
 		s.metrics.FrameRead(req, len(payload))
 		if msgType != websocket.MessageBinary {
-			if closeErr := socket.Close(websocket.StatusUnsupportedData, "yjs-go-bridge aceita apenas frames binarios"); closeErr != nil && !isIgnorableTransportError(closeErr) {
+			if closeErr := socket.Close(websocket.StatusUnsupportedData, "yjs-crdt-golang-server aceita apenas frames binarios"); closeErr != nil && !isIgnorableTransportError(closeErr) {
 				s.metrics.Error(req, "close_unsupported_data", closeErr)
 				s.report(nil, req, closeErr)
 			}
@@ -576,6 +636,21 @@ func statusFromOpenError(err error) int {
 	case errors.Is(err, yprotocol.ErrConnectionExists):
 		return http.StatusConflict
 	case isAuthorityLostRetryableError(err):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func statusFromOwnershipError(err error) int {
+	switch {
+	case errors.Is(err, storage.ErrInvalidDocumentKey), errors.Is(err, ycluster.ErrInvalidLeaseRequest):
+		return http.StatusBadRequest
+	case errors.Is(err, ycluster.ErrLeaseHeld),
+		errors.Is(err, ycluster.ErrLeaseExpired),
+		errors.Is(err, ycluster.ErrOwnershipRuntimeClosed),
+		errors.Is(err, context.Canceled),
+		errors.Is(err, context.DeadlineExceeded):
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
@@ -751,4 +826,10 @@ func isIgnorableTransportError(err error) bool {
 		return true
 	}
 	return strings.Contains(err.Error(), "use of closed network connection")
+}
+
+func isExpectedClientCloseStatus(status websocket.StatusCode) bool {
+	return status == websocket.StatusNormalClosure ||
+		status == websocket.StatusGoingAway ||
+		status == websocket.StatusTryAgainLater
 }

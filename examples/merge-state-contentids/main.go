@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 func main() {

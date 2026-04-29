@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/internal/ytypes"
-	"yjs-go-bridge/internal/yupdate"
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yupdate"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 type testSnapshotLogStore struct {
@@ -22,22 +22,26 @@ type testSnapshotLogStore struct {
 	saveErr error
 	trimErr error
 
-	listCalls           int
-	saveCalls           int
-	saveCheckpointCalls int
-	saveEpochCalls      int
-	trimCalls           int
+	listCalls              int
+	saveCalls              int
+	saveCheckpointCalls    int
+	saveEpochCalls         int
+	saveAuthoritativeCalls int
+	trimCalls              int
+	trimAuthoritativeCalls int
 
 	trimmedKey     DocumentKey
 	trimmedThrough UpdateOffset
 	savedThrough   UpdateOffset
 	savedEpoch     uint64
+	lastFence      AuthorityFence
 	listAfters     []UpdateOffset
 }
 
 var _ SnapshotLogStore = (*testSnapshotLogStore)(nil)
 var _ SnapshotCheckpointStore = (*testSnapshotLogStore)(nil)
 var _ SnapshotCheckpointEpochStore = (*testSnapshotLogStore)(nil)
+var _ AuthoritativeSnapshotLogStore = (*testSnapshotLogStore)(nil)
 
 func (s *testSnapshotLogStore) SaveSnapshot(_ context.Context, key DocumentKey, snapshot *yjsbridge.PersistedSnapshot) (*SnapshotRecord, error) {
 	return s.SaveSnapshotCheckpointEpoch(context.Background(), key, snapshot, 0, 0)
@@ -79,6 +83,14 @@ func (s *testSnapshotLogStore) AppendUpdate(context.Context, DocumentKey, []byte
 	return nil, nil
 }
 
+func (s *testSnapshotLogStore) AppendUpdateAuthoritative(ctx context.Context, key DocumentKey, update []byte, fence AuthorityFence) (*UpdateLogRecord, error) {
+	if err := fence.Validate(); err != nil {
+		return nil, err
+	}
+	s.lastFence = fence
+	return s.AppendUpdate(ctx, key, update)
+}
+
 func (s *testSnapshotLogStore) ListUpdates(_ context.Context, _ DocumentKey, after UpdateOffset, limit int) ([]*UpdateLogRecord, error) {
 	s.listCalls++
 	s.listAfters = append(s.listAfters, after)
@@ -108,6 +120,28 @@ func (s *testSnapshotLogStore) TrimUpdates(_ context.Context, key DocumentKey, t
 		return s.trimErr
 	}
 	return nil
+}
+
+func (s *testSnapshotLogStore) SaveSnapshotAuthoritative(ctx context.Context, key DocumentKey, snapshot *yjsbridge.PersistedSnapshot, fence AuthorityFence) (*SnapshotRecord, error) {
+	return s.SaveSnapshotCheckpointAuthoritative(ctx, key, snapshot, 0, fence)
+}
+
+func (s *testSnapshotLogStore) SaveSnapshotCheckpointAuthoritative(ctx context.Context, key DocumentKey, snapshot *yjsbridge.PersistedSnapshot, through UpdateOffset, fence AuthorityFence) (*SnapshotRecord, error) {
+	if err := fence.Validate(); err != nil {
+		return nil, err
+	}
+	s.saveAuthoritativeCalls++
+	s.lastFence = fence
+	return s.SaveSnapshotCheckpointEpoch(ctx, key, snapshot, through, fence.Owner.Epoch)
+}
+
+func (s *testSnapshotLogStore) TrimUpdatesAuthoritative(ctx context.Context, key DocumentKey, through UpdateOffset, fence AuthorityFence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	s.trimAuthoritativeCalls++
+	s.lastFence = fence
+	return s.TrimUpdates(ctx, key, through)
 }
 
 func TestReplaySnapshot(t *testing.T) {
@@ -612,6 +646,166 @@ func TestCompactUpdateLogContextReturnsPartialResultOnTrimError(t *testing.T) {
 	}
 	if store.trimCalls != 1 {
 		t.Fatalf("TrimUpdates() calls = %d, want 1", store.trimCalls)
+	}
+}
+
+func TestCompactUpdateLogAuthoritativeContextSavesSnapshotAndTrimsTailWithFence(t *testing.T) {
+	t.Parallel()
+
+	key := DocumentKey{Namespace: "tenant-a", DocumentID: "doc-12"}
+	baseUpdate := buildGCOnlyUpdate(60, 1)
+	base := mustPersistedSnapshotFromUpdates(t, baseUpdate)
+	tail := buildGCOnlyUpdate(61, 2)
+	fence := AuthorityFence{
+		ShardID: ShardID("7"),
+		Owner: OwnerInfo{
+			NodeID: NodeID("node-a"),
+			Epoch:  9,
+		},
+		Token: "lease-node-a",
+	}
+
+	store := &testSnapshotLogStore{
+		records: []*UpdateLogRecord{
+			{Key: key, Offset: 13, UpdateV1: tail, Epoch: 8},
+		},
+	}
+
+	got, err := CompactUpdateLogAuthoritativeContext(context.Background(), store, key, base, 10, 1, fence)
+	if err != nil {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext() unexpected error: %v", err)
+	}
+
+	want := mustPersistedSnapshotFromUpdates(t, baseUpdate, tail)
+	if got.Record == nil {
+		t.Fatal("CompactUpdateLogAuthoritativeContext().Record = nil, want non-nil")
+	}
+	if got.Applied != 1 {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext().Applied = %d, want 1", got.Applied)
+	}
+	if got.Through != 13 {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext().Through = %d, want 13", got.Through)
+	}
+	if got.LastEpoch != fence.Owner.Epoch {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext().LastEpoch = %d, want %d", got.LastEpoch, fence.Owner.Epoch)
+	}
+	if !bytes.Equal(got.Snapshot.UpdateV1, want.UpdateV1) {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext().Snapshot.UpdateV1 = %v, want %v", got.Snapshot.UpdateV1, want.UpdateV1)
+	}
+	if got.Record.Through != 13 {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext().Record.Through = %d, want 13", got.Record.Through)
+	}
+	if got.Record.Epoch != fence.Owner.Epoch {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext().Record.Epoch = %d, want %d", got.Record.Epoch, fence.Owner.Epoch)
+	}
+	if store.saveAuthoritativeCalls != 1 {
+		t.Fatalf("SaveSnapshotCheckpointAuthoritative() calls = %d, want 1", store.saveAuthoritativeCalls)
+	}
+	if store.trimAuthoritativeCalls != 1 {
+		t.Fatalf("TrimUpdatesAuthoritative() calls = %d, want 1", store.trimAuthoritativeCalls)
+	}
+	if store.savedThrough != 13 {
+		t.Fatalf("SaveSnapshotCheckpointAuthoritative() through = %d, want 13", store.savedThrough)
+	}
+	if store.savedEpoch != fence.Owner.Epoch {
+		t.Fatalf("SaveSnapshotCheckpointAuthoritative() epoch = %d, want %d", store.savedEpoch, fence.Owner.Epoch)
+	}
+	if store.trimmedThrough != 13 {
+		t.Fatalf("TrimUpdatesAuthoritative() through = %d, want 13", store.trimmedThrough)
+	}
+	if store.lastFence != fence {
+		t.Fatalf("last fence = %#v, want %#v", store.lastFence, fence)
+	}
+}
+
+func TestCompactUpdateLogAuthoritativeContextNoTailDoesNotPersistOrTrim(t *testing.T) {
+	t.Parallel()
+
+	key := DocumentKey{Namespace: "tenant-a", DocumentID: "doc-13"}
+	base := mustPersistedSnapshotFromUpdates(t, buildGCOnlyUpdate(62, 1))
+	fence := AuthorityFence{
+		ShardID: ShardID("8"),
+		Owner: OwnerInfo{
+			NodeID: NodeID("node-a"),
+			Epoch:  10,
+		},
+		Token: "lease-node-a",
+	}
+	store := &testSnapshotLogStore{}
+
+	got, err := CompactUpdateLogAuthoritativeContext(context.Background(), store, key, base, 7, 0, fence)
+	if err != nil {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext() unexpected error: %v", err)
+	}
+	if got.Record != nil {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext().Record = %#v, want nil", got.Record)
+	}
+	if got.Applied != 0 {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext().Applied = %d, want 0", got.Applied)
+	}
+	if got.Through != 7 {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext().Through = %d, want 7", got.Through)
+	}
+	if store.saveAuthoritativeCalls != 0 {
+		t.Fatalf("SaveSnapshotCheckpointAuthoritative() calls = %d, want 0", store.saveAuthoritativeCalls)
+	}
+	if store.trimAuthoritativeCalls != 0 {
+		t.Fatalf("TrimUpdatesAuthoritative() calls = %d, want 0", store.trimAuthoritativeCalls)
+	}
+}
+
+func TestCompactUpdateLogAuthoritativeContextReturnsPartialResultOnTrimError(t *testing.T) {
+	t.Parallel()
+
+	key := DocumentKey{Namespace: "tenant-a", DocumentID: "doc-14"}
+	fence := AuthorityFence{
+		ShardID: ShardID("9"),
+		Owner: OwnerInfo{
+			NodeID: NodeID("node-a"),
+			Epoch:  11,
+		},
+		Token: "lease-node-a",
+	}
+	store := &testSnapshotLogStore{
+		records: []*UpdateLogRecord{
+			{Key: key, Offset: 15, UpdateV1: buildGCOnlyUpdate(63, 1), Epoch: 11},
+		},
+		trimErr: ErrAuthorityLost,
+	}
+
+	got, err := CompactUpdateLogAuthoritativeContext(context.Background(), store, key, nil, 0, 0, fence)
+	if !errors.Is(err, ErrAuthorityLost) {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext() error = %v, want %v", err, ErrAuthorityLost)
+	}
+	if got == nil {
+		t.Fatal("CompactUpdateLogAuthoritativeContext() result = nil, want partial result")
+	}
+	if got.Record == nil {
+		t.Fatal("CompactUpdateLogAuthoritativeContext().Record = nil, want saved record despite trim error")
+	}
+	if got.Record.Epoch != fence.Owner.Epoch {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext().Record.Epoch = %d, want %d", got.Record.Epoch, fence.Owner.Epoch)
+	}
+	if store.saveAuthoritativeCalls != 1 {
+		t.Fatalf("SaveSnapshotCheckpointAuthoritative() calls = %d, want 1", store.saveAuthoritativeCalls)
+	}
+	if store.trimAuthoritativeCalls != 1 {
+		t.Fatalf("TrimUpdatesAuthoritative() calls = %d, want 1", store.trimAuthoritativeCalls)
+	}
+}
+
+func TestCompactUpdateLogAuthoritativeContextRejectsInvalidFence(t *testing.T) {
+	t.Parallel()
+
+	key := DocumentKey{Namespace: "tenant-a", DocumentID: "doc-15"}
+	store := &testSnapshotLogStore{}
+
+	_, err := CompactUpdateLogAuthoritativeContext(context.Background(), store, key, nil, 0, 0, AuthorityFence{})
+	if !errors.Is(err, ErrInvalidShardID) {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext() error = %v, want %v", err, ErrInvalidShardID)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("ListUpdates() calls = %d, want 0", store.listCalls)
 	}
 }
 

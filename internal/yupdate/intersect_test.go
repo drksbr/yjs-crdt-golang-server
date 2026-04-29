@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"yjs-go-bridge/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
 )
 
 func TestIntersectUpdateWithContentIDsV1SelectsMiddleStringSlice(t *testing.T) {

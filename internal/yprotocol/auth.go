@@ -3,8 +3,8 @@ package yprotocol
 import (
 	"fmt"
 
-	ybinary "yjs-go-bridge/internal/binary"
-	"yjs-go-bridge/internal/varint"
+	ybinary "github.com/drksbr/yjs-crdt-golang-server/internal/binary"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
 )
 
 // AuthMessageType identifica subtipos do protocolo interno de auth.

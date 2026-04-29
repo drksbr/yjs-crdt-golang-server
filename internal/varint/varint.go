@@ -4,7 +4,7 @@ import (
 	"errors"
 	"io"
 
-	ybinary "yjs-go-bridge/internal/binary"
+	ybinary "github.com/drksbr/yjs-crdt-golang-server/internal/binary"
 )
 
 const maxVarUintLen = 5

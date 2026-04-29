@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/internal/ytypes"
-	"yjs-go-bridge/internal/yupdate"
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/storage/memory"
-	"yjs-go-bridge/pkg/ycluster"
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yupdate"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage/memory"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 func TestDistributedRecoveryReplaysTrimmedTailFromCheckpoint(t *testing.T) {
@@ -175,7 +175,8 @@ func TestClusterControlPlaneTracksStorageBackedOwnerHandoff(t *testing.T) {
 	acquiredA, err := leases.AcquireLease(ctx, ycluster.LeaseRequest{
 		ShardID: shardID,
 		Holder:  "node-a",
-		TTL:     750 * time.Millisecond,
+		TTL:     2 * time.Minute,
+		Token:   "lease-node-a",
 	})
 	if err != nil {
 		t.Fatalf("AcquireLease(node-a) unexpected error: %v", err)
@@ -203,24 +204,25 @@ func TestClusterControlPlaneTracksStorageBackedOwnerHandoff(t *testing.T) {
 		t.Fatal("LookupOwner(node-b).Local = true, want false")
 	}
 
-	wait := time.Until(acquiredA.ExpiresAt) + 20*time.Millisecond
-	if wait > 0 {
-		time.Sleep(wait)
-	}
-	if _, err := nodeALookup.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key}); !errors.Is(err, ycluster.ErrLeaseExpired) {
-		t.Fatalf("LookupOwner(node-a after expiry) error = %v, want %v", err, ycluster.ErrLeaseExpired)
-	}
-
-	acquiredB, err := leases.AcquireLease(ctx, ycluster.LeaseRequest{
+	acquiredB, err := leases.HandoffLease(ctx, *acquiredA, ycluster.LeaseRequest{
 		ShardID: shardID,
 		Holder:  "node-b",
 		TTL:     2 * time.Minute,
+		Token:   "lease-node-b",
 	})
 	if err != nil {
-		t.Fatalf("AcquireLease(node-b) unexpected error: %v", err)
+		t.Fatalf("HandoffLease(node-b) unexpected error: %v", err)
 	}
 	if acquiredB.Epoch != 2 {
-		t.Fatalf("AcquireLease(node-b).Epoch = %d, want 2", acquiredB.Epoch)
+		t.Fatalf("HandoffLease(node-b).Epoch = %d, want 2", acquiredB.Epoch)
+	}
+	if _, err := leases.HandoffLease(ctx, *acquiredA, ycluster.LeaseRequest{
+		ShardID: shardID,
+		Holder:  "node-c",
+		TTL:     time.Minute,
+		Token:   "lease-node-c",
+	}); !errors.Is(err, ycluster.ErrLeaseTokenMismatch) {
+		t.Fatalf("HandoffLease(stale node-a lease) error = %v, want %v", err, ycluster.ErrLeaseTokenMismatch)
 	}
 
 	afterHandoff, err := nodeALookup.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
@@ -246,6 +248,333 @@ func TestClusterControlPlaneTracksStorageBackedOwnerHandoff(t *testing.T) {
 	}
 	if nodeBLocal.Placement.Lease == nil || nodeBLocal.Placement.Lease.Epoch != 2 {
 		t.Fatalf("LookupOwner(node-b after handoff).Placement.Lease = %#v, want epoch 2", nodeBLocal.Placement.Lease)
+	}
+}
+
+func TestLeaseManagerRenewsAndReleasesStorageBackedOwnership(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	resolver, err := ycluster.NewDeterministicShardResolver(32)
+	if err != nil {
+		t.Fatalf("NewDeterministicShardResolver() unexpected error: %v", err)
+	}
+	leases, err := ycluster.NewStorageLeaseStore(store)
+	if err != nil {
+		t.Fatalf("NewStorageLeaseStore() unexpected error: %v", err)
+	}
+
+	key := storage.DocumentKey{
+		Namespace:  "integration",
+		DocumentID: "cluster-lease-manager-renew",
+	}
+	shardID, err := resolver.ResolveShard(key)
+	if err != nil {
+		t.Fatalf("ResolveShard() unexpected error: %v", err)
+	}
+	if _, err := store.SavePlacement(ctx, storage.PlacementRecord{
+		Key:     key,
+		ShardID: ycluster.StorageShardID(shardID),
+		Version: 1,
+	}); err != nil {
+		t.Fatalf("SavePlacement() unexpected error: %v", err)
+	}
+
+	manager, err := ycluster.NewLeaseManager(ycluster.LeaseManagerConfig{
+		Store:   leases,
+		ShardID: shardID,
+		Holder:  "node-a",
+		TTL:     120 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewLeaseManager() unexpected error: %v", err)
+	}
+	lookup, err := ycluster.NewStorageOwnerLookup("node-a", resolver, store, store)
+	if err != nil {
+		t.Fatalf("NewStorageOwnerLookup(node-a) unexpected error: %v", err)
+	}
+
+	first, changed, err := manager.Ensure(ctx, 40*time.Millisecond)
+	if err != nil {
+		t.Fatalf("manager.Ensure(initial) unexpected error: %v", err)
+	}
+	if !changed {
+		t.Fatal("manager.Ensure(initial).changed = false, want true")
+	}
+	if first.Epoch != 1 {
+		t.Fatalf("manager.Ensure(initial).Epoch = %d, want 1", first.Epoch)
+	}
+
+	time.Sleep(90 * time.Millisecond)
+	renewed, changed, err := manager.Ensure(ctx, 40*time.Millisecond)
+	if err != nil {
+		t.Fatalf("manager.Ensure(renew) unexpected error: %v", err)
+	}
+	if !changed {
+		t.Fatal("manager.Ensure(renew).changed = false, want true")
+	}
+	if renewed.Token != first.Token {
+		t.Fatalf("manager.Ensure(renew).Token = %q, want %q", renewed.Token, first.Token)
+	}
+	if renewed.Epoch != first.Epoch {
+		t.Fatalf("manager.Ensure(renew).Epoch = %d, want %d", renewed.Epoch, first.Epoch)
+	}
+
+	wait := time.Until(first.ExpiresAt) + 20*time.Millisecond
+	if wait > 0 {
+		time.Sleep(wait)
+	}
+	resolution, err := lookup.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
+	if err != nil {
+		t.Fatalf("LookupOwner(after renew) unexpected error: %v", err)
+	}
+	if !resolution.Local {
+		t.Fatal("LookupOwner(after renew).Local = false, want true")
+	}
+	if resolution.Placement.Lease == nil || resolution.Placement.Lease.Token != renewed.Token || resolution.Placement.Lease.Epoch != renewed.Epoch {
+		t.Fatalf("LookupOwner(after renew).Placement.Lease = %#v, want token %q epoch %d", resolution.Placement.Lease, renewed.Token, renewed.Epoch)
+	}
+
+	if err := manager.Release(ctx); err != nil {
+		t.Fatalf("manager.Release() unexpected error: %v", err)
+	}
+	if _, err := lookup.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key}); !errors.Is(err, ycluster.ErrOwnerNotFound) {
+		t.Fatalf("LookupOwner(after release) error = %v, want %v", err, ycluster.ErrOwnerNotFound)
+	}
+}
+
+func TestStorageOwnershipCoordinatorClaimsAdoptsAndHandsOffDocumentOwnership(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	resolver, err := ycluster.NewDeterministicShardResolver(32)
+	if err != nil {
+		t.Fatalf("NewDeterministicShardResolver() unexpected error: %v", err)
+	}
+	key := storage.DocumentKey{
+		Namespace:  "integration",
+		DocumentID: "coordinator-ownership",
+	}
+
+	nodeA, err := ycluster.NewStorageOwnershipCoordinator(ycluster.StorageOwnershipCoordinatorConfig{
+		LocalNode:  "node-a",
+		Resolver:   resolver,
+		Placements: store,
+		Leases:     store,
+		TTL:        time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewStorageOwnershipCoordinator(node-a) unexpected error: %v", err)
+	}
+	first, err := nodeA.ClaimDocument(ctx, ycluster.ClaimDocumentRequest{
+		DocumentKey:      key,
+		Token:            "node-a-token",
+		PlacementVersion: 1,
+	})
+	if err != nil {
+		t.Fatalf("ClaimDocument(node-a) unexpected error: %v", err)
+	}
+	if first.Lease == nil || first.Lease.Holder != "node-a" || first.Lease.Epoch != 1 {
+		t.Fatalf("ClaimDocument(node-a).Lease = %#v, want node-a epoch 1", first.Lease)
+	}
+
+	restartedNodeA, err := ycluster.NewStorageOwnershipCoordinator(ycluster.StorageOwnershipCoordinatorConfig{
+		LocalNode:  "node-a",
+		Resolver:   resolver,
+		Placements: store,
+		Leases:     store,
+		TTL:        time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewStorageOwnershipCoordinator(restarted node-a) unexpected error: %v", err)
+	}
+	adopted, err := restartedNodeA.ClaimDocument(ctx, ycluster.ClaimDocumentRequest{DocumentKey: key})
+	if err != nil {
+		t.Fatalf("ClaimDocument(restarted node-a) unexpected error: %v", err)
+	}
+	if adopted.Lease.Token != first.Lease.Token || adopted.Lease.Epoch != first.Lease.Epoch {
+		t.Fatalf("ClaimDocument(restarted node-a).Lease = %#v, want token %q epoch %d", adopted.Lease, first.Lease.Token, first.Lease.Epoch)
+	}
+
+	fence, err := restartedNodeA.ResolveAuthorityFence(ctx, key)
+	if err != nil {
+		t.Fatalf("ResolveAuthorityFence(node-a) unexpected error: %v", err)
+	}
+	if fence.Owner.NodeID != storage.NodeID("node-a") || fence.Owner.Epoch != first.Lease.Epoch || fence.Token != first.Lease.Token {
+		t.Fatalf("ResolveAuthorityFence(node-a) = %#v, want node-a epoch %d token %q", fence, first.Lease.Epoch, first.Lease.Token)
+	}
+
+	nodeB, err := ycluster.NewStorageOwnershipCoordinator(ycluster.StorageOwnershipCoordinatorConfig{
+		LocalNode:  "node-b",
+		Resolver:   resolver,
+		Placements: store,
+		Leases:     store,
+		TTL:        time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewStorageOwnershipCoordinator(node-b) unexpected error: %v", err)
+	}
+	if _, err := nodeB.ClaimDocument(ctx, ycluster.ClaimDocumentRequest{DocumentKey: key}); !errors.Is(err, ycluster.ErrLeaseHeld) {
+		t.Fatalf("ClaimDocument(node-b while held) error = %v, want %v", err, ycluster.ErrLeaseHeld)
+	}
+
+	handoff, err := nodeB.HandoffDocument(ctx, ycluster.HandoffDocumentRequest{
+		DocumentKey: key,
+		Current:     *adopted.Lease,
+		NextHolder:  "node-b",
+		TTL:         time.Minute,
+		Token:       "node-b-token",
+	})
+	if err != nil {
+		t.Fatalf("HandoffDocument(node-b) unexpected error: %v", err)
+	}
+	if handoff.Lease == nil || handoff.Lease.Holder != "node-b" || handoff.Lease.Epoch != first.Lease.Epoch+1 {
+		t.Fatalf("HandoffDocument(node-b).Lease = %#v, want node-b epoch %d", handoff.Lease, first.Lease.Epoch+1)
+	}
+	if handoff.Placement == nil || handoff.Placement.Version != 1 {
+		t.Fatalf("HandoffDocument(node-b).Placement = %#v, want version 1", handoff.Placement)
+	}
+
+	nodeAView, err := restartedNodeA.LookupOwner(ctx, ycluster.OwnerLookupRequest{DocumentKey: key})
+	if err != nil {
+		t.Fatalf("LookupOwner(node-a after handoff) unexpected error: %v", err)
+	}
+	if nodeAView.Local {
+		t.Fatal("LookupOwner(node-a after handoff).Local = true, want false")
+	}
+	if nodeAView.Placement.NodeID != "node-b" || nodeAView.Placement.Lease == nil || nodeAView.Placement.Lease.Token != "node-b-token" {
+		t.Fatalf("LookupOwner(node-a after handoff).Placement = %#v, want node-b/node-b-token", nodeAView.Placement)
+	}
+}
+
+func TestAuthoritativeCompactionCheckpointsEpochAndRejectsStaleFence(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	resolver, err := ycluster.NewDeterministicShardResolver(32)
+	if err != nil {
+		t.Fatalf("NewDeterministicShardResolver() unexpected error: %v", err)
+	}
+	key := storage.DocumentKey{
+		Namespace:  "integration",
+		DocumentID: "authoritative-compaction",
+	}
+
+	nodeA, err := ycluster.NewStorageOwnershipCoordinator(ycluster.StorageOwnershipCoordinatorConfig{
+		LocalNode:  "node-a",
+		Resolver:   resolver,
+		Placements: store,
+		Leases:     store,
+		TTL:        time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewStorageOwnershipCoordinator(node-a) unexpected error: %v", err)
+	}
+	ownedA, err := nodeA.ClaimDocument(ctx, ycluster.ClaimDocumentRequest{
+		DocumentKey:      key,
+		Token:            "lease-node-a",
+		PlacementVersion: 1,
+	})
+	if err != nil {
+		t.Fatalf("ClaimDocument(node-a) unexpected error: %v", err)
+	}
+	fenceA, err := nodeA.ResolveAuthorityFence(ctx, key)
+	if err != nil {
+		t.Fatalf("ResolveAuthorityFence(node-a) unexpected error: %v", err)
+	}
+
+	firstUpdate := buildIntegrationGCOnlyUpdate(91, 1)
+	secondUpdate := buildIntegrationGCOnlyUpdate(92, 2)
+	if _, err := store.AppendUpdateAuthoritative(ctx, key, firstUpdate, *fenceA); err != nil {
+		t.Fatalf("AppendUpdateAuthoritative(first) unexpected error: %v", err)
+	}
+	secondRecord, err := store.AppendUpdateAuthoritative(ctx, key, secondUpdate, *fenceA)
+	if err != nil {
+		t.Fatalf("AppendUpdateAuthoritative(second) unexpected error: %v", err)
+	}
+
+	compactedA, err := storage.CompactUpdateLogAuthoritativeContext(ctx, store, key, nil, 0, 1, *fenceA)
+	if err != nil {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext(node-a) unexpected error: %v", err)
+	}
+	if compactedA.Record == nil {
+		t.Fatal("CompactUpdateLogAuthoritativeContext(node-a).Record = nil, want checkpoint")
+	}
+	if compactedA.Record.Through != secondRecord.Offset {
+		t.Fatalf("checkpoint Through = %d, want %d", compactedA.Record.Through, secondRecord.Offset)
+	}
+	if compactedA.Record.Epoch != fenceA.Owner.Epoch {
+		t.Fatalf("checkpoint Epoch = %d, want %d", compactedA.Record.Epoch, fenceA.Owner.Epoch)
+	}
+	expectedSnapshot := mustPersistedSnapshotFromUpdates(t, firstUpdate, secondUpdate)
+	if !bytes.Equal(compactedA.Record.Snapshot.UpdateV1, expectedSnapshot.UpdateV1) {
+		t.Fatalf("checkpoint snapshot = %x, want %x", compactedA.Record.Snapshot.UpdateV1, expectedSnapshot.UpdateV1)
+	}
+	remaining, err := store.ListUpdates(ctx, key, 0, 0)
+	if err != nil {
+		t.Fatalf("ListUpdates(after compaction) unexpected error: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("len(remaining after compaction) = %d, want 0", len(remaining))
+	}
+
+	if err := ownedA.Manager.Release(ctx); err != nil {
+		t.Fatalf("node-a release unexpected error: %v", err)
+	}
+	nodeB, err := ycluster.NewStorageOwnershipCoordinator(ycluster.StorageOwnershipCoordinatorConfig{
+		LocalNode:  "node-b",
+		Resolver:   resolver,
+		Placements: store,
+		Leases:     store,
+		TTL:        time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewStorageOwnershipCoordinator(node-b) unexpected error: %v", err)
+	}
+	ownedB, err := nodeB.ClaimDocument(ctx, ycluster.ClaimDocumentRequest{
+		DocumentKey:      key,
+		Token:            "lease-node-b",
+		PlacementVersion: 2,
+	})
+	if err != nil {
+		t.Fatalf("ClaimDocument(node-b) unexpected error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = ownedB.Manager.Release(context.Background())
+	})
+	fenceB, err := nodeB.ResolveAuthorityFence(ctx, key)
+	if err != nil {
+		t.Fatalf("ResolveAuthorityFence(node-b) unexpected error: %v", err)
+	}
+	thirdUpdate := buildIntegrationGCOnlyUpdate(93, 1)
+	thirdRecord, err := store.AppendUpdateAuthoritative(ctx, key, thirdUpdate, *fenceB)
+	if err != nil {
+		t.Fatalf("AppendUpdateAuthoritative(third) unexpected error: %v", err)
+	}
+
+	loadedCheckpoint, err := store.LoadSnapshot(ctx, key)
+	if err != nil {
+		t.Fatalf("LoadSnapshot() unexpected error: %v", err)
+	}
+	if _, err := storage.CompactUpdateLogAuthoritativeContext(ctx, store, key, loadedCheckpoint.Snapshot, loadedCheckpoint.Through, 1, *fenceA); !errors.Is(err, storage.ErrAuthorityLost) {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext(stale fence) error = %v, want %v", err, storage.ErrAuthorityLost)
+	}
+
+	compactedB, err := storage.CompactUpdateLogAuthoritativeContext(ctx, store, key, loadedCheckpoint.Snapshot, loadedCheckpoint.Through, 1, *fenceB)
+	if err != nil {
+		t.Fatalf("CompactUpdateLogAuthoritativeContext(node-b) unexpected error: %v", err)
+	}
+	if compactedB.Record == nil {
+		t.Fatal("CompactUpdateLogAuthoritativeContext(node-b).Record = nil, want checkpoint")
+	}
+	if compactedB.Record.Through != thirdRecord.Offset {
+		t.Fatalf("node-b checkpoint Through = %d, want %d", compactedB.Record.Through, thirdRecord.Offset)
+	}
+	if compactedB.Record.Epoch != fenceB.Owner.Epoch {
+		t.Fatalf("node-b checkpoint Epoch = %d, want %d", compactedB.Record.Epoch, fenceB.Owner.Epoch)
 	}
 }
 

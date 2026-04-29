@@ -3,7 +3,7 @@ package yupdate
 import (
 	"context"
 
-	"yjs-go-bridge/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
 )
 
 // Snapshot representa o corte mínimo útil de snapshot neste estágio:

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 // ShardID identifica um shard lógico dentro da topologia distribuída.
@@ -275,6 +275,19 @@ type LeaseStore interface {
 	// Implementações devem preservar a última geração (`Owner.Epoch`) do shard
 	// para que um acquire posterior continue monotônico.
 	ReleaseLease(ctx context.Context, shardID ShardID, token string) error
+}
+
+// LeaseHandoffStore adiciona uma troca atômica de owner para uma lease ativa.
+type LeaseHandoffStore interface {
+	LeaseStore
+
+	// HandoffLease substitui a lease ativa identificada por currentToken pela
+	// próxima lease informada em uma única seção crítica/transação.
+	//
+	// Implementações devem rejeitar a operação quando a lease atual não existir,
+	// o token atual não corresponder, a geração atual já tiver expirado ou a
+	// próxima lease não avançar exatamente para `epoch atual + 1`.
+	HandoffLease(ctx context.Context, shardID ShardID, currentToken string, next LeaseRecord) (*LeaseRecord, error)
 }
 
 // AuthoritativeSnapshotStore adiciona fencing opcional à persistência de

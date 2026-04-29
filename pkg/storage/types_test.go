@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 func TestDocumentKeyValidate(t *testing.T) {

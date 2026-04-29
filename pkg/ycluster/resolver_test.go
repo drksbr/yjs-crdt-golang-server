@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"yjs-go-bridge/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
 )
 
 func TestNewDeterministicShardResolver(t *testing.T) {

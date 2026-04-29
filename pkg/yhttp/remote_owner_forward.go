@@ -12,11 +12,11 @@ import (
 
 	"github.com/coder/websocket"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/ycluster"
-	"yjs-go-bridge/pkg/yjsbridge"
-	"yjs-go-bridge/pkg/ynodeproto"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ynodeproto"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 const remoteOwnerDialErrorStatusCode = http.StatusBadGateway
@@ -204,7 +204,11 @@ func (f *remoteOwnerForwarder) handle(w http.ResponseWriter, r *http.Request, re
 	if err != nil {
 		f.metrics.Error(req, "remote_owner_open", err)
 		f.report(r, req, err)
-		http.Error(w, err.Error(), remoteOwnerDialErrorStatusCode)
+		status := statusFromRemoteOwnerOpenError(err)
+		if status == http.StatusServiceUnavailable {
+			w.Header().Set("Retry-After", "1")
+		}
+		http.Error(w, err.Error(), status)
 		return true
 	}
 
@@ -338,14 +342,14 @@ func (f *remoteOwnerForwarder) bridgeRemoteOwnerSessions(
 		transitionStart := time.Now()
 		target, rebindErr := f.rebindRemoteOwnerSession(r.Context(), req, previous, header, true)
 		if rebindErr != nil {
-			cancelClient()
 			observeOwnershipTransition(f.metrics, req, ownershipStateRemote, ownershipStateClosed, time.Since(transitionStart), rebindErr)
 			if closeErr := socket.Close(result.retryableSignal.websocketStatus(), result.retryableSignal.websocketReason(authorityLostCloseReason)); closeErr != nil && !isIgnorableTransportError(closeErr) {
 				f.metrics.Error(req, "remote_owner_close_client", closeErr)
 				f.report(r, req, closeErr)
 			}
+			cancelClient()
 			*closeReason = retryableReason
-			return rebindErr
+			return nil
 		}
 
 		if target.localResolution != nil {
@@ -506,8 +510,13 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 		return errors.New("yhttp: server local obrigatorio para takeover")
 	}
 
+	ownership, err := f.local.acquireRequestOwnership(r.Context(), req)
+	if err != nil {
+		return err
+	}
 	connection, err := f.local.provider.Open(r.Context(), req.DocumentKey, req.ConnectionID, req.ClientID)
 	if err != nil {
+		f.local.releaseRequestOwnership(r, req, ownership)
 		return err
 	}
 
@@ -520,7 +529,7 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 	defer drainRemoteOwnerCloseSignal(revalidateCh)
 
 	if err := f.local.bootstrapConnection(r, req, connection, peer); err != nil {
-		f.local.cleanupConnection(r, req, connection)
+		f.local.cleanupConnectionWithOwnership(r, req, connection, ownership)
 		return err
 	}
 	upstreamPeer.switchTarget(&localConnectionPeer{
@@ -533,14 +542,13 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 	for {
 		select {
 		case err := <-clientErrCh:
-			f.local.cleanupConnection(r, req, connection)
+			f.local.cleanupConnectionWithOwnership(r, req, connection, ownership)
 			if signal, ok := drainRemoteOwnerCloseSignal(revalidateCh); ok {
 				previous := remoteOwnerSession{epoch: connection.AuthorityEpoch()}
 				upstreamPeer.clearSession()
 				transitionStart := time.Now()
 				target, rebindErr := f.rebindRemoteOwnerSession(r.Context(), req, previous, header, false)
 				if rebindErr != nil {
-					cancelClient()
 					observeOwnershipTransition(f.metrics, req, ownershipStateLocal, ownershipStateClosed, time.Since(transitionStart), rebindErr)
 					if closeReason != nil {
 						*closeReason = signal.metricReason(authorityLostCloseReason)
@@ -549,7 +557,8 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 						f.metrics.Error(req, "remote_owner_close_client", closeErr)
 						f.report(r, req, closeErr)
 					}
-					return rebindErr
+					cancelClient()
+					return nil
 				}
 
 				observeOwnershipTransition(f.metrics, req, ownershipStateLocal, ownershipStateRemote, time.Since(transitionStart), nil)
@@ -569,14 +578,13 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 			}
 			return err
 		case <-sessionCtx.Done():
-			f.local.cleanupConnection(r, req, connection)
+			f.local.cleanupConnectionWithOwnership(r, req, connection, ownership)
 			if signal, ok := drainRemoteOwnerCloseSignal(revalidateCh); ok {
 				previous := remoteOwnerSession{epoch: connection.AuthorityEpoch()}
 				upstreamPeer.clearSession()
 				transitionStart := time.Now()
 				target, rebindErr := f.rebindRemoteOwnerSession(r.Context(), req, previous, header, false)
 				if rebindErr != nil {
-					cancelClient()
 					observeOwnershipTransition(f.metrics, req, ownershipStateLocal, ownershipStateClosed, time.Since(transitionStart), rebindErr)
 					if closeReason != nil {
 						*closeReason = signal.metricReason(authorityLostCloseReason)
@@ -585,7 +593,8 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 						f.metrics.Error(req, "remote_owner_close_client", closeErr)
 						f.report(r, req, closeErr)
 					}
-					return rebindErr
+					cancelClient()
+					return nil
 				}
 
 				observeOwnershipTransition(f.metrics, req, ownershipStateLocal, ownershipStateRemote, time.Since(transitionStart), nil)
@@ -665,7 +674,7 @@ func (f *remoteOwnerForwarder) pipeClientToRemote(ctx context.Context, req Reque
 	for {
 		msgType, payload, err := socket.Read(ctx)
 		if err != nil {
-			if status := websocket.CloseStatus(err); status != websocket.StatusNormalClosure && status != websocket.StatusGoingAway && !isIgnorableTransportError(err) {
+			if status := websocket.CloseStatus(err); !isExpectedClientCloseStatus(status) && !isIgnorableTransportError(err) {
 				f.metrics.Error(req, "remote_owner_read_client", err)
 				f.report(nil, req, err)
 				return err
@@ -675,7 +684,7 @@ func (f *remoteOwnerForwarder) pipeClientToRemote(ctx context.Context, req Reque
 
 		f.metrics.FrameRead(req, len(payload))
 		if msgType != websocket.MessageBinary {
-			if closeErr := socket.Close(websocket.StatusUnsupportedData, "yjs-go-bridge aceita apenas frames binarios"); closeErr != nil && !isIgnorableTransportError(closeErr) {
+			if closeErr := socket.Close(websocket.StatusUnsupportedData, "yjs-crdt-golang-server aceita apenas frames binarios"); closeErr != nil && !isIgnorableTransportError(closeErr) {
 				f.metrics.Error(req, "remote_owner_reject_non_binary", closeErr)
 				f.report(nil, req, closeErr)
 			}
@@ -808,6 +817,13 @@ func (f *remoteOwnerForwarder) receiveHandshakeAck(
 
 	handshakeAck, ok := message.(*ynodeproto.HandshakeAck)
 	if !ok {
+		if closeMessage, closeOK := message.(*ynodeproto.Close); closeOK {
+			if err := validateRemoteOwnerRouteFields(req, epoch, closeMessage.DocumentKey, closeMessage.ConnectionID, closeMessage.Epoch); err != nil {
+				return err
+			}
+			observeRemoteOwnerMessage(f.metrics, req, remoteOwnerMetricsRoleEdge, remoteOwnerMetricsDirectionIn, nodeMessageMetricKind(closeMessage))
+			return &remoteOwnerClosedError{signal: remoteOwnerCloseSignalFromMessage(closeMessage)}
+		}
 		return fmt.Errorf("yhttp: handshake ack inicial obrigatorio, recebido %T", message)
 	}
 	if err := handshakeAck.Validate(); err != nil {
@@ -818,6 +834,14 @@ func (f *remoteOwnerForwarder) receiveHandshakeAck(
 	}
 	observeRemoteOwnerMessage(f.metrics, req, remoteOwnerMetricsRoleEdge, remoteOwnerMetricsDirectionIn, nodeMessageMetricKind(handshakeAck))
 	return nil
+}
+
+func statusFromRemoteOwnerOpenError(err error) int {
+	var closeErr *remoteOwnerClosedError
+	if errors.As(err, &closeErr) && closeErr.signal.retryable {
+		return http.StatusServiceUnavailable
+	}
+	return remoteOwnerDialErrorStatusCode
 }
 
 func (f *remoteOwnerForwarder) sendBootstrapRequests(ctx context.Context, req Request, stream NodeMessageStream, epoch uint64) error {
@@ -977,7 +1001,7 @@ func (p *localConnectionPeer) deliver(ctx context.Context, payload []byte) error
 	}
 
 	handleStart := time.Now()
-	result, err := p.connection.HandleEncodedMessages(payload)
+	result, err := p.connection.HandleEncodedMessagesContext(ctx, payload)
 	p.server.metrics.Handle(p.req, time.Since(handleStart), err)
 	if err != nil {
 		p.server.metrics.Error(p.req, "handle", err)

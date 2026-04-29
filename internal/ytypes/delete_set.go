@@ -3,7 +3,7 @@ package ytypes
 import (
 	"errors"
 
-	"yjs-go-bridge/internal/yidset"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yidset"
 )
 
 // DeleteRange é um alias semântico para ranges deletados.

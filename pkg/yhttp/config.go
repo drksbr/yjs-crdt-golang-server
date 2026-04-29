@@ -6,8 +6,9 @@ import (
 
 	"github.com/coder/websocket"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 const (
@@ -51,6 +52,7 @@ type AuthorityLossHandler func(
 // ServerConfig define a configuração do handler HTTP/WebSocket.
 type ServerConfig struct {
 	Provider                      *yprotocol.Provider
+	OwnershipRuntime              *ycluster.DocumentOwnershipRuntime
 	ResolveRequest                ResolveRequestFunc
 	AcceptOptions                 *websocket.AcceptOptions
 	ReadLimitBytes                int64

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"yjs-go-bridge/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
 )
 
 // ResolveStorageAuthorityFence resolve o owner atual do documento e converte a

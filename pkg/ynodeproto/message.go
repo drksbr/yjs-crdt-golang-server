@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	ybinary "yjs-go-bridge/internal/binary"
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/pkg/storage"
+	ybinary "github.com/drksbr/yjs-crdt-golang-server/internal/binary"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
 )
 
 const fixedUint64Size = 8

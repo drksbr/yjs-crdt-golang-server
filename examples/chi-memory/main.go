@@ -7,8 +7,8 @@ import (
 
 	chirouter "github.com/go-chi/chi/v5"
 
-	"yjs-go-bridge/examples/internal/httpdemo"
-	yhttpchi "yjs-go-bridge/pkg/yhttp/chi"
+	"github.com/drksbr/yjs-crdt-golang-server/examples/internal/httpdemo"
+	yhttpchi "github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp/chi"
 )
 
 func main() {

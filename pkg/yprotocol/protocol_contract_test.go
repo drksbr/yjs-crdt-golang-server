@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	ybinary "yjs-go-bridge/internal/binary"
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/internal/ytypes"
-	"yjs-go-bridge/internal/yupdate"
-	"yjs-go-bridge/pkg/yawareness"
-	"yjs-go-bridge/pkg/yjsbridge"
+	ybinary "github.com/drksbr/yjs-crdt-golang-server/internal/binary"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yupdate"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 func TestPublicDecodeProtocolMessages_MixedEnvelope(t *testing.T) {

@@ -1,6 +1,9 @@
 package storage
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	// ErrSnapshotNotFound sinaliza ausência de snapshot persistido para a chave informada.
@@ -35,3 +38,32 @@ var (
 	// persistido do snapshot e o offset `after` pedido pelo caller.
 	ErrSnapshotCheckpointMismatch = errors.New("storage: checkpoint do snapshot conflita com offset solicitado")
 )
+
+// LeaseStaleEpochError carrega os detalhes estruturados de uma tentativa de
+// gravar lease com epoch obsoleto.
+type LeaseStaleEpochError struct {
+	ShardID  ShardID
+	Current  uint64
+	Incoming uint64
+}
+
+func (e *LeaseStaleEpochError) Error() string {
+	if e == nil {
+		return ErrLeaseStaleEpoch.Error()
+	}
+	return fmt.Sprintf("%v: shard %s current=%d incoming=%d", ErrLeaseStaleEpoch, e.ShardID, e.Current, e.Incoming)
+}
+
+func (e *LeaseStaleEpochError) Unwrap() error {
+	return ErrLeaseStaleEpoch
+}
+
+// NewLeaseStaleEpochError constroi um erro de epoch stale com campos
+// consultaveis via errors.As.
+func NewLeaseStaleEpochError(shardID ShardID, current, incoming uint64) error {
+	return &LeaseStaleEpochError{
+		ShardID:  shardID,
+		Current:  current,
+		Incoming: incoming,
+	}
+}

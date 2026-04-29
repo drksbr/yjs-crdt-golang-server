@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	ybinary "yjs-go-bridge/internal/binary"
+	ybinary "github.com/drksbr/yjs-crdt-golang-server/internal/binary"
 )
 
 func TestAppendAndDecodeRoundTrip(t *testing.T) {

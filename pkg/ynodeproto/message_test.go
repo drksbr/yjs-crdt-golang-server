@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	ybinary "yjs-go-bridge/internal/binary"
-	"yjs-go-bridge/pkg/storage"
+	ybinary "github.com/drksbr/yjs-crdt-golang-server/internal/binary"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
 )
 
 func TestTypedMessageRoundTrip(t *testing.T) {

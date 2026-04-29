@@ -5,10 +5,10 @@ import (
 	"context"
 	"testing"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/storage/memory"
-	"yjs-go-bridge/pkg/yjsbridge"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage/memory"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 func TestProviderRecoveryLoadsRecoveredSnapshotFromCheckpointAndTail(t *testing.T) {

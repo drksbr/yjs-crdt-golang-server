@@ -1,8 +1,8 @@
 package yupdate
 
 import (
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
 )
 
 // EncodeStateVectorFromUpdateV1 reproduz a lógica do Yjs para updates V1.

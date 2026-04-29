@@ -7,7 +7,9 @@
 // também expõe interfaces independentes para essas responsabilidades, sem
 // acoplar a API pública a um backend concreto.
 //
-// O pacote também já inclui helpers públicos de replay/recovery (`ReplaySnapshot`
-// e `RecoverSnapshot`) para compor `snapshot + update log` sem depender de um
-// runtime distribuído completo.
+// O pacote também já inclui helpers públicos de replay/recovery/compaction
+// (`ReplaySnapshot`, `RecoverSnapshot`, `CompactUpdateLog` e
+// `CompactUpdateLogAuthoritative`) para compor `snapshot + update log` sem
+// depender de um runtime distribuído completo, além de `LeaseHandoffStore` para
+// troca atômica de owner/epoch quando um runtime externo coordenar o handoff.
 package storage

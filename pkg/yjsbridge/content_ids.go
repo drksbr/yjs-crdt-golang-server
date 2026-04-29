@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"yjs-go-bridge/internal/yidset"
-	"yjs-go-bridge/internal/yupdate"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yidset"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yupdate"
 )
 
 // IDRange representa um intervalo [clock, clock+length) associado a um client.

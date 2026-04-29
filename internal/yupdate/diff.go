@@ -3,7 +3,7 @@ package yupdate
 import (
 	"context"
 
-	"yjs-go-bridge/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
 )
 
 // DiffUpdateV1 retorna a parte de `update` que ainda não está coberta pelo state vector.

@@ -9,8 +9,8 @@ import (
 	"log"
 	"sort"
 
-	"yjs-go-bridge/pkg/yawareness"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 func main() {

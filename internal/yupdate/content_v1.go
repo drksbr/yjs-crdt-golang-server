@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"unicode/utf16"
 
-	"yjs-go-bridge/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
 )
 
 func (c ParsedContent) AppendV1(dst []byte) ([]byte, error) {

@@ -3,8 +3,8 @@ package yjsbridge
 import (
 	"context"
 
-	"yjs-go-bridge/internal/yidset"
-	"yjs-go-bridge/internal/yupdate"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yidset"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yupdate"
 )
 
 // UpdateFormat identifica o formato binário detectado para um update Yjs.

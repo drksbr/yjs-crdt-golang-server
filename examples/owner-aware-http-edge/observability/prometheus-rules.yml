@@ -1,0 +1,83 @@
+groups:
+  - name: yjs-crdt-golang-server-owner-aware
+    rules:
+      - alert: YjsBridgeAuthorityLoss
+        expr: sum by (node_id, deployment_role, stage) (rate(yjsbridge_yprotocol_authority_losses_total[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Yjs CRDT Golang Server owner perdeu autoridade"
+          description: "O provider local reportou perda de autoridade em apply, persist, open ou revalidate."
+
+      - alert: YjsBridgeYHTTPErrors
+        expr: sum by (node_id, deployment_role, stage) (rate(yjsbridge_yhttp_errors_total[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Taxa alta de erros na borda yhttp"
+          description: "A borda WebSocket/owner-aware esta registrando mais de 1 erro por segundo em 5 minutos."
+
+      - alert: YjsBridgeOwnerLookupErrors
+        expr: sum by (node_id, deployment_role) (rate(yjsbridge_yhttp_owner_lookup_duration_seconds_count{result="error"}[5m])) > 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Falhas de resolucao de owner"
+          description: "A borda owner-aware nao consegue resolver owner com sucesso de forma consistente."
+
+      - alert: YjsBridgeRemoteOwnerHandshakeErrors
+        expr: sum by (node_id, deployment_role, role) (rate(yjsbridge_yhttp_remote_owner_handshake_duration_seconds_count{result="error"}[5m])) > 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Falhas de handshake edge/owner"
+          description: "O relay inter-node esta falhando no handshake entre edge e owner."
+
+      - alert: YjsBridgeLeaseOperationErrors
+        expr: sum by (node_id, deployment_role, operation, result) (rate(yjsbridge_ycluster_lease_operations_total{result!="ok"}[5m])) > 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Falhas em operacoes de lease"
+          description: "Operacoes acquire, renew ou release de lease estao retornando resultado diferente de ok."
+
+      - alert: YjsBridgeLeaseManagerRenewFailures
+        expr: sum by (node_id, deployment_role, action, result) (rate(yjsbridge_ycluster_lease_manager_actions_total{action=~"renew|reacquire",result!="ok"}[5m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LeaseManager falhando ao renovar/reacquirir lease"
+          description: "O owner local pode perder autoridade se a renovacao de lease continuar falhando."
+
+      - alert: YjsBridgeRecoveryTailLagHigh
+        expr: max by (node_id, deployment_role) (yjsbridge_storage_recovery_tail_lag_updates) > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Lag alto entre checkpoint e tail do update log"
+          description: "O ultimo recovery observou mais de 1000 updates entre checkpoint e offset final."
+
+      - alert: YjsBridgeCompactionStalled
+        expr: max by (node_id, deployment_role) (yjsbridge_storage_recovery_tail_lag_updates) > 100 and max by (node_id, deployment_role) (increase(yjsbridge_storage_compaction_through_offset[30m])) == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Compaction sem progresso"
+          description: "Existe lag de tail, mas o offset compactado nao avancou nos ultimos 30 minutos."
+
+      - alert: YjsBridgeRemoteOwnerUnexpectedCloses
+        expr: sum by (node_id, deployment_role, role, reason) (rate(yjsbridge_yhttp_remote_owner_closes_total{reason!~"client_closed|disconnect"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Fechamentos inesperados no relay edge/owner"
+          description: "O relay inter-node esta fechando streams por razoes diferentes de encerramento normal."

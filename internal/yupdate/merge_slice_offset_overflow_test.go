@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"yjs-go-bridge/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
 )
 
 type varyingLengthStruct struct {

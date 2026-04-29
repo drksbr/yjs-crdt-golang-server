@@ -3,7 +3,7 @@ package ycluster
 import (
 	"hash/fnv"
 
-	"yjs-go-bridge/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
 )
 
 // DeterministicShardResolver resolve documentos para shards usando FNV-1a de

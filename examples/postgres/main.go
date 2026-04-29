@@ -7,9 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"yjs-go-bridge/pkg/storage"
-	pgstore "yjs-go-bridge/pkg/storage/postgres"
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	pgstore "github.com/drksbr/yjs-crdt-golang-server/pkg/storage/postgres"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 func main() {

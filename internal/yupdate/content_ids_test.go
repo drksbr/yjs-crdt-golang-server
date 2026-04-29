@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/internal/yidset"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yidset"
 )
 
 func TestCreateContentIDsFromUpdateV1(t *testing.T) {

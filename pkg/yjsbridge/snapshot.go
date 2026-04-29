@@ -3,7 +3,7 @@ package yjsbridge
 import (
 	"context"
 
-	"yjs-go-bridge/internal/yupdate"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yupdate"
 )
 
 // Snapshot é o contrato público de snapshot em memória para o fluxo de update.

@@ -3,8 +3,8 @@ package yupdate
 import (
 	"context"
 
-	"yjs-go-bridge/internal/yidset"
-	"yjs-go-bridge/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yidset"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
 )
 
 // IntersectUpdateWithContentIDsV1 filtra um update V1 mantendo apenas o conteúdo

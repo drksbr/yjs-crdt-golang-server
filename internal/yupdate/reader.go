@@ -1,6 +1,6 @@
 package yupdate
 
-import "yjs-go-bridge/internal/ytypes"
+import "github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
 
 // DecodedUpdate representa um update V1 completamente lido.
 type DecodedUpdate struct {

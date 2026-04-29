@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 func TestStoreAppendListAndTrimUpdates(t *testing.T) {
@@ -373,6 +373,14 @@ func TestStoreDistributedErrors(t *testing.T) {
 			wantErr: context.Canceled,
 		},
 		{
+			name: "handoff_lease_respects_context",
+			run: func() error {
+				_, err := store.HandoffLease(ctx, storage.ShardID("shard-a"), "lease-token", lease)
+				return err
+			},
+			wantErr: context.Canceled,
+		},
+		{
 			name: "append_rejects_invalid_key",
 			run: func() error {
 				_, err := store.AppendUpdate(context.Background(), storage.DocumentKey{}, []byte{0x01})
@@ -472,6 +480,22 @@ func TestStoreDistributedErrors(t *testing.T) {
 			},
 			wantErr: storage.ErrLeaseNotFound,
 		},
+		{
+			name: "handoff_lease_rejects_invalid_shard",
+			run: func() error {
+				_, err := store.HandoffLease(context.Background(), storage.ShardID(""), "lease-token", lease)
+				return err
+			},
+			wantErr: storage.ErrInvalidShardID,
+		},
+		{
+			name: "handoff_lease_rejects_empty_current_token",
+			run: func() error {
+				_, err := store.HandoffLease(context.Background(), storage.ShardID("shard-a"), "", lease)
+				return err
+			},
+			wantErr: storage.ErrInvalidLeaseToken,
+		},
 	}
 
 	for _, tt := range tests {
@@ -566,6 +590,19 @@ func TestNilStoreDistributedErrors(t *testing.T) {
 			name: "release_lease",
 			run: func() error {
 				return store.ReleaseLease(context.Background(), shardID, "lease-token")
+			},
+			wantErr: errNilStore,
+		},
+		{
+			name: "handoff_lease",
+			run: func() error {
+				_, err := store.HandoffLease(context.Background(), shardID, "lease-token", storage.LeaseRecord{
+					ShardID:   shardID,
+					Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-b"), Epoch: 2},
+					Token:     "lease-next",
+					ExpiresAt: time.Now().UTC().Add(time.Minute),
+				})
+				return err
 			},
 			wantErr: errNilStore,
 		},
@@ -779,6 +816,69 @@ func TestStoreLeaseRejectsConflictAndPreservesGeneration(t *testing.T) {
 	}
 	if reacquired.Owner.Epoch != 4 {
 		t.Fatalf("reacquired.Owner.Epoch = %d, want 4", reacquired.Owner.Epoch)
+	}
+}
+
+func TestStoreHandoffLeaseTransfersActiveLeaseAtomically(t *testing.T) {
+	t.Parallel()
+
+	store := New()
+	baseTime := time.Unix(710, 0).UTC()
+	store.now = sequenceClock(
+		baseTime,
+		baseTime.Add(10*time.Second),
+		baseTime.Add(20*time.Second),
+		baseTime.Add(30*time.Second),
+		baseTime.Add(40*time.Second),
+	)
+
+	shardID := storage.ShardID("shard-handoff")
+	active, err := store.SaveLease(context.Background(), storage.LeaseRecord{
+		ShardID:   shardID,
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-a"), Epoch: 3},
+		Token:     "lease-a",
+		ExpiresAt: baseTime.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("SaveLease(active) unexpected error: %v", err)
+	}
+
+	next, err := store.HandoffLease(context.Background(), shardID, active.Token, storage.LeaseRecord{
+		ShardID:   shardID,
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-b"), Epoch: 4},
+		Token:     "lease-b",
+		ExpiresAt: baseTime.Add(2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("HandoffLease() unexpected error: %v", err)
+	}
+	if next.Owner.NodeID != storage.NodeID("node-b") || next.Owner.Epoch != 4 || next.Token != "lease-b" {
+		t.Fatalf("HandoffLease() = %#v, want node-b epoch=4 token=lease-b", next)
+	}
+
+	loaded, err := store.LoadLease(context.Background(), shardID)
+	if err != nil {
+		t.Fatalf("LoadLease() unexpected error: %v", err)
+	}
+	if loaded.Owner.NodeID != storage.NodeID("node-b") || loaded.Owner.Epoch != 4 || loaded.Token != "lease-b" {
+		t.Fatalf("LoadLease() = %#v, want handed off lease", loaded)
+	}
+
+	if _, err := store.HandoffLease(context.Background(), shardID, active.Token, storage.LeaseRecord{
+		ShardID:   shardID,
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-c"), Epoch: 5},
+		Token:     "lease-c",
+		ExpiresAt: baseTime.Add(3 * time.Minute),
+	}); !errors.Is(err, storage.ErrLeaseConflict) {
+		t.Fatalf("HandoffLease(stale token) error = %v, want %v", err, storage.ErrLeaseConflict)
+	}
+	if _, err := store.HandoffLease(context.Background(), shardID, next.Token, storage.LeaseRecord{
+		ShardID:   shardID,
+		Owner:     storage.OwnerInfo{NodeID: storage.NodeID("node-c"), Epoch: 7},
+		Token:     "lease-c",
+		ExpiresAt: baseTime.Add(4 * time.Minute),
+	}); !errors.Is(err, storage.ErrLeaseStaleEpoch) {
+		t.Fatalf("HandoffLease(epoch gap) error = %v, want %v", err, storage.ErrLeaseStaleEpoch)
 	}
 }
 

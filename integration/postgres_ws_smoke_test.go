@@ -14,15 +14,15 @@ import (
 
 	"github.com/coder/websocket"
 
-	"yjs-go-bridge/internal/varint"
-	"yjs-go-bridge/internal/ytypes"
-	"yjs-go-bridge/internal/yupdate"
-	"yjs-go-bridge/pkg/storage"
-	pgstore "yjs-go-bridge/pkg/storage/postgres"
-	"yjs-go-bridge/pkg/yawareness"
-	"yjs-go-bridge/pkg/yhttp"
-	"yjs-go-bridge/pkg/yjsbridge"
-	"yjs-go-bridge/pkg/yprotocol"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/yupdate"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	pgstore "github.com/drksbr/yjs-crdt-golang-server/pkg/storage/postgres"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yhttp"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
 const smokeIOTimeout = 15 * time.Second

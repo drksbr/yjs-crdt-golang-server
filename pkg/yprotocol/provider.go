@@ -7,10 +7,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
-	"yjs-go-bridge/pkg/storage"
-	"yjs-go-bridge/pkg/yawareness"
-	"yjs-go-bridge/pkg/yjsbridge"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 var (
@@ -46,6 +47,13 @@ type ProviderConfig struct {
 	// ResolveAuthorityFence ativa fencing autoritativo opcional para runtimes
 	// distribuídos, exigindo que o store suporte os contratos autoritativos.
 	ResolveAuthorityFence ResolveAuthorityFenceFunc
+
+	// Metrics adiciona observabilidade opcional ao lifecycle local do provider.
+	Metrics Metrics
+
+	// StorageMetrics propaga observabilidade opcional aos helpers agregados de
+	// replay/recovery/compaction usados pelo provider.
+	StorageMetrics storage.Metrics
 }
 
 // DispatchResult representa a saída local de uma operação no provider.
@@ -69,6 +77,8 @@ type Provider struct {
 	mu                    sync.Mutex
 	store                 storage.SnapshotStore
 	resolveAuthorityFence ResolveAuthorityFenceFunc
+	metrics               Metrics
+	storageMetrics        storage.Metrics
 	rooms                 map[storage.DocumentKey]*providerRoom
 }
 
@@ -98,6 +108,8 @@ func NewProvider(cfg ProviderConfig) *Provider {
 	return &Provider{
 		store:                 cfg.Store,
 		resolveAuthorityFence: cfg.ResolveAuthorityFence,
+		metrics:               normalizeMetrics(cfg.Metrics),
+		storageMetrics:        cfg.StorageMetrics,
 		rooms:                 make(map[storage.DocumentKey]*providerRoom),
 	}
 }
@@ -208,7 +220,7 @@ func (c *Connection) AuthorityEpoch() uint64 {
 // RevalidateAuthority força uma nova checagem do fence autoritativo do room.
 //
 // Quando não há fencing configurado, a operação é no-op.
-func (c *Connection) RevalidateAuthority(ctx context.Context) error {
+func (c *Connection) RevalidateAuthority(ctx context.Context) (err error) {
 	if c == nil {
 		return ErrConnectionClosed
 	}
@@ -234,6 +246,12 @@ func (c *Connection) RevalidateAuthority(ctx context.Context) error {
 	key := room.key
 	current := room.authority.Clone()
 	room.mu.Unlock()
+	start := time.Now()
+	defer func() {
+		if provider != nil {
+			observeAuthorityRevalidation(provider.metrics, key, time.Since(start), err)
+		}
+	}()
 
 	if provider == nil || provider.resolveAuthorityFence == nil || current == nil {
 		return nil
@@ -245,6 +263,7 @@ func (c *Connection) RevalidateAuthority(ctx context.Context) error {
 			room.mu.Lock()
 			room.authorityLost = true
 			room.mu.Unlock()
+			observeAuthorityLost(provider.metrics, key, authorityLossStageRevalidate)
 			return wrapAuthorityLost(err)
 		}
 		return err
@@ -253,6 +272,7 @@ func (c *Connection) RevalidateAuthority(ctx context.Context) error {
 		room.mu.Lock()
 		room.authorityLost = true
 		room.mu.Unlock()
+		observeAuthorityLost(provider.metrics, key, authorityLossStageRevalidate)
 		return wrapAuthorityLost(storage.ErrAuthorityLost)
 	}
 
@@ -272,12 +292,28 @@ func (c *Connection) DocumentKey() storage.DocumentKey {
 	return c.room.key
 }
 
-// HandleEncodedMessages aplica um stream protocolado à conexão e retorna:
+// HandleEncodedMessages aplica um stream protocolado à conexão usando
+// `context.Background()` e retorna:
 // - resposta direta para a conexão chamadora;
 // - stream de broadcast uniforme para os demais peers do room.
 func (c *Connection) HandleEncodedMessages(src []byte) (*DispatchResult, error) {
+	return c.HandleEncodedMessagesContext(context.Background(), src)
+}
+
+// HandleEncodedMessagesContext aplica um stream protocolado à conexão e
+// propaga `ctx` para operações bloqueantes de storage, incluindo append
+// autoritativo sob fence quando configurado.
+//
+// `ctx == nil` é tratado como `context.Background()`.
+func (c *Connection) HandleEncodedMessagesContext(ctx context.Context, src []byte) (*DispatchResult, error) {
 	if c == nil {
 		return nil, ErrConnectionClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	messages, err := DecodeProtocolMessages(src)
@@ -299,7 +335,10 @@ func (c *Connection) HandleEncodedMessages(src []byte) (*DispatchResult, error) 
 	direct := make([]*ProtocolMessage, 0)
 
 	for idx, message := range messages {
-		directMessages, broadcast, err := c.room.handleMessageLocked(c, message)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		directMessages, broadcast, err := c.room.handleMessageLocked(ctx, c, message)
 		if err != nil {
 			return nil, fmt.Errorf("provider handle message %d: %w", idx, err)
 		}
@@ -316,7 +355,7 @@ func (c *Connection) HandleEncodedMessages(src []byte) (*DispatchResult, error) 
 }
 
 // Persist grava o snapshot autoritativo atual do documento no store configurado.
-func (c *Connection) Persist(ctx context.Context) (*storage.SnapshotRecord, error) {
+func (c *Connection) Persist(ctx context.Context) (record *storage.SnapshotRecord, err error) {
 	if c == nil {
 		return nil, ErrConnectionClosed
 	}
@@ -341,15 +380,26 @@ func (c *Connection) Persist(ctx context.Context) (*storage.SnapshotRecord, erro
 	snapshot := c.room.snapshot.Clone()
 	lastOffset := c.room.lastOffset
 	shouldTrim := lastOffset > c.room.compactedAt
+	compacted := storage.UpdateOffset(0)
+	if shouldTrim {
+		compacted = lastOffset - c.room.compactedAt
+	}
 	authority := c.room.authority.Clone()
 	c.room.mu.Unlock()
+	start := time.Now()
+	defer func() {
+		if c.provider != nil {
+			observePersist(c.provider.metrics, key, time.Since(start), lastOffset, compacted, err)
+		}
+	}()
 
-	record, err := c.provider.saveSnapshot(ctx, key, snapshot, lastOffset, authority)
+	record, err = c.provider.saveSnapshot(ctx, key, snapshot, lastOffset, authority)
 	if err != nil {
 		if errors.Is(err, storage.ErrAuthorityLost) {
 			c.room.mu.Lock()
 			c.room.authorityLost = true
 			c.room.mu.Unlock()
+			observeAuthorityLost(c.provider.metrics, key, authorityLossStagePersistSave)
 			return nil, wrapAuthorityLost(err)
 		}
 		return nil, err
@@ -361,6 +411,7 @@ func (c *Connection) Persist(ctx context.Context) (*storage.SnapshotRecord, erro
 				c.room.mu.Lock()
 				c.room.authorityLost = true
 				c.room.mu.Unlock()
+				observeAuthorityLost(c.provider.metrics, key, authorityLossStagePersistTrim)
 				return record, wrapAuthorityLost(err)
 			}
 			return record, fmt.Errorf("trim compacted updates through %d: %w", lastOffset, err)
@@ -420,10 +471,15 @@ func (c *Connection) Close() (*DispatchResult, error) {
 
 	if empty && c.provider != nil {
 		c.provider.mu.Lock()
+		removed := false
 		if current := c.provider.rooms[room.key]; current == room {
 			delete(c.provider.rooms, room.key)
+			removed = true
 		}
 		c.provider.mu.Unlock()
+		if removed {
+			observeRoomClosed(c.provider.metrics, room.key)
+		}
 	}
 
 	return result, nil
@@ -440,6 +496,9 @@ func (p *Provider) ensureRoom(ctx context.Context, key storage.DocumentKey) (*pr
 	authority, err := p.resolveRoomAuthority(ctx, key)
 	if err != nil {
 		p.mu.Unlock()
+		if errors.Is(err, ErrAuthorityLost) {
+			observeAuthorityLost(p.metrics, key, authorityLossStageOpen)
+		}
 		return nil, err
 	}
 
@@ -459,12 +518,16 @@ func (p *Provider) ensureRoom(ctx context.Context, key storage.DocumentKey) (*pr
 	}
 	p.rooms[key] = room
 	p.mu.Unlock()
+	observeRoomOpened(p.metrics, key)
 	return room, nil
 }
 
 func (p *Provider) loadSnapshot(ctx context.Context, key storage.DocumentKey) (*yjsbridge.PersistedSnapshot, storage.UpdateOffset, storage.UpdateOffset, error) {
 	if p == nil || p.store == nil {
 		return yjsbridge.NewPersistedSnapshot(), 0, 0, nil
+	}
+	if p.storageMetrics != nil {
+		ctx = storage.ContextWithMetrics(ctx, p.storageMetrics)
 	}
 
 	if updateStore := p.updateLogStore(); updateStore != nil {
@@ -620,7 +683,7 @@ func authorityFenceEqual(left *storage.AuthorityFence, right *storage.AuthorityF
 	}
 }
 
-func (r *providerRoom) handleMessageLocked(sender *Connection, message *ProtocolMessage) ([]*ProtocolMessage, []byte, error) {
+func (r *providerRoom) handleMessageLocked(ctx context.Context, sender *Connection, message *ProtocolMessage) ([]*ProtocolMessage, []byte, error) {
 	if r.authorityLost {
 		return nil, nil, ErrAuthorityLost
 	}
@@ -636,7 +699,7 @@ func (r *providerRoom) handleMessageLocked(sender *Connection, message *Protocol
 		}}, nil, nil
 	case ProtocolTypeSync:
 		if message.Sync.Type == SyncMessageTypeStep2 || message.Sync.Type == SyncMessageTypeUpdate {
-			if err := r.applyDocumentPayloadLocked(sender.provider, r.key, message.Sync.Payload); err != nil {
+			if err := r.applyDocumentPayloadLocked(ctx, sender.provider, r.key, message.Sync.Payload); err != nil {
 				return nil, nil, err
 			}
 			encoded, err := EncodeProtocolEnvelope(message)
@@ -685,13 +748,22 @@ func (r *providerRoom) handleMessageLocked(sender *Connection, message *Protocol
 	}
 }
 
-func (r *providerRoom) applyDocumentPayloadLocked(provider *Provider, key storage.DocumentKey, payload []byte) error {
+func (r *providerRoom) applyDocumentPayloadLocked(ctx context.Context, provider *Provider, key storage.DocumentKey, payload []byte) error {
 	if r.authorityLost {
 		return ErrAuthorityLost
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	updateV1, err := yjsbridge.ConvertUpdateToV1(payload)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 
@@ -703,13 +775,16 @@ func (r *providerRoom) applyDocumentPayloadLocked(provider *Provider, key storag
 				err    error
 			)
 			if r.authority != nil {
-				record, err = provider.authoritativeUpdateLogStore().AppendUpdateAuthoritative(context.Background(), key, updateV1, *r.authority)
+				record, err = provider.authoritativeUpdateLogStore().AppendUpdateAuthoritative(ctx, key, updateV1, *r.authority)
 			} else {
-				record, err = updateStore.AppendUpdate(context.Background(), key, updateV1)
+				record, err = updateStore.AppendUpdate(ctx, key, updateV1)
 			}
 			if err != nil {
 				if errors.Is(err, storage.ErrAuthorityLost) {
 					r.authorityLost = true
+					if provider != nil {
+						observeAuthorityLost(provider.metrics, key, authorityLossStageAppend)
+					}
 					return wrapAuthorityLost(err)
 				}
 				return err
