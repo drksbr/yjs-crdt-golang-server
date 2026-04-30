@@ -263,6 +263,9 @@ func (d *decoderV2) readAnyRaw(op string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := validateDecodedCollectionLength(op+".object.len", d.offset(), length); err != nil {
+			return nil, err
+		}
 		raw = appendVarUintV1(raw, length)
 		for i := uint32(0); i < length; i++ {
 			key, err := d.readVarString(op + ".object.key")
@@ -280,6 +283,9 @@ func (d *decoderV2) readAnyRaw(op string) ([]byte, error) {
 	case 117:
 		length, err := d.readRestVarUint(op + ".array.len")
 		if err != nil {
+			return nil, err
+		}
+		if err := validateDecodedCollectionLength(op+".array.len", d.offset(), length); err != nil {
 			return nil, err
 		}
 		raw = appendVarUintV1(raw, length)

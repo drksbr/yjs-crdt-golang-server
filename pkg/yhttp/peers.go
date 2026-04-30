@@ -30,6 +30,24 @@ func (p *websocketPeer) close(reason string) error {
 	return p.conn.Close(websocket.StatusGoingAway, reason)
 }
 
+type quotaPeer struct {
+	base  roomPeer
+	quota QuotaLease
+}
+
+func (p quotaPeer) deliver(ctx context.Context, payload []byte) error {
+	if p.quota != nil {
+		if err := p.quota.AllowFrame(ctx, QuotaDirectionOutbound, len(payload)); err != nil {
+			return err
+		}
+	}
+	return p.base.deliver(ctx, payload)
+}
+
+func (p quotaPeer) close(reason string) error {
+	return p.base.close(reason)
+}
+
 type remoteStreamPeer struct {
 	stream       NodeMessageStream
 	documentKey  storage.DocumentKey

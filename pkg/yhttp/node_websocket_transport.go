@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -21,12 +22,14 @@ type RemoteOwnerURLResolver func(ctx context.Context, req RemoteOwnerDialRequest
 type WebSocketRemoteOwnerDialerConfig struct {
 	ResolveURL     RemoteOwnerURLResolver
 	DialOptions    *websocket.DialOptions
+	AuthHeaders    RemoteOwnerAuthHeadersFunc
 	ReadLimitBytes int64
 }
 
 type webSocketRemoteOwnerDialer struct {
 	resolveURL     RemoteOwnerURLResolver
 	dialOptions    *websocket.DialOptions
+	authHeaders    RemoteOwnerAuthHeadersFunc
 	readLimitBytes int64
 }
 
@@ -45,6 +48,7 @@ func NewWebSocketRemoteOwnerDialer(cfg WebSocketRemoteOwnerDialerConfig) (Remote
 	return &webSocketRemoteOwnerDialer{
 		resolveURL:     cfg.ResolveURL,
 		dialOptions:    cloneDialOptions(cfg.DialOptions),
+		authHeaders:    cfg.AuthHeaders,
 		readLimitBytes: readLimit,
 	}, nil
 }
@@ -62,8 +66,19 @@ func (d *webSocketRemoteOwnerDialer) DialRemoteOwner(ctx context.Context, req Re
 	if options == nil {
 		options = &websocket.DialOptions{}
 	}
+	headers := cloneHeader(options.HTTPHeader)
 	if req.Header != nil {
-		options.HTTPHeader = cloneHeader(req.Header)
+		headers = mergeHTTPHeaders(headers, req.Header, "Authorization")
+	}
+	if d.authHeaders != nil {
+		authHeaders, err := d.authHeaders(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		headers = mergeHTTPHeaders(headers, authHeaders)
+	}
+	if len(headers) > 0 {
+		options.HTTPHeader = headers
 	}
 
 	socket, _, err := websocket.Dial(ctx, targetURL, options)
@@ -72,6 +87,30 @@ func (d *webSocketRemoteOwnerDialer) DialRemoteOwner(ctx context.Context, req Re
 	}
 	socket.SetReadLimit(d.readLimitBytes)
 	return newWebSocketNodeMessageStream(socket), nil
+}
+
+func mergeHTTPHeaders(dst http.Header, src http.Header, skipKeys ...string) http.Header {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(http.Header, len(src))
+	}
+	skip := make(map[string]struct{}, len(skipKeys))
+	for _, key := range skipKeys {
+		skip[http.CanonicalHeaderKey(key)] = struct{}{}
+	}
+	for key, values := range src {
+		canonical := http.CanonicalHeaderKey(key)
+		if _, ok := skip[canonical]; ok {
+			continue
+		}
+		dst.Del(canonical)
+		for _, value := range values {
+			dst.Add(canonical, value)
+		}
+	}
+	return dst
 }
 
 type webSocketNodeMessageStream struct {

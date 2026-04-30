@@ -19,4 +19,16 @@ var (
 	ErrNilNodeMessageStream = errors.New("yhttp: node message stream obrigatorio")
 	// ErrNilRemoteOwnerURLResolver sinaliza ausência do resolver de URL do dialer websocket.
 	ErrNilRemoteOwnerURLResolver = errors.New("yhttp: remote owner url resolver obrigatorio")
+	// ErrUnauthorized sinaliza falha de autenticação da request HTTP/WebSocket.
+	ErrUnauthorized = errors.New("yhttp: autenticacao obrigatoria")
+	// ErrForbidden sinaliza request autenticada sem permissão para o documento.
+	ErrForbidden = errors.New("yhttp: acesso negado")
+	// ErrRateLimited sinaliza que a request excedeu o limite configurado.
+	ErrRateLimited = errors.New("yhttp: limite de taxa excedido")
+	// ErrQuotaExceeded sinaliza que a request excedeu uma quota configurada.
+	ErrQuotaExceeded = errors.New("yhttp: quota excedida")
+	// ErrQuotaUnavailable sinaliza falha temporária do backend de quotas.
+	ErrQuotaUnavailable = errors.New("yhttp: quota indisponivel")
+	// ErrOriginDenied sinaliza que a origem HTTP/WebSocket nao e permitida.
+	ErrOriginDenied = errors.New("yhttp: origem nao permitida")
 )

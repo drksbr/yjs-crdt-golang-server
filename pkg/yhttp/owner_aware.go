@@ -101,6 +101,9 @@ func NewOwnerAwareServer(cfg OwnerAwareServerConfig) (*OwnerAwareServer, error) 
 
 // ServeHTTP resolve ownership do documento antes de abrir o provider local.
 func (s *OwnerAwareServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.local.handleCORSPreflight(w, r) {
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
@@ -109,6 +112,15 @@ func (s *OwnerAwareServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	req, err := s.local.resolveRequest(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.local.checkOrigin(w, r, req); err != nil {
+		s.local.writeAuthError(w, req, err)
+		return
+	}
+	req, err = s.local.authenticateAndAuthorize(r, req)
+	if err != nil {
+		s.local.writeAuthError(w, req, err)
 		return
 	}
 

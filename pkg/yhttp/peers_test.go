@@ -2,7 +2,9 @@ package yhttp
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
+	"sync"
 	"testing"
 
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
@@ -101,6 +103,42 @@ func TestProtocolPayloadToRemoteMessagesNormalizesV2SyncPayloads(t *testing.T) {
 	})
 }
 
+func TestSwitchableRemoteStreamPeerSwitchTargetIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	peer := newSwitchableRemoteStreamPeer(storage.DocumentKey{Namespace: "tests", DocumentID: "switch-target"}, "conn-a")
+	first := &recordingForwardDeliveryTarget{}
+	second := &recordingForwardDeliveryTarget{}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	errCh := make(chan error, 1)
+	go func() {
+		defer wg.Done()
+		errCh <- peer.deliver(context.Background(), []byte("payload"))
+	}()
+
+	peer.switchTarget(first)
+	peer.switchTarget(second)
+	wg.Wait()
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("peer.deliver() unexpected error: %v", err)
+	}
+	if first.deliveries()+second.deliveries() != 1 {
+		t.Fatalf("deliveries = first:%d second:%d, want exactly one", first.deliveries(), second.deliveries())
+	}
+
+	peer.clearSession()
+	peer.switchTarget(second)
+	if err := peer.deliver(context.Background(), []byte("again")); err != nil {
+		t.Fatalf("peer.deliver(after clear) unexpected error: %v", err)
+	}
+	if second.deliveries() == 0 {
+		t.Fatal("second target did not receive delivery after clear/switch")
+	}
+}
+
 func singleYHTTPMessage(t *testing.T, messages []ynodeproto.Message) ynodeproto.Message {
 	t.Helper()
 
@@ -118,4 +156,22 @@ func mustDecodeYHTTPHex(t *testing.T, value string) []byte {
 		t.Fatalf("hex.DecodeString(%q) unexpected error: %v", value, err)
 	}
 	return decoded
+}
+
+type recordingForwardDeliveryTarget struct {
+	mu    sync.Mutex
+	count int
+}
+
+func (t *recordingForwardDeliveryTarget) deliver(context.Context, []byte) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.count++
+	return nil
+}
+
+func (t *recordingForwardDeliveryTarget) deliveries() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.count
 }

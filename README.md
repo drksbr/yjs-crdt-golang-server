@@ -5,7 +5,7 @@ O projeto cobre o núcleo de updates/snapshots, persistência, runtime local por
 
 ## O que já existe
 
-- `pkg/yjsbridge`: merge, diff, state vector, content ids e snapshots persistíveis em V1, com conversão limitada de V2 válido para V1 canônico.
+- `pkg/yjsbridge`: merge, diff, state vector, content ids e snapshots persistíveis em V1, com entrada V2 válida e saídas V2 opt-in (`ConvertUpdateToV2`, `MergeUpdatesV2`, `DiffUpdateV2`).
 - `pkg/storage`: contratos públicos para snapshot, update log, placement, lease, replay/recovery/compaction e fencing autoritativo.
 - `pkg/storage/memory` e `pkg/storage/postgres`: backends de referência.
 - `pkg/yprotocol`: runtime local por documento (`Provider`/`Connection`) com bootstrap por `snapshot + update log`, apply fenced/context-aware e normalização de sync V2 válido para V1 canônico.
@@ -13,7 +13,7 @@ O projeto cobre o núcleo de updates/snapshots, persistência, runtime local por
 - `pkg/yawareness`: estado efêmero de awareness/presence.
 - `pkg/ycluster`: resolver de shard, owner lookup, adapters storage-backed, fonte de documentos via placement store, membership/health para targets dinâmicos, `LeaseManager`, `StorageOwnershipCoordinator` e `DocumentOwnershipRuntime` para claim/promoção/lookup/fence/rebalance planejado e periódico/lifecycle compartilhado de ownership por documento.
 - `pkg/ynodeproto`: wire binário tipado entre nós.
-- `pkg/yhttp`: borda HTTP/WebSocket genérica, owner-aware, com relay edge -> owner, normalização V2 -> V1 antes do wire inter-node, promoção local opt-in e ownership runtime opcional por conexão.
+- `pkg/yhttp`: borda HTTP/WebSocket genérica, owner-aware, com auth/authz/rate limit/quotas/origin policy/redaction plugáveis, tenant boundary opt-in, relay edge -> owner, normalização V2 -> V1 antes do wire inter-node, promoção local opt-in e ownership runtime opcional por conexão.
 - `pkg/yhttp/prometheus`: adapter Prometheus para métricas de transporte/owner-aware, também com labels constantes opcionais.
 
 ## Estado atual
@@ -36,12 +36,18 @@ Hoje o projeto já suporta este perfil:
 - relay remoto entre edge e owner via protocolo inter-node tipado.
 - handoff transparente do browser entre `remote -> remote`, `remote -> local` e `local -> remote` no mesmo WebSocket.
 - seam de autenticação e validação de epoch no handshake inter-node owner-side.
-- reader V2 fixture-backed para conversão canônica V2 -> V1, incluindo texto Unicode, Any aninhado, XML, snapshots, state vector, content ids, merge, diff, intersect e payloads de sync com saída V1 canônica.
+- autenticação/autorização HTTP/WebSocket opt-in por `Authenticator`/`Authorizer`, com `BearerTokenAuthenticator` e `TenantAuthorizer` para isolar `DocumentKey.Namespace`.
+- rate limit HTTP/WebSocket opt-in por `RateLimiter`, incluindo `FixedWindowRateLimiter` em memória e chaves por principal/IP, tenant ou documento como referência local.
+- quotas HTTP/WebSocket opt-in por `QuotaLimiter`, incluindo `LocalQuotaLimiter` para conexões simultâneas por tenant/documento e budgets de bytes por conexão.
+- política de Origin/CORS opt-in por `OriginPolicy`, com `StaticOriginPolicy` para allowlist exata, preflight e validação de método/headers.
+- redaction opt-in de requests em métricas/handlers de erro por `RequestRedactor`, com `HashingRequestRedactor` para hashing salgado de ids sensíveis.
+- autenticação inter-node por bearer dedicado ou HMAC com `key_id`, timestamp/nonce, replay protection local e suporte a rotação de segredo, além de validadores fail-closed para configs de produção.
+- reader/encoder V2 fixture-backed, com conversão V1 <-> V2, saídas públicas V2 opt-in e payloads de sync ainda normalizados para V1 canônico em protocolo/storage.
 
 ## O que ainda falta na fase distribuída
 
 - evolução do oráculo observacional para SLOs reais, multi-região e multi-tenant;
-- hardening de segurança e operação para ambiente público multi-tenant.
+- completar hardening operacional para ambiente público multi-tenant: enforcement distribuído de quotas, mTLS/rotação/gestão de chaves inter-node, rollout auditado de defaults fail-closed e calibração de limites por tráfego real.
 
 ## Estrutura principal
 

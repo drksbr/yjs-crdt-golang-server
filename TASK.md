@@ -41,8 +41,11 @@ Neste momento o repositório já possui:
 - primeiro corte V2 com reader interno e conversão canônica para V1, validado por fixtures upstream do Yjs
 - cobertura V2 single-update ampliada com texto Unicode, `Any` aninhado em array/map e XML com atributo/texto usando fixtures upstream do Yjs
 - cobertura V2 multi-update com fixtures upstream de `Y.mergeUpdatesV2` para append de texto entre clientes, deleção após insert, formatação sobre texto deletado, sets independentes/sobrescritos em map, escrita em map aninhado, XML, deleção em array e subdoc com update subsequente
+- encoder V2 e APIs públicas opt-in `ConvertUpdateToV2`, `ConvertUpdatesToV2`, `MergeUpdatesV2`, `DiffUpdateV2` e `IntersectUpdateWithContentIDsV2`, mantendo as APIs sem sufixo em V1 canônico
 - hardening V2 adicional rejeitando valores não consumidos em encoders laterais já cobertos pelo reader, como `client`, `info` e `keyClock` sem chaves consumidas, além de `parentInfo` inválido e coleções JSON/Any superdimensionadas
 - `pkg/yprotocol.Session` e `pkg/yprotocol.Provider` agora aceitam `sync update`/`step2` com V2 válido e convertem para V1 canônico antes de atualizar estado, emitir broadcast, append no update log ou snapshot persistido
+- segurança HTTP/WebSocket ampliada com `OriginPolicy`/`StaticOriginPolicy` para allowlist/preflight CORS e `RequestRedactor`/`HashingRequestRedactor` para sanitizar métricas e handlers de erro
+- hardening público ampliado com `QuotaLimiter`/`LocalQuotaLimiter`, auth inter-node HMAC com `key_id`, timestamp/nonce/replay protection, rotação de segredo e validadores fail-closed de configuração de produção
 - leitura de stream endurecida com contratos explícitos de cancelamento quando disponíveis
 - limpeza de artefatos temporários de depuração introduzidos em rodadas anteriores
 - documentação de roadmap alinhada ao estado real do código
@@ -80,6 +83,8 @@ Neste momento o repositório já possui:
 - `pkg/yhttp.OwnerAwareServer` agora pode promover localmente, via flag explícita, quando o lookup indica owner ausente/expirado e o `Server` local possui `DocumentOwnershipRuntime`
 - `pkg/yhttp.RemoteOwnerEndpoint` agora valida o epoch autoritativo real do provider contra o epoch do handshake inter-node, e o edge reconhece `Close` retryable ainda durante o handshake, retornando `503`/`Retry-After` quando o upgrade precisa ser refeito
 - `pkg/yhttp` agora sinaliza perda de autoridade detectada durante writes locais pelo mesmo caminho de handoff/rebind transparente, sem depender apenas da revalidação periódica, e cobre timeout de rebind quando o epoch remoto não avança
+- `pkg/yhttp` agora possui primeira camada de segurança HTTP/WebSocket opt-in com `Authenticator`, `Authorizer`, `BearerTokenAuthenticator` e `TenantAuthorizer` para isolar `DocumentKey.Namespace`
+- `pkg/yhttp` agora também expõe `RateLimiter`, `FixedWindowRateLimiter` e chaves de referência por principal/IP, tenant ou documento para limitar abertura HTTP/WebSocket antes de materializar provider local ou resolver owner remoto
 - `examples/memory` e `examples/postgres` foram adicionados com fluxos iniciais de persistência usando a API pública e stores referenciados
 - `examples/provider-memory` agora cobre fluxo local de provider com late joiner, persistência explícita e restore em novo provider, servindo como referência do recovery por snapshot antes do replay distribuído
 - `examples/http-memory` foi adicionado como exemplo de transporte `net/http` + WebSocket com `pkg/yhttp`
@@ -94,8 +99,8 @@ Neste momento o repositório já possui:
 
 A fase atual é **Meta técnica 9 / Fase 3 em consolidação**, com API pública de snapshot e de update em V1 já em operação em `pkg/yjsbridge`, além da exposição pública de protocolo e awareness em `pkg/yprotocol` e `pkg/yawareness` em V1.
 As metas técnicas 1, 2, 3, 4, 5, 6, 7 e 8 já possuem corte mínimo implementado.
-Em Meta 9, a prioridade continua sendo reduzir lacunas de compatibilidade estrutural em merge/diff/intersect, estabilizar o writer incremental e abrir a entrada controlada para V2 quando a camada pública atual estiver madura.
-Paralelamente, a nova etapa registra a consolidação operacional de snapshots V1 por meio de API pública e stores, o runtime in-process público de protocolo em `pkg/yprotocol`, a camada mínima de provider acima de `Session` e a primeira borda pública de transporte HTTP/WebSocket em `pkg/yhttp`, ainda sem saída preservada em V2 e sem transporte distribuído próprio no provider local.
+Em Meta 9, a prioridade continua sendo reduzir lacunas de compatibilidade estrutural em merge/diff/intersect, estabilizar o writer incremental e manter V2 como trilha explícita/opt-in sem alterar defaults V1-first.
+Paralelamente, a nova etapa registra a consolidação operacional de snapshots V1 por meio de API pública e stores, o runtime in-process público de protocolo em `pkg/yprotocol`, a camada mínima de provider acima de `Session` e a primeira borda pública de transporte HTTP/WebSocket em `pkg/yhttp`, ainda sem saída V2 em storage/protocolo e sem transporte distribuído próprio no provider local.
 A mesma transição também já materializou um corte operacional mais amplo da Meta 10: os contratos de persistência distribuída, o framing inter-node, os backends concretos de update log/placement/lease, listagem de placements, os helpers públicos de replay, o bootstrap do provider por `snapshot + update log`, a borda owner-aware, a propagação de fencing autoritativo até o runtime local, o handoff atômico de lease/epoch no storage/control plane, a primitiva explícita de rebalance document-level, política determinística com execução, control loop periódico de rebalance, seleção dinâmica de targets por membership/health, revalidação imediata de autoridade na borda a partir de decisões do controller e um bundle inicial de observabilidade operacional já estão no branch.
 A próxima fase aberta no roadmap é a **Meta técnica 10 / Fase 4**, que fecha owner único por documento/shard com `lease`/`epoch`/fencing propagados até `apply`/persist/handoff, protocolo inter-node próprio e aceite de HTTP/WS em qualquer nó com processamento do room restrito ao owner.
 
@@ -120,7 +125,7 @@ Nesta etapa, a aceitação é:
 - consolidar a primeira borda pública de transporte em `pkg/yhttp` sem acoplar o núcleo a um framework HTTP específico
 - manter o mapeamento de lacunas de compatibilidade em merge/diff/intersect para reduzir risco de regressão
 - consolidar persistência operacional V1 em memória e Postgres antes de expandir casos avançados
-- documentar limites: saída canônica V1 nas APIs públicas de update, restore V2 rejeitado e payloads V2 válidos de sync normalizados para V1 antes de broadcast/persistência
+- documentar limites: APIs sem sufixo seguem com saída canônica V1, APIs `*V2` são opt-in, restore V2 rejeitado e payloads V2 válidos de sync normalizados para V1 antes de broadcast/persistência
 - tratar a etapa atual como estabilidade operacional da API pública em `pkg/yjsbridge`, `pkg/yprotocol` e `pkg/yawareness` em V1, incluindo runtime/provider mínimo em processo, sem assumir provider completo
 - congelar os invariantes locais que serão reutilizados como runtime do futuro owner distribuído
 - preparar a transição para multi-nó sem reescrever a API pública já exposta
@@ -241,6 +246,8 @@ Nesta etapa, a aceitação é:
 - [x] Fechar persistência de snapshot base + update log append-only por epoch, conectando checkpoint/compaction ao handoff e recovery distribuídos
 - [x] Materializar payloads inter-node tipados e versionados sobre o framing já exposto em `pkg/ynodeproto`, pelo menos para handshake, sync request/response, document update, awareness update e ping/pong
 - [x] Expor uma borda HTTP/WS owner-aware em `pkg/yhttp` para resolver owner antes do provider local e só materializar `Session`/`Provider` quando o owner resolvido é local
+- [x] Expor autenticação/autorização HTTP/WS plugável em `pkg/yhttp`, com bearer token estático de referência e boundary multi-tenant por namespace
+- [x] Expor rate limit HTTP/WS plugável em `pkg/yhttp`, com implementação fixed-window local de referência e chaves por principal/IP, tenant ou documento
 - [x] Conectar `DocumentOwnershipRuntime` opcional ao `pkg/yhttp.Server`, garantindo claim/release de lease ao lifecycle de conexões WebSocket locais, endpoint owner-side e takeover `remote -> local`
 - [x] Permitir promoção local opt-in na borda owner-aware quando não existe owner ativo, preservando o fallback retryable como comportamento padrão
 - [x] Expor um seam typed de forwarding remoto em `pkg/yhttp` via `OwnerAwareServerConfig.OnRemoteOwner`, `RemoteOwnerDialer` e `NodeMessageStream`
@@ -269,7 +276,13 @@ Nota de progresso atual:
 - `pkg/yhttp.RemoteOwnerEndpoint` agora expõe hook de autenticação do handshake inter-node antes de abrir conexão no provider local do owner;
 - `pkg/yhttp.Server` agora pode acoplar `DocumentOwnershipRuntime` para claim/release automático de lease por documento enquanto houver conexões locais, streams owner-side ou takeover local ativos;
 - o handshake inter-node owner-side agora rejeita epoch obsoleto antes do ack e força relookup/cutover via `Close` retryable, com mapeamento HTTP `503` no edge quando isso ocorre antes do upgrade;
-- o que segue em aberto fora do corte distribuído é evoluir V2, ajustar SLOs com dados reais de tráfego/topologia/tenant e hardening público multi-tenant.
+- a camada de segurança de `pkg/yhttp` já cobre hooks opt-in para autenticação, autorização, rate limit, quotas por conexão/frame, Origin/CORS, redaction, autenticação do handshake inter-node e validadores fail-closed explícitos para produção pública;
+- o que segue em aberto fora do corte distribuído é versionar V2 em storage/protocolo se necessário, ajustar SLOs com dados reais de tráfego/topologia/tenant e hardening público multi-tenant.
+
+#### Próximas frentes de segurança
+- [ ] Evoluir `QuotaLimiter`/`LocalQuotaLimiter` para enforcement distribuído por tenant/documento/conexão, incluindo forwarding, owner lookup e custo de replay/storage
+- [ ] Operacionalizar política inter-node obrigatória para produção: identidade de nó, HMAC/bearer/mTLS, escopos por operação, expiração curta e distribuição segura de chaves
+- [ ] Definir redaction para logs, labels de métricas, payloads de erro HTTP/WS e dashboards, evitando expor namespaces, document ids, principals, tokens e connection ids crus
 
 #### Em foco (abertura da fase)
 - [x] Tratar `pkg/yprotocol.Provider` atual como runtime local do owner, sem fanout multi-process ad hoc e com bootstrap por `snapshot + update log`

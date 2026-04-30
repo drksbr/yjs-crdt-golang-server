@@ -29,6 +29,12 @@ type Server struct {
 	writeTimeout                  time.Duration
 	persistTimeout                time.Duration
 	authorityRevalidationInterval time.Duration
+	authenticator                 Authenticator
+	authorizer                    Authorizer
+	rateLimiter                   RateLimiter
+	quotaLimiter                  QuotaLimiter
+	originPolicy                  OriginPolicy
+	redactor                      RequestRedactor
 	metrics                       Metrics
 	onError                       ErrorHandler
 
@@ -52,6 +58,7 @@ type serverSocketSessionOptions struct {
 	bootstrap                  bool
 	authorityLossHandler       AuthorityLossHandler
 	ownership                  *ycluster.DocumentOwnershipHandle
+	quota                      QuotaLease
 }
 
 type authorityLossHandoffContextKey struct{}
@@ -60,6 +67,7 @@ type authorityLossHandoffState struct {
 	clientErrCh  <-chan error
 	cancelClient context.CancelFunc
 	upstreamPeer *switchableRemoteStreamPeer
+	quota        QuotaLease
 }
 
 func (s remoteOwnerCloseSignal) metricReason(fallback string) string {
@@ -104,16 +112,27 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		persistTimeout = defaultPersistTimeout
 	}
 
+	metrics := normalizeMetrics(cfg.Metrics)
+	if cfg.Redactor != nil {
+		metrics = redactingMetrics{base: metrics, redactor: cfg.Redactor}
+	}
+
 	return &Server{
 		provider:                      cfg.Provider,
 		ownershipRuntime:              cfg.OwnershipRuntime,
 		resolveRequest:                cfg.ResolveRequest,
-		acceptOptions:                 cloneAcceptOptions(cfg.AcceptOptions),
+		acceptOptions:                 cloneAcceptOptionsForOriginPolicy(cfg.AcceptOptions, cfg.OriginPolicy),
 		readLimitBytes:                readLimit,
 		writeTimeout:                  writeTimeout,
 		persistTimeout:                persistTimeout,
 		authorityRevalidationInterval: cfg.AuthorityRevalidationInterval,
-		metrics:                       normalizeMetrics(cfg.Metrics),
+		authenticator:                 cfg.Authenticator,
+		authorizer:                    cfg.Authorizer,
+		rateLimiter:                   cfg.RateLimiter,
+		quotaLimiter:                  cfg.QuotaLimiter,
+		originPolicy:                  cfg.OriginPolicy,
+		redactor:                      cfg.Redactor,
+		metrics:                       metrics,
 		onError:                       cfg.OnError,
 		registry:                      newRoomRegistry(),
 		authorityRevalidations:        newAuthorityRevalidationRegistry(),
@@ -123,6 +142,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 // ServeHTTP executa upgrade WebSocket, abre a conexão no provider e faz o
 // fanout local dos frames retornados pelo runtime de protocolo.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.handleCORSPreflight(w, r) {
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
@@ -131,6 +153,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	req, err := s.resolveRequest(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.checkOrigin(w, r, req); err != nil {
+		s.writeAuthError(w, req, err)
+		return
+	}
+	req, err = s.authenticateAndAuthorize(r, req)
+	if err != nil {
+		s.writeAuthError(w, req, err)
 		return
 	}
 
@@ -157,8 +188,16 @@ func (s *Server) serveResolvedHTTPWithOptions(
 		req.ConnectionID = s.newConnectionID()
 	}
 
+	quota, err := s.openQuota(r, req)
+	if err != nil {
+		s.writeAuthError(w, req, err)
+		return
+	}
+	options.quota = quota
+
 	ownership, err := s.acquireRequestOwnership(r.Context(), req)
 	if err != nil {
+		s.closeQuota(r, req, quota)
 		s.metrics.Error(req, "acquire_ownership", err)
 		status := statusFromOwnershipError(err)
 		if status == http.StatusServiceUnavailable {
@@ -171,6 +210,7 @@ func (s *Server) serveResolvedHTTPWithOptions(
 
 	connection, err := s.provider.Open(r.Context(), req.DocumentKey, req.ConnectionID, req.ClientID)
 	if err != nil {
+		s.closeQuota(r, req, quota)
 		s.releaseRequestOwnership(r, req, ownership)
 		s.metrics.Error(req, "open", err)
 		status := statusFromOpenError(err)
@@ -190,6 +230,7 @@ func (s *Server) serveResolvedHTTPWithOptions(
 			s.report(r, req, closeErr)
 		}
 		s.releaseRequestOwnership(r, req, ownership)
+		s.closeQuota(r, req, quota)
 	}()
 
 	socket, err := websocket.Accept(w, r, s.acceptOptions)
@@ -200,6 +241,155 @@ func (s *Server) serveResolvedHTTPWithOptions(
 	s.serveConnectedSocket(r, req, connection, socket, options)
 }
 
+func (s *Server) authenticateAndAuthorize(r *http.Request, req Request) (Request, error) {
+	if s == nil {
+		return req, ErrUnauthorized
+	}
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+
+	var principal *Principal
+	var err error
+	if s.authenticator != nil {
+		principal, err = s.authenticator.AuthenticateHTTP(ctx, r)
+		if err != nil {
+			s.metrics.Error(req, "authenticate", err)
+			s.report(r, req, err)
+			return req, err
+		}
+		principal = clonePrincipal(principal)
+		req.Principal = principal
+	}
+
+	if s.authorizer != nil {
+		if err := s.authorizer.AuthorizeHTTP(ctx, principal, req); err != nil {
+			s.metrics.Error(req, "authorize", err)
+			s.report(r, req, err)
+			return req, err
+		}
+	}
+	if s.rateLimiter != nil {
+		if err := s.rateLimiter.AllowHTTP(ctx, r, principal, req); err != nil {
+			s.metrics.Error(req, "rate_limit", err)
+			s.report(r, req, err)
+			return req, err
+		}
+	}
+	return req, nil
+}
+
+func (s *Server) handleCORSPreflight(w http.ResponseWriter, r *http.Request) bool {
+	if s == nil || s.originPolicy == nil {
+		return false
+	}
+	preflight, ok := s.originPolicy.(CORSPreflightPolicy)
+	if !ok {
+		return false
+	}
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	return preflight.HandleCORSPreflight(ctx, w, r)
+}
+
+func (s *Server) checkOrigin(w http.ResponseWriter, r *http.Request, req Request) error {
+	if s == nil || s.originPolicy == nil {
+		return nil
+	}
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	if err := s.originPolicy.CheckHTTPOrigin(ctx, r, req); err != nil {
+		s.metrics.Error(req, "origin", err)
+		s.report(r, req, err)
+		return err
+	}
+	if cors, ok := s.originPolicy.(CORSHeaderPolicy); ok {
+		cors.WriteCORSHeaders(w, r)
+	}
+	return nil
+}
+
+func (s *Server) writeAuthError(w http.ResponseWriter, req Request, err error) {
+	status := statusFromAuthError(err)
+	if s != nil {
+		s.metrics.Error(req, "auth", err)
+	}
+	http.Error(w, http.StatusText(status), status)
+}
+
+func (s *Server) openQuota(r *http.Request, req Request) (QuotaLease, error) {
+	if s == nil || s.quotaLimiter == nil {
+		return nil, nil
+	}
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	quota, err := s.quotaLimiter.OpenQuota(ctx, r, req)
+	if err != nil {
+		s.metrics.Error(req, "quota_open", err)
+		s.report(r, req, err)
+		return nil, err
+	}
+	return quota, nil
+}
+
+func (s *Server) closeQuota(r *http.Request, req Request, quota QuotaLease) {
+	if quota == nil {
+		return
+	}
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	if err := quota.Close(ctx); err != nil {
+		s.metrics.Error(req, "quota_close", err)
+		s.report(r, req, err)
+	}
+}
+
+func (s *Server) allowQuotaFrame(r *http.Request, req Request, quota QuotaLease, direction QuotaDirection, bytes int) error {
+	if quota == nil {
+		return nil
+	}
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	if err := quota.AllowFrame(ctx, direction, bytes); err != nil {
+		s.metrics.Error(req, "quota_frame", err)
+		s.report(r, req, err)
+		return err
+	}
+	return nil
+}
+
+func quotaCloseStatus(err error) websocket.StatusCode {
+	if errors.Is(err, ErrQuotaUnavailable) {
+		return websocket.StatusTryAgainLater
+	}
+	return websocket.StatusPolicyViolation
+}
+
+func quotaCloseReason(err error) string {
+	if errors.Is(err, ErrQuotaUnavailable) {
+		return "quota indisponivel"
+	}
+	return "quota excedida"
+}
+
+func quotaWrapPeer(peer roomPeer, quota QuotaLease) roomPeer {
+	if peer == nil || quota == nil {
+		return peer
+	}
+	return quotaPeer{base: peer, quota: quota}
+}
+
 func (s *Server) serveConnectedSocket(
 	r *http.Request,
 	req Request,
@@ -207,6 +397,8 @@ func (s *Server) serveConnectedSocket(
 	socket *websocket.Conn,
 	options serverSocketSessionOptions,
 ) {
+	defer s.closeQuota(r, req, options.quota)
+
 	if options.authorityLossHandler != nil {
 		s.serveSwitchableConnectedSocket(r, req, connection, socket, options)
 		return
@@ -221,7 +413,7 @@ func (s *Server) serveConnectedSocket(
 		defer s.metrics.ConnectionClosed(req)
 	}
 
-	peer := s.registry.add(req.DocumentKey, req.ConnectionID, &websocketPeer{conn: socket})
+	peer := s.registry.add(req.DocumentKey, req.ConnectionID, quotaWrapPeer(&websocketPeer{conn: socket}, options.quota))
 	var onAuthorityLoss func(remoteOwnerCloseSignal)
 	if options.authorityLossHandler == nil {
 		onAuthorityLoss = func(signal remoteOwnerCloseSignal) {
@@ -278,6 +470,15 @@ func (s *Server) serveConnectedSocket(
 		if msgType != websocket.MessageBinary {
 			if closeErr := socket.Close(websocket.StatusUnsupportedData, "yjs-crdt-golang-server aceita apenas frames binarios"); closeErr != nil {
 				s.metrics.Error(req, "close_unsupported_data", closeErr)
+				s.report(r, req, closeErr)
+			}
+			s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
+			s.closeSocket(r, req, socket)
+			return
+		}
+		if err := s.allowQuotaFrame(r, req, options.quota, QuotaDirectionInbound, len(payload)); err != nil {
+			if closeErr := socket.Close(quotaCloseStatus(err), quotaCloseReason(err)); closeErr != nil && !isIgnorableTransportError(closeErr) {
+				s.metrics.Error(req, "close_quota", closeErr)
 				s.report(r, req, closeErr)
 			}
 			s.cleanupConnectionWithOwnership(r, req, connection, options.ownership)
@@ -351,7 +552,7 @@ func (s *Server) serveSwitchableConnectedSocket(
 		defer s.metrics.ConnectionClosed(req)
 	}
 
-	peer := &websocketPeer{conn: socket}
+	peer := quotaWrapPeer(&websocketPeer{conn: socket}, options.quota)
 	s.registry.add(req.DocumentKey, req.ConnectionID, peer)
 	revalidateCh := s.startAuthorityRevalidator(sessionCtx, req, connection, cancelSession, nil)
 	defer drainRemoteOwnerCloseSignal(revalidateCh)
@@ -389,6 +590,7 @@ func (s *Server) serveSwitchableConnectedSocket(
 		req:             req,
 		connection:      connection,
 		peer:            peer,
+		quota:           options.quota,
 		onAuthorityLoss: notifyAuthorityLoss,
 	})
 
@@ -396,13 +598,14 @@ func (s *Server) serveSwitchableConnectedSocket(
 	defer cancelClient()
 	clientErrCh := make(chan error, 1)
 	go func() {
-		clientErrCh <- s.pipeClientToLocal(clientCtx, req, socket, upstreamPeer)
+		clientErrCh <- s.pipeClientToLocal(clientCtx, req, socket, upstreamPeer, options.quota)
 	}()
 
 	handoffReq := r.WithContext(context.WithValue(r.Context(), authorityLossHandoffContextKey{}, &authorityLossHandoffState{
 		clientErrCh:  clientErrCh,
 		cancelClient: cancelClient,
 		upstreamPeer: upstreamPeer,
+		quota:        options.quota,
 	}))
 
 	for {
@@ -457,14 +660,22 @@ func (s *Server) serveAttachedSocketWithOptions(
 		req.ConnectionID = s.newConnectionID()
 	}
 
+	quota, err := s.openQuota(r, req)
+	if err != nil {
+		return err
+	}
+	options.quota = quota
+
 	ownership, err := s.acquireRequestOwnership(r.Context(), req)
 	if err != nil {
+		s.closeQuota(r, req, quota)
 		return err
 	}
 	options.ownership = ownership
 
 	connection, err := s.provider.Open(r.Context(), req.DocumentKey, req.ConnectionID, req.ClientID)
 	if err != nil {
+		s.closeQuota(r, req, quota)
 		s.releaseRequestOwnership(r, req, ownership)
 		return err
 	}
@@ -570,6 +781,7 @@ func (s *Server) pipeClientToLocal(
 	req Request,
 	socket *websocket.Conn,
 	peer *switchableRemoteStreamPeer,
+	quota QuotaLease,
 ) error {
 	for {
 		msgType, payload, err := socket.Read(ctx)
@@ -587,6 +799,14 @@ func (s *Server) pipeClientToLocal(
 				s.report(nil, req, closeErr)
 			}
 			return nil
+		}
+
+		if err := s.allowQuotaFrame(nil, req, quota, QuotaDirectionInbound, len(payload)); err != nil {
+			if closeErr := socket.Close(quotaCloseStatus(err), quotaCloseReason(err)); closeErr != nil && !isIgnorableTransportError(closeErr) {
+				s.metrics.Error(req, "close_quota", closeErr)
+				s.report(nil, req, closeErr)
+			}
+			return err
 		}
 
 		if err := peer.deliver(ctx, payload); err != nil {
@@ -628,7 +848,7 @@ func (s *Server) writeBinary(peer roomPeer, payload []byte) error {
 
 func (s *Server) report(r *http.Request, req Request, err error) {
 	if s.onError != nil && err != nil {
-		s.onError(r, req, err)
+		s.onError(redactHTTPRequest(s.redactor, r), redactRequest(s.redactor, req), err)
 	}
 }
 
@@ -828,6 +1048,44 @@ func cloneAcceptOptions(src *websocket.AcceptOptions) *websocket.AcceptOptions {
 		cloned.OriginPatterns = append([]string(nil), src.OriginPatterns...)
 	}
 	return &cloned
+}
+
+func cloneAcceptOptionsForOriginPolicy(src *websocket.AcceptOptions, policy OriginPolicy) *websocket.AcceptOptions {
+	cloned := cloneAcceptOptions(src)
+	websocketPolicy, ok := policy.(websocketOriginPolicy)
+	if !ok {
+		return cloned
+	}
+	patterns, insecureSkipVerify := websocketPolicy.websocketOriginPatterns()
+	if insecureSkipVerify {
+		if cloned == nil {
+			cloned = &websocket.AcceptOptions{}
+		}
+		cloned.InsecureSkipVerify = true
+		cloned.OriginPatterns = nil
+		return cloned
+	}
+	if len(patterns) == 0 {
+		return cloned
+	}
+	if cloned == nil {
+		cloned = &websocket.AcceptOptions{}
+	}
+	for _, pattern := range patterns {
+		if !containsOriginPattern(cloned.OriginPatterns, pattern) {
+			cloned.OriginPatterns = append(cloned.OriginPatterns, pattern)
+		}
+	}
+	return cloned
+}
+
+func containsOriginPattern(patterns []string, pattern string) bool {
+	for _, current := range patterns {
+		if strings.EqualFold(strings.TrimSpace(current), strings.TrimSpace(pattern)) {
+			return true
+		}
+	}
+	return false
 }
 
 func isIgnorableTransportError(err error) bool {

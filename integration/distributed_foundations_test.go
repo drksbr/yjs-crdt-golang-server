@@ -364,7 +364,7 @@ func TestLeaseManagerRenewsAndReleasesStorageBackedOwnership(t *testing.T) {
 		Store:   leases,
 		ShardID: shardID,
 		Holder:  "node-a",
-		TTL:     120 * time.Millisecond,
+		TTL:     time.Second,
 	})
 	if err != nil {
 		t.Fatalf("NewLeaseManager() unexpected error: %v", err)
@@ -374,7 +374,8 @@ func TestLeaseManagerRenewsAndReleasesStorageBackedOwnership(t *testing.T) {
 		t.Fatalf("NewStorageOwnerLookup(node-a) unexpected error: %v", err)
 	}
 
-	first, changed, err := manager.Ensure(ctx, 40*time.Millisecond)
+	renewWithin := 500 * time.Millisecond
+	first, changed, err := manager.Ensure(ctx, renewWithin)
 	if err != nil {
 		t.Fatalf("manager.Ensure(initial) unexpected error: %v", err)
 	}
@@ -385,8 +386,10 @@ func TestLeaseManagerRenewsAndReleasesStorageBackedOwnership(t *testing.T) {
 		t.Fatalf("manager.Ensure(initial).Epoch = %d, want 1", first.Epoch)
 	}
 
-	time.Sleep(90 * time.Millisecond)
-	renewed, changed, err := manager.Ensure(ctx, 40*time.Millisecond)
+	if wait := time.Until(first.ExpiresAt.Add(-250 * time.Millisecond)); wait > 0 {
+		time.Sleep(wait)
+	}
+	renewed, changed, err := manager.Ensure(ctx, renewWithin)
 	if err != nil {
 		t.Fatalf("manager.Ensure(renew) unexpected error: %v", err)
 	}

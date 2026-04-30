@@ -156,10 +156,14 @@ func CreateContentIDsFromUpdate(update []byte) (*ContentIDs, error) {
 	}
 }
 
-// EncodeUpdate serializa o update em formato V1.
-// A estrutura de atualização internamente ainda não diferencia V1/V2.
+// EncodeUpdate serializa o update em formato V1 canônico.
 func EncodeUpdate(update *DecodedUpdate) ([]byte, error) {
 	return EncodeV1(update)
+}
+
+// EncodeUpdateV2 serializa o update em formato Yjs V2 canônico.
+func EncodeUpdateV2(update *DecodedUpdate) ([]byte, error) {
+	return EncodeV2(update)
 }
 
 // ConvertUpdateToV1 normaliza um update para a representação canônica V1.
@@ -174,10 +178,25 @@ func ConvertUpdateToV1(update []byte) ([]byte, error) {
 	return EncodeUpdate(decoded)
 }
 
+// ConvertUpdateToV2 normaliza um update suportado para a representação V2.
+func ConvertUpdateToV2(update []byte) ([]byte, error) {
+	decoded, err := DecodeUpdate(update)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeUpdateV2(decoded)
+}
+
 // ConvertUpdatesToV1 normaliza uma lista de updates para um único payload
 // canônico em V1, tratando payloads vazios como no-op.
 func ConvertUpdatesToV1(updates ...[]byte) ([]byte, error) {
 	return ConvertUpdatesToV1Context(context.Background(), updates...)
+}
+
+// ConvertUpdatesToV2 normaliza uma lista de updates para um único payload V2,
+// tratando payloads vazios como no-op.
+func ConvertUpdatesToV2(updates ...[]byte) ([]byte, error) {
+	return ConvertUpdatesToV2Context(context.Background(), updates...)
 }
 
 // ConvertUpdatesToV1Context normaliza uma lista de updates para um único
@@ -226,6 +245,24 @@ func ConvertUpdatesToV1Context(ctx context.Context, updates ...[]byte) ([]byte, 
 	}
 }
 
+// ConvertUpdatesToV2Context normaliza uma lista de updates para um único
+// payload canônico em V2, respeitando cancelamento e tratando payloads vazios
+// como no-op.
+func ConvertUpdatesToV2Context(ctx context.Context, updates ...[]byte) ([]byte, error) {
+	mergedV1, err := ConvertUpdatesToV1Context(ctx, updates...)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	decoded, err := DecodeV1(mergedV1)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeUpdateV2(decoded)
+}
+
 // DiffUpdate trata o diff conforme o formato detectado e retorna payload V1.
 func DiffUpdate(update, stateVector []byte) ([]byte, error) {
 	return DiffUpdateContext(context.Background(), update, stateVector)
@@ -250,6 +287,23 @@ func DiffUpdateContext(ctx context.Context, update, stateVector []byte) ([]byte,
 	default:
 		return nil, ErrUnknownUpdateFormat
 	}
+}
+
+// DiffUpdateV2 retorna a parte do update ainda não coberta pelo state vector em V2.
+func DiffUpdateV2(update, stateVector []byte) ([]byte, error) {
+	return DiffUpdateV2Context(context.Background(), update, stateVector)
+}
+
+// DiffUpdateV2Context retorna o diff em V2 respeitando cancelamento.
+func DiffUpdateV2Context(ctx context.Context, update, stateVector []byte) ([]byte, error) {
+	diffV1, err := DiffUpdateContext(ctx, update, stateVector)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return ConvertUpdateToV2(diffV1)
 }
 
 // IntersectUpdateWithContentIDs filtra um update mantendo apenas o conteúdo
@@ -278,6 +332,24 @@ func IntersectUpdateWithContentIDsContext(ctx context.Context, update []byte, co
 	default:
 		return nil, ErrUnknownUpdateFormat
 	}
+}
+
+// IntersectUpdateWithContentIDsV2 filtra um update mantendo apenas o conteúdo
+// selecionado pelos content ids e retorna payload V2.
+func IntersectUpdateWithContentIDsV2(update []byte, contentIDs *ContentIDs) ([]byte, error) {
+	return IntersectUpdateWithContentIDsV2Context(context.Background(), update, contentIDs)
+}
+
+// IntersectUpdateWithContentIDsV2Context filtra um update em V2 respeitando cancelamento.
+func IntersectUpdateWithContentIDsV2Context(ctx context.Context, update []byte, contentIDs *ContentIDs) ([]byte, error) {
+	intersectedV1, err := IntersectUpdateWithContentIDsContext(ctx, update, contentIDs)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return ConvertUpdateToV2(intersectedV1)
 }
 
 // MergeUpdates consolida múltiplos updates em um payload V1 e valida
@@ -317,4 +389,18 @@ func MergeUpdatesContext(ctx context.Context, updates ...[]byte) ([]byte, error)
 	default:
 		return nil, ErrUnknownUpdateFormat
 	}
+}
+
+// MergeUpdatesV2 consolida múltiplos updates em um payload V2 e valida
+// consistência de formato entre payloads não vazios.
+func MergeUpdatesV2(updates ...[]byte) ([]byte, error) {
+	return MergeUpdatesV2Context(context.Background(), updates...)
+}
+
+// MergeUpdatesV2Context consolida múltiplos updates em V2 respeitando cancelamento.
+func MergeUpdatesV2Context(ctx context.Context, updates ...[]byte) ([]byte, error) {
+	if len(updates) == 0 {
+		return ConvertUpdatesToV2Context(ctx)
+	}
+	return ConvertUpdatesToV2Context(ctx, updates...)
 }

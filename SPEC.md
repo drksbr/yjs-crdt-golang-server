@@ -150,6 +150,7 @@ Capacidade de:
 
 ### Corte funcional V1
 - `ConvertUpdateToV1` e `ConvertUpdatesToV1` normalizam payload para V1 canônico com validação agregada; V2 válido entra pelo reader interno fixture-backed e sai como V1 canônico.
+- `ConvertUpdateToV2`, `ConvertUpdatesToV2`, `MergeUpdatesV2`, `DiffUpdateV2` e `IntersectUpdateWithContentIDsV2` fornecem saída V2 explícita/opt-in, validada contra fixtures upstream; as APIs sem sufixo continuam V1-first.
 - `PersistedSnapshotFromUpdate`, `PersistedSnapshotFromUpdates` e `PersistedSnapshotFromUpdatesContext` materializam um snapshot persistível em memória, com:
   - `UpdateV1` canônico consolidado
   - `StateVector` e `DeleteSet` derivados em `Snapshot`
@@ -170,7 +171,7 @@ Status: **em execução (promoção da API pública de update em `pkg/yjsbridge`
 - activity
 - changeset
 - recursos auxiliares para auditoria e histórico
-- exposição estável de `merge/diff/intersect`, `state vector` e `content ids` com V2 válido via conversão canônica para V1 em `pkg/yjsbridge`
+- exposição estável de `merge/diff/intersect`, `state vector` e `content ids` com V2 válido via conversão canônica para V1 em `pkg/yjsbridge`, além de variantes `*V2` explícitas para saída V2 onde aplicável
 - exposição estável da superfície de protocolo sync em `pkg/yprotocol` para `SyncStep1`, `SyncStep2` e envelope de mensagens websocket, com payloads V2 válidos normalizados para V1 canônico nos caminhos mutáveis de sync
 - runtime in-process mínimo em `pkg/yprotocol` para composição local de sessão/protocolo com `Session`, `HandleProtocolMessage`, `HandleEncodedMessages`, `HandleEncodedMessagesContext` no provider e encode público de `ProtocolMessage`, ainda sem provider completo e com estado/snapshot sempre em V1 canônico
 - camada mínima de provider em `pkg/yprotocol` com `Provider`, `Open`, `Connection`, `DispatchResult`, `Persist` e `Close`, ainda sem provider completo/transporte distribuído próprio e com broadcast/update log/persistência sempre em V1 canônico
@@ -219,8 +220,14 @@ que vão sustentar a próxima etapa:
 - `pkg/ycluster` já expõe tipos estáveis de cluster, `DeterministicShardResolver`, `StaticLocalNode`, `PlacementOwnerLookup`, `StorageOwnerLookup`, `StorageLeaseStore`, `StoragePlacementDocumentSource`, membership/health com seleção dinâmica de targets saudáveis, `LeaseManager` com loop autônomo de renovação, `StorageOwnershipCoordinator`, `DocumentOwnershipRuntime`, planner/executor/controller de rebalance, métricas opcionais e interfaces mínimas de `Runtime`, resolvendo owner apenas a partir de lease ativa e válida e já compondo claim/promoção/handoff/lookup/fence/execução storage-backed compartilhada por documento;
 - `pkg/ynodeproto` já expõe o framing binário versionado do wire inter-node e payloads tipados para handshake/ack com `clientID`, sync, document update, awareness, `query-awareness`, `disconnect`, `close` e ping/pong;
 - `pkg/yprotocol.Provider` já atua como runtime local de referência do owner, com bootstrap/recovery via `snapshot + update log`, caminho fenced e context-aware em `apply`/persist/cutover, checkpoint/high-water mark persistidos com metadata de `epoch` e hooks opcionais de observabilidade para persistência/revalidação/perda de autoridade;
-- `pkg/yhttp` já expõe `OwnerAwareServer` como borda pública HTTP/WebSocket para resolver owner antes do provider local, além de promoção local opt-in quando não há owner ativo, integração opcional com `DocumentOwnershipRuntime` no `Server` local, endpoint owner-side e takeover `remote -> local`, seam typed de forwarding remoto via `RemoteOwnerDialer`/`NodeMessageStream` com normalização V2 -> V1 antes dos campos inter-node `UpdateV1`, hook de autenticação, validação de epoch do handshake inter-node owner-side, revalidação imediata de autoridade pós-rebalance e observabilidade opcional para lookup de owner, decisão de rota e relay remoto;
+- `pkg/yhttp` já expõe `OwnerAwareServer` como borda pública HTTP/WebSocket para resolver owner antes do provider local, além de autenticação/autorização/rate limit/quotas/origin policy/redaction HTTP opt-in (`Authenticator`/`Authorizer`/`RateLimiter`/`QuotaLimiter`/`OriginPolicy`/`RequestRedactor`, bearer estático, tenant boundary por namespace, fixed window local, quotas locais por conexão/tenant/documento, CORS allowlist e hashing salgado de ids como referências locais), promoção local opt-in quando não há owner ativo, integração opcional com `DocumentOwnershipRuntime` no `Server` local, endpoint owner-side e takeover `remote -> local`, seam typed de forwarding remoto via `RemoteOwnerDialer`/`NodeMessageStream` com normalização V2 -> V1 antes dos campos inter-node `UpdateV1`, hook de autenticação `RemoteOwnerAuthenticator`, autenticação inter-node por bearer dedicado ou HMAC com `key_id`, timestamp/nonce/replay protection local e rotação de segredos, validação de epoch do handshake inter-node owner-side, revalidação imediata de autoridade pós-rebalance, validadores fail-closed de configuração de produção e observabilidade opcional para lookup de owner, decisão de rota e relay remoto;
 - `pkg/storage`, `pkg/yprotocol` e `pkg/ycluster` já também expõem adapters opcionais de observabilidade com labels constantes para replay/recovery/compaction, offsets, lag de tail, epoch observado, lifecycle local do owner e control plane de lease/owner lookup; `examples/owner-aware-http-edge/observability` entrega alertas Prometheus e dashboards Grafana operacional/oráculo de referência; a próxima etapa operacional concentra SLOs reais por topologia/tenant e endurecimento para produção pública.
+
+### Segurança operacional
+
+A camada pública de `pkg/yhttp` já fornece pontos de extensão para autenticação, autorização, rate limit de entrada, quotas por conexão/frame, política de Origin/CORS, redaction de requests para métricas/erros e autenticação de handshake inter-node. Esses pontos são opt-in para preservar o modo local/de referência: quando configurados, rodam antes de abrir provider local ou resolver/encaminhar owner remoto; quando ausentes, a aplicação chamadora continua responsável por cercar a exposição pública. Para deploy público, `ValidateProductionServerConfig`, `ValidateProductionOwnerAwareConfig` e `ValidateProductionRemoteOwnerEndpointConfig` fornecem checks fail-closed explícitos.
+
+As próximas frentes de produção são enforcement distribuído e auditável de quotas, política inter-node com mTLS/gestão de chaves, rollout auditado de defaults fail-closed e calibração operacional. Quotas já cobrem, como hook local, conexões simultâneas por tenant/documento e budgets de bytes por conexão, com `ErrQuotaExceeded` mapeando para `429` e `ErrQuotaUnavailable` para `503`; deploys multi-node ainda precisam sincronizar limites e cobrir owner lookup/forwarding e custo de storage/replay. A política inter-node já suporta bearer dedicado e HMAC com `key_id`, timestamp/nonce/replay protection local e múltiplos segredos aceitos para rotação; produção ainda precisa definir distribuição segura de segredos, escopos por operação e, quando aplicável, mTLS. Origin policy já normaliza o upgrade WebSocket quando usa `StaticOriginPolicy`; redaction já tem hook e hashing de referência para requests em métricas/erro, mas deploys públicos ainda precisam padronizar dashboards, payloads HTTP/WS, logs externos e retenção.
 
 ---
 
@@ -371,7 +378,7 @@ Exemplos:
 - [x] writer lazy com compatibilidade estrutural suficiente para o escopo da Fase 2
 - [x] corte funcional V1 de snapshot persistido disponível (`PersistedSnapshotFromUpdate(s)` com `UpdateV1` canônico)
 - [x] ciclo de hidratação reversa/restore de `PersistedSnapshot` V1 está encapsulado e validado para storage operacional
-- [ ] compatibilidade V2 e conversão de formato possuem corte funcional verificável
+- [x] compatibilidade V2 e conversão de formato possuem corte funcional verificável
 - [x] integração de persistência operacional de snapshot está implementada
 
 ### Fase 3 pronta quando:
@@ -390,12 +397,15 @@ Exemplos:
 
 1. Consolidar cenários de `merge/diff/intersect` com composição estrutural mais rica.
 2. Ampliar e endurecer a integração do lazy writer no fluxo de atualização.
-3. Concluir o mapa de lacunas de compatibilidade para V2 e conversões de formato. Mapa inicial entregue em `docs/v2-compatibility-map.md`; o reader/conversão limitado já cobre operações públicas com saída V1 canônica, fixtures single-update para texto Unicode/Any aninhado/XML com atributo e fixtures multi-update upstream para texto/format/map/XML/array/subdoc/tipos aninhados, e a próxima decisão segura é se algum caminho público deve preservar saída V2.
+3. Evoluir o mapa de compatibilidade V2. O reader/encoder V2 e as APIs `*V2` opt-in já cobrem fixtures upstream single-update e multi-update; a próxima decisão segura é versionar storage/protocolo antes de qualquer saída V2 em sync, replay ou inter-node.
 4. Ligar `AuthorityFence`/`ResolveAuthorityFence` ao caminho autoritativo do provider, incluindo `apply`, persist, recovery e respostas de handoff/cutover.
 5. Evoluir failover/rebalance end-to-end em cima do bootstrap/recovery já operacional por `snapshot + update log` e da troca atômica de `epoch` já definida no storage/control plane. O corte document-level está entregue em `StorageOwnershipCoordinator.RebalanceDocument`, com planner/executor determinístico, `RebalanceController`, source por placement store, targets dinâmicos por membership/health e callback yhttp para acionar cutover/rebind imediato após rebalance.
 6. Conectar o wire tipado já exposto em `pkg/ynodeproto` ao forwarding/cutover end-to-end entre edge e owner, reduzindo seams ad hoc.
 7. Evoluir o bundle de observabilidade para ambientes reais multi-nó, com labels de deployment e SLOs por tenant quando houver multi-tenancy.
-8. Atualizar continuamente os documentos principais conforme novas divergências ou invariantes distribuídas forem observadas.
+8. Evoluir `QuotaLimiter` local para enforcement distribuído por tenant/documento/conexão, cobrindo também owner lookup, forwarding e custo de replay/storage.
+9. Tornar a autenticação inter-node uma política operacional obrigatória, combinando HMAC/bearer/mTLS, escopo, expiração, rotação e distribuição segura de chaves.
+10. Expandir redaction/origin policy e validadores fail-closed para rollout operacional auditado, incluindo logs externos, dashboards e payloads de erro antes de exposição multi-tenant pública.
+11. Atualizar continuamente os documentos principais conforme novas divergências ou invariantes distribuídas forem observadas.
 
 ---
 

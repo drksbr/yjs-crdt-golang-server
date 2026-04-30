@@ -45,7 +45,7 @@ Projeto em **Meta técnica 9 / Fase 3 em consolidação**, com promoção da API
 - `pkg/yprotocol` agora também cobre o primeiro runtime in-process mínimo de sessão/protocolo, com `Session`, `HandleProtocolMessage`, `HandleEncodedMessages` e encode público de `ProtocolMessage`, ainda sem transporte/provider completo.
 - `pkg/yprotocol` agora também cobre a camada mínima de provider acima de `Session`, com `Provider`, `Open`, `Connection`, `DispatchResult`, `Persist` e `Close`, ainda sem provider completo/transporte distribuído próprio e com V2 válido convertido para V1 antes de broadcast/persistência.
 - A API pública de persistência mínima já está disponível em `pkg/yjsbridge` para snapshots V1 (`PersistedSnapshot`, conversão, encode/decode de restore e persistência canônica), com construtores aceitando V2 válido via conversão canônica para V1.
-- A promoção da API pública de update já está refletida em `pkg/yjsbridge` (operações de merge/diff/intersect e derivados como state vector/content ids); V2 válido alimenta essas operações por conversão canônica para V1.
+- A promoção da API pública de update já está refletida em `pkg/yjsbridge` (operações de merge/diff/intersect e derivados como state vector/content ids); V2 válido alimenta essas operações por conversão canônica para V1, e variantes explícitas `*V2` já emitem saída V2 opt-in.
 - A camada de armazenamento operacional já está definida em `pkg/storage` (contratos: `SnapshotStore`, `DocumentKey`, `SnapshotRecord`, erros) com stores implementadas para memória e Postgres.
 - `pkg/storage` agora também expõe os contratos-base da persistência distribuída (`UpdateLogStore`, `PlacementStore`, `LeaseStore`, `DistributedStore`) e os registros públicos necessários para snapshot base, append log, placement e ownership efêmero.
 - `pkg/ycluster` agora expõe o scaffolding público de control plane com tipos estáveis, `DeterministicShardResolver`, `StaticLocalNode`, `PlacementOwnerLookup` e interfaces mínimas de `Runtime`.
@@ -71,7 +71,7 @@ Projeto em **Meta técnica 9 / Fase 3 em consolidação**, com promoção da API
 - Novo corte funcional em V1 de snapshot binário persistido já existe: `PersistedSnapshot` com `PersistedSnapshotFromUpdate(s)` gera, em um passo, `UpdateV1` canônico persistível e `Snapshot` materializado em memória.
 - Há também corte funcional de hidratação reversa V1 (`restore`) para `PersistedSnapshot` com `EncodePersistedSnapshotV1`, `DecodePersistedSnapshotV1` e `DecodePersistedSnapshotV1Context`.
 - O ciclo de persistência operacional já está em funcionamento via stores; `pkg/yprotocol.Provider` passa a servir como runtime local do futuro owner distribuído.
-- O bloco V2 com reader/conversão limitada, snapshots, state vector, content ids, merge, diff, intersect e sync-runtime derivados já está implementado; a cobertura multi-update já inclui `Y.mergeUpdatesV2` para texto/format, map, XML, array, subdoc e tipos aninhados. O próximo esforço V2 deve decidir se algum caminho público deve preservar saída V2 em vez de V1 canônico.
+- O bloco V2 com reader/encoder, snapshots, state vector, content ids, merge, diff, intersect e sync-runtime derivados já está implementado; a cobertura multi-update já inclui `Y.mergeUpdatesV2` para texto/format, map, XML, array, subdoc e tipos aninhados. Storage/protocolo seguem V1 canônico até existirem campos/versionamento explícitos para V2.
 
 ---
 
@@ -477,7 +477,7 @@ Os próximos passos práticos (Meta 9 -> Meta 10) ficam em:
 4. ampliar validação de produção do control loop de rebalance/failover sobre topologias reais
 5. ampliar compatibilidade estrutural de `merge/diff/intersect`
 6. ampliar o uso do lazy writer além do corte já endurecido
-7. ampliar cobertura V2 e decidir se haverá saída pública preservando wire format V2
+7. ampliar cobertura V2 e versionar storage/protocolo antes de qualquer saída V2 fora das APIs opt-in
 8. avançar para content maps
 9. avançar para attribution
 10. só então atacar recursos avançados do YHub

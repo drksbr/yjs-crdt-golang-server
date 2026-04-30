@@ -74,6 +74,8 @@ type RemoteOwnerForwardConfig struct {
 	WriteTimeout   time.Duration
 	RebindTimeout  time.Duration
 	RebindInterval time.Duration
+	OriginPolicy   OriginPolicy
+	Redactor       RequestRedactor
 	Metrics        Metrics
 	OnError        ErrorHandler
 }
@@ -88,6 +90,7 @@ type remoteOwnerForwarder struct {
 	writeTimeout   time.Duration
 	rebindTimeout  time.Duration
 	rebindInterval time.Duration
+	redactor       RequestRedactor
 	metrics        Metrics
 	onError        ErrorHandler
 }
@@ -170,17 +173,33 @@ func newRemoteOwnerForwarder(cfg RemoteOwnerForwardConfig) (*remoteOwnerForwarde
 		rebindInterval = defaultRemoteOwnerRebindInterval
 	}
 
+	redactor := cfg.Redactor
+	if redactor == nil && cfg.Local != nil {
+		redactor = cfg.Local.redactor
+	}
+
+	metrics := normalizeMetrics(cfg.Metrics)
+	if redactor != nil {
+		metrics = redactingMetrics{base: metrics, redactor: redactor}
+	}
+
+	originPolicy := cfg.OriginPolicy
+	if originPolicy == nil && cfg.Local != nil {
+		originPolicy = cfg.Local.originPolicy
+	}
+
 	forwarder := &remoteOwnerForwarder{
 		localNodeID:    cfg.LocalNodeID,
 		local:          cfg.Local,
 		dialer:         cfg.Dialer,
 		ownerLookup:    cfg.OwnerLookup,
-		acceptOptions:  cloneAcceptOptions(cfg.AcceptOptions),
+		acceptOptions:  cloneAcceptOptionsForOriginPolicy(cfg.AcceptOptions, originPolicy),
 		readLimitBytes: readLimit,
 		writeTimeout:   writeTimeout,
 		rebindTimeout:  rebindTimeout,
 		rebindInterval: rebindInterval,
-		metrics:        normalizeMetrics(cfg.Metrics),
+		redactor:       redactor,
+		metrics:        metrics,
 		onError:        cfg.OnError,
 	}
 	return forwarder, nil
@@ -200,8 +219,15 @@ func (f *remoteOwnerForwarder) handle(w http.ResponseWriter, r *http.Request, re
 	}
 
 	header := cloneHeader(r.Header)
+	quota, err := f.openQuota(r, req)
+	if err != nil {
+		status := statusFromAuthError(err)
+		http.Error(w, http.StatusText(status), status)
+		return true
+	}
 	session, err := f.openRemoteOwnerSession(r.Context(), req, resolution, epoch, header, false)
 	if err != nil {
+		f.closeQuota(r, req, quota)
 		f.metrics.Error(req, "remote_owner_open", err)
 		f.report(r, req, err)
 		status := statusFromRemoteOwnerOpenError(err)
@@ -215,11 +241,12 @@ func (f *remoteOwnerForwarder) handle(w http.ResponseWriter, r *http.Request, re
 	socket, err := websocket.Accept(w, r, f.acceptOptions)
 	if err != nil {
 		f.closeRemoteOwnerSession(r, req, session, "accept_failed", false)
+		f.closeQuota(r, req, quota)
 		return true
 	}
 	socket.SetReadLimit(f.readLimitBytes)
 
-	if err := f.serveRemoteForwardedSocket(r, req, socket, session, header, true); err != nil {
+	if err := f.serveRemoteForwardedSocket(r, req, socket, session, header, quota, true); err != nil {
 		f.metrics.Error(req, "remote_owner_forward", err)
 		f.report(r, req, err)
 	}
@@ -259,10 +286,32 @@ func (f *remoteOwnerForwarder) handleLocalAuthorityLoss(
 			handoffState.clientErrCh,
 			handoffState.upstreamPeer,
 			handoffState.cancelClient,
+			handoffState.quota,
 			&closeReason,
 		)
 	}
-	return f.serveRemoteForwardedSocket(r, req, socket, target.session, cloneHeader(r.Header), false)
+	return f.serveRemoteForwardedSocket(r, req, socket, target.session, cloneHeader(r.Header), nil, false)
+}
+
+func (f *remoteOwnerForwarder) openQuota(r *http.Request, req Request) (QuotaLease, error) {
+	if f == nil || f.local == nil {
+		return nil, nil
+	}
+	return f.local.openQuota(r, req)
+}
+
+func (f *remoteOwnerForwarder) closeQuota(r *http.Request, req Request, quota QuotaLease) {
+	if f == nil || f.local == nil {
+		return
+	}
+	f.local.closeQuota(r, req, quota)
+}
+
+func (f *remoteOwnerForwarder) allowQuotaFrame(r *http.Request, req Request, quota QuotaLease, direction QuotaDirection, bytes int) error {
+	if f == nil || f.local == nil {
+		return nil
+	}
+	return f.local.allowQuotaFrame(r, req, quota, direction, bytes)
 }
 
 func (f *remoteOwnerForwarder) serveRemoteForwardedSocket(
@@ -271,8 +320,10 @@ func (f *remoteOwnerForwarder) serveRemoteForwardedSocket(
 	socket *websocket.Conn,
 	session remoteOwnerSession,
 	header http.Header,
+	quota QuotaLease,
 	observeConnectionLifecycle bool,
 ) error {
+	defer f.closeQuota(r, req, quota)
 	if observeConnectionLifecycle {
 		f.metrics.ConnectionOpened(req)
 		defer f.metrics.ConnectionClosed(req)
@@ -284,7 +335,7 @@ func (f *remoteOwnerForwarder) serveRemoteForwardedSocket(
 	upstreamPeer.switchSession(session.stream, session.epoch)
 	clientErrCh := make(chan error, 1)
 	go func() {
-		clientErrCh <- f.pipeClientToRemote(clientCtx, req, socket, upstreamPeer)
+		clientErrCh <- f.pipeClientToRemote(clientCtx, req, socket, upstreamPeer, quota)
 	}()
 
 	closeReason := "client_closed"
@@ -301,6 +352,7 @@ func (f *remoteOwnerForwarder) serveRemoteForwardedSocket(
 		clientErrCh,
 		upstreamPeer,
 		cancelClient,
+		quota,
 		&closeReason,
 	); err != nil {
 		return err
@@ -317,6 +369,7 @@ func (f *remoteOwnerForwarder) bridgeRemoteOwnerSessions(
 	clientErrCh <-chan error,
 	upstreamPeer *switchableRemoteStreamPeer,
 	cancelClient context.CancelFunc,
+	quota QuotaLease,
 	closeReason *string,
 ) error {
 	if session == nil {
@@ -327,7 +380,7 @@ func (f *remoteOwnerForwarder) bridgeRemoteOwnerSessions(
 	}
 
 	for {
-		result := f.bridge(r, req, socket, *session, clientErrCh)
+		result := f.bridge(r, req, socket, *session, clientErrCh, quota)
 		if result.retryableSignal == nil {
 			*closeReason = result.closeReason
 			return nil
@@ -355,7 +408,7 @@ func (f *remoteOwnerForwarder) bridgeRemoteOwnerSessions(
 		if target.localResolution != nil {
 			observeOwnershipTransition(f.metrics, req, ownershipStateRemote, ownershipStateLocal, time.Since(transitionStart), nil)
 			*closeReason = "client_closed"
-			return f.takeoverLocalOwner(r, req, socket, header, clientErrCh, upstreamPeer, cancelClient, closeReason)
+			return f.takeoverLocalOwner(r, req, socket, header, clientErrCh, upstreamPeer, cancelClient, quota, closeReason)
 		}
 
 		observeOwnershipTransition(f.metrics, req, ownershipStateRemote, ownershipStateRemote, time.Since(transitionStart), nil)
@@ -504,6 +557,7 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 	clientErrCh <-chan error,
 	upstreamPeer *switchableRemoteStreamPeer,
 	cancelClient context.CancelFunc,
+	quota QuotaLease,
 	closeReason *string,
 ) error {
 	if f.local == nil {
@@ -520,7 +574,7 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 		return err
 	}
 
-	peer := &websocketPeer{conn: socket}
+	peer := quotaWrapPeer(&websocketPeer{conn: socket}, quota)
 	f.local.registry.add(req.DocumentKey, req.ConnectionID, peer)
 
 	sessionCtx, cancelSession := context.WithCancel(r.Context())
@@ -541,6 +595,7 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 		req:             req,
 		connection:      connection,
 		peer:            peer,
+		quota:           quota,
 		onAuthorityLoss: notifyAuthorityLoss,
 	})
 
@@ -578,6 +633,7 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 					clientErrCh,
 					upstreamPeer,
 					cancelClient,
+					quota,
 					closeReason,
 				)
 			}
@@ -614,6 +670,7 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 					clientErrCh,
 					upstreamPeer,
 					cancelClient,
+					quota,
 					closeReason,
 				)
 			}
@@ -628,13 +685,14 @@ func (f *remoteOwnerForwarder) bridge(
 	socket *websocket.Conn,
 	session remoteOwnerSession,
 	clientErrCh <-chan error,
+	quota QuotaLease,
 ) remoteOwnerBridgeResult {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
 	remoteErrCh := make(chan error, 1)
 	go func() {
-		remoteErrCh <- f.pipeRemoteToClient(ctx, req, session.resolution, socket, session.stream, session.epoch)
+		remoteErrCh <- f.pipeRemoteToClient(ctx, req, session.resolution, socket, session.stream, session.epoch, quota)
 	}()
 
 	for {
@@ -675,7 +733,7 @@ func (f *remoteOwnerForwarder) bridge(
 	}
 }
 
-func (f *remoteOwnerForwarder) pipeClientToRemote(ctx context.Context, req Request, socket *websocket.Conn, peer *switchableRemoteStreamPeer) error {
+func (f *remoteOwnerForwarder) pipeClientToRemote(ctx context.Context, req Request, socket *websocket.Conn, peer *switchableRemoteStreamPeer, quota QuotaLease) error {
 	for {
 		msgType, payload, err := socket.Read(ctx)
 		if err != nil {
@@ -694,6 +752,14 @@ func (f *remoteOwnerForwarder) pipeClientToRemote(ctx context.Context, req Reque
 				f.report(nil, req, closeErr)
 			}
 			return nil
+		}
+
+		if err := f.allowQuotaFrame(nil, req, quota, QuotaDirectionInbound, len(payload)); err != nil {
+			if closeErr := socket.Close(quotaCloseStatus(err), quotaCloseReason(err)); closeErr != nil && !isIgnorableTransportError(closeErr) {
+				f.metrics.Error(req, "remote_owner_close_quota", closeErr)
+				f.report(nil, req, closeErr)
+			}
+			return err
 		}
 
 		writeCtx, cancel := context.WithTimeout(ctx, f.writeTimeout)
@@ -723,6 +789,7 @@ func (f *remoteOwnerForwarder) pipeRemoteToClient(
 	socket *websocket.Conn,
 	stream NodeMessageStream,
 	epoch uint64,
+	quota QuotaLease,
 ) error {
 	for {
 		message, err := stream.Receive(ctx)
@@ -752,6 +819,13 @@ func (f *remoteOwnerForwarder) pipeRemoteToClient(
 		}
 		if len(payload) == 0 {
 			continue
+		}
+		if err := f.allowQuotaFrame(nil, req, quota, QuotaDirectionOutbound, len(payload)); err != nil {
+			if closeErr := socket.Close(quotaCloseStatus(err), quotaCloseReason(err)); closeErr != nil && !isIgnorableTransportError(closeErr) {
+				f.metrics.Error(req, "remote_owner_close_quota", closeErr)
+				f.report(nil, req, closeErr)
+			}
+			return err
 		}
 
 		writeCtx, cancel := context.WithTimeout(ctx, f.writeTimeout)
@@ -952,6 +1026,7 @@ func (p *switchableRemoteStreamPeer) switchTarget(target forwardDeliveryTarget) 
 	p.mu.Lock()
 	readyCh := p.readyCh
 	p.target = target
+	p.readyCh = nil
 	p.mu.Unlock()
 
 	if readyCh != nil {
@@ -998,6 +1073,7 @@ type localConnectionPeer struct {
 	req             Request
 	connection      *yprotocol.Connection
 	peer            roomPeer
+	quota           QuotaLease
 	onAuthorityLoss func(remoteOwnerCloseSignal)
 }
 
@@ -1036,7 +1112,7 @@ func (p *localConnectionPeer) deliver(ctx context.Context, payload []byte) error
 
 func (f *remoteOwnerForwarder) report(r *http.Request, req Request, err error) {
 	if f.onError != nil && err != nil {
-		f.onError(r, req, err)
+		f.onError(redactHTTPRequest(f.redactor, r), redactRequest(f.redactor, req), err)
 	}
 }
 

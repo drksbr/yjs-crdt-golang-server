@@ -424,6 +424,65 @@ func TestRemoteOwnerEndpointRejectsUnauthenticatedHandshake(t *testing.T) {
 	}
 }
 
+func TestRemoteOwnerEndpointAuthenticatesHTTPHeaderBearer(t *testing.T) {
+	t.Parallel()
+
+	local := newLocalHTTPServer(t, nil)
+	endpoint, err := NewRemoteOwnerEndpoint(RemoteOwnerEndpointConfig{
+		Local:        local,
+		LocalNodeID:  "node-owner",
+		Authenticate: RemoteOwnerBearerAuthenticator("node-token"),
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteOwnerEndpoint() unexpected error: %v", err)
+	}
+	srv := newHTTPTestServerWithHandler(t, endpoint)
+
+	dialer, err := NewWebSocketRemoteOwnerDialer(WebSocketRemoteOwnerDialerConfig{
+		ResolveURL: func(context.Context, RemoteOwnerDialRequest) (string, error) {
+			return "ws" + strings.TrimPrefix(srv.URL+"/ws", "http"), nil
+		},
+		AuthHeaders: RemoteOwnerBearerAuthHeaders("node-token"),
+	})
+	if err != nil {
+		t.Fatalf("NewWebSocketRemoteOwnerDialer() unexpected error: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testIOTimeout)
+	defer cancel()
+	key := testDocumentKey("room-remote-owner-http-bearer")
+	stream, err := dialer.DialRemoteOwner(ctx, RemoteOwnerDialRequest{
+		Request: Request{
+			DocumentKey:  key,
+			ConnectionID: "remote-http-bearer",
+			ClientID:     913,
+		},
+		Resolution: ycluster.OwnerResolution{
+			Placement: ycluster.Placement{NodeID: "node-owner"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("DialRemoteOwner() unexpected error: %v", err)
+	}
+	defer stream.Close()
+
+	if err := stream.Send(ctx, &ynodeproto.Handshake{
+		NodeID:       "node-edge",
+		DocumentKey:  key,
+		ConnectionID: "remote-http-bearer",
+		ClientID:     913,
+		Epoch:        63,
+	}); err != nil {
+		t.Fatalf("stream.Send(handshake) unexpected error: %v", err)
+	}
+	message, err := stream.Receive(ctx)
+	if err != nil {
+		t.Fatalf("stream.Receive() unexpected error: %v", err)
+	}
+	if _, ok := message.(*ynodeproto.HandshakeAck); !ok {
+		t.Fatal("first owner response is not HandshakeAck")
+	}
+}
+
 func TestRemoteOwnerEndpointRejectsMismatchedRoute(t *testing.T) {
 	t.Parallel()
 

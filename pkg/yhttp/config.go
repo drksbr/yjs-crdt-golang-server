@@ -1,6 +1,7 @@
 package yhttp
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -27,6 +28,7 @@ type Request struct {
 	ConnectionID   string
 	ClientID       uint32
 	PersistOnClose bool
+	Principal      *Principal
 }
 
 // ResolveRequestFunc mapeia a requisição HTTP para o documento e metadados da
@@ -36,6 +38,56 @@ type ResolveRequestFunc func(r *http.Request) (Request, error)
 // ErrorHandler recebe erros assíncronos da camada de transporte que já não
 // podem mais ser refletidos na resposta HTTP original.
 type ErrorHandler func(r *http.Request, req Request, err error)
+
+// Principal descreve a identidade autenticada associada a uma request.
+//
+// `Tenant` pode ser usado como fronteira multi-tenant contra
+// `storage.DocumentKey.Namespace`.
+type Principal struct {
+	Subject string
+	Tenant  string
+	Scopes  []string
+}
+
+// Authenticator autentica uma request HTTP antes de abrir WebSocket/provider.
+type Authenticator interface {
+	AuthenticateHTTP(ctx context.Context, r *http.Request) (*Principal, error)
+}
+
+// AuthenticatorFunc adapta uma função simples para Authenticator.
+type AuthenticatorFunc func(ctx context.Context, r *http.Request) (*Principal, error)
+
+// AuthenticateHTTP autentica a request chamando a função encapsulada.
+func (f AuthenticatorFunc) AuthenticateHTTP(ctx context.Context, r *http.Request) (*Principal, error) {
+	return f(ctx, r)
+}
+
+// Authorizer autoriza uma identidade autenticada para uma request já resolvida.
+type Authorizer interface {
+	AuthorizeHTTP(ctx context.Context, principal *Principal, req Request) error
+}
+
+// AuthorizerFunc adapta uma função simples para Authorizer.
+type AuthorizerFunc func(ctx context.Context, principal *Principal, req Request) error
+
+// AuthorizeHTTP autoriza a request chamando a função encapsulada.
+func (f AuthorizerFunc) AuthorizeHTTP(ctx context.Context, principal *Principal, req Request) error {
+	return f(ctx, principal, req)
+}
+
+// RateLimiter limita requests HTTP/WebSocket antes de abrir provider ou
+// resolver owner remoto.
+type RateLimiter interface {
+	AllowHTTP(ctx context.Context, r *http.Request, principal *Principal, req Request) error
+}
+
+// RateLimiterFunc adapta uma função simples para RateLimiter.
+type RateLimiterFunc func(ctx context.Context, r *http.Request, principal *Principal, req Request) error
+
+// AllowHTTP autoriza a request chamando a função encapsulada.
+func (f RateLimiterFunc) AllowHTTP(ctx context.Context, r *http.Request, principal *Principal, req Request) error {
+	return f(ctx, r, principal, req)
+}
 
 // AuthorityLossHandler assume um websocket ja aceito quando a sessao local
 // perde autoridade sobre o documento.
@@ -59,6 +111,12 @@ type ServerConfig struct {
 	WriteTimeout                  time.Duration
 	PersistTimeout                time.Duration
 	AuthorityRevalidationInterval time.Duration
+	Authenticator                 Authenticator
+	Authorizer                    Authorizer
+	RateLimiter                   RateLimiter
+	QuotaLimiter                  QuotaLimiter
+	OriginPolicy                  OriginPolicy
+	Redactor                      RequestRedactor
 	Metrics                       Metrics
 	OnError                       ErrorHandler
 }

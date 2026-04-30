@@ -2,40 +2,41 @@
 
 ## Current contract
 
-The project is V1-first. Update V2 is now accepted only through a narrow,
-fixture-backed reader/conversion path that materializes valid V2 payloads into
-the existing internal model and emits canonical V1 bytes.
+The project is V1-first for storage, protocol replay and the default public
+update APIs. Update V2 is supported through an explicit reader/encoder path that
+materializes valid V2 payloads into the existing internal model and can emit
+either canonical V1 bytes or opt-in canonical V2 bytes.
 
 Implemented today:
 
 - format detection distinguishes V1, V2, empty payloads and ambiguous payloads;
 - aggregate validation rejects mixed V1/V2 inputs before dispatching operations;
 - internal `DecodeV2` covers the selected upstream Yjs fixtures for text insert, Unicode text, map content, nested `Any` object/array values, binary, embed, format, nested type, XML attributes/text, subdoc, delete set and multi-client updates;
+- internal `EncodeV2` emits Yjs-compatible V2 bytes and matches upstream fixtures byte-for-byte for the covered single-update and `Y.mergeUpdatesV2` multi-update matrix;
 - `DecodeUpdate`, `ConvertUpdateToV1`, `ConvertUpdatesToV1`, persisted snapshot constructors, direct snapshot extraction, state-vector extraction, content-id extraction, merge, diff and intersect can convert valid V2 payloads into canonical V1-backed results;
+- explicit opt-in APIs `ConvertUpdateToV2`, `ConvertUpdatesToV2`, `MergeUpdatesV2`, `DiffUpdateV2` and `IntersectUpdateWithContentIDsV2` emit canonical V2 bytes while preserving the V1-first default behavior of the existing APIs;
 - `pkg/yprotocol.Session` and `pkg/yprotocol.Provider` normalize valid V2 sync update/step2 payloads to canonical V1 before updating room state, broadcasting, appending to update logs or persisting snapshots;
 - `pkg/yhttp` normalizes valid V2 sync payloads to canonical V1 before forwarding them through `ynodeproto` `UpdateV1` fields between edge and owner;
 - upstream multi-update fixtures cover text append across clients, text delete after insert, formatting over deleted text, independent and overwritten map sets, nested-map child writes, XML element/text updates, array delete ranges and subdoc follow-up map updates, including `Y.mergeUpdatesV2` payloads;
-- malformed V2 inputs cover side-channel truncation, inconsistent string table lengths, delete-set overflow, invalid `parentInfo`, oversized decoded collections and unused `keyClock` values when no key was consumed;
-- malformed V2 inputs also reject unused values in consumed side-channel encoders such as `client` and `info`;
+- malformed V2 inputs cover side-channel truncation, truncated/invalid RLE and varint side-channel payloads, inconsistent string table lengths, delete-set overflow, invalid `parentInfo`, oversized top-level and nested `Any` collections, and unused `keyClock` values when no key was consumed;
+- malformed V2 inputs also reject unused values in consumed side-channel encoders such as `client`, `leftClock`, `rightClock`, `info`, `strings`, `parentInfo`, `typeRef` and `lengths`;
 - V1 persisted snapshots remain canonical and `DecodePersistedSnapshotV1` explicitly rejects V2 restore payloads.
 
-## Known gaps
+## Remaining gaps
 
-- no V2 encoder exists;
-- public APIs return canonical V1 bytes for V2 inputs; preserving V2 output is not implemented;
-- storage, protocol and inter-node forwarding layers only persist, forward and serve canonical V1 updates; V2-preserving protocol output is not implemented;
+- storage, protocol and inter-node forwarding layers intentionally persist, forward and serve canonical V1 updates; V2-preserving protocol output is not implemented;
 - full `keyClock` side-channel drain validation remains deferred only for XML/format key-cache paths that already consumed keys;
-- V2 support is still fixture-backed and should be expanded with more upstream equivalence cases before considering V2 output preservation.
+- V2 support should keep expanding with more upstream equivalence cases before changing any default V1-first behavior.
 
 ## Next implementation block
 
-The next safe V2 block is broader upstream fixture coverage plus an explicit
-decision about V2 output preservation.
+The next safe V2 block is protocol/storage design work, not a hidden default
+behavior change.
 
-1. Add upstream fixtures for any newly discovered transactional edge cases before changing V2 output behavior.
+1. Add upstream fixtures for any newly discovered transactional edge cases before changing V2 behavior.
 2. Expand equivalence tests for `MergeUpdates`, `DiffUpdate` and `IntersectUpdateWithContentIDs` beyond the current fixture matrix.
-3. Decide whether public V2 merge/diff/intersect should keep returning canonical V1 bytes or eventually preserve V2 output.
-4. Keep storage/protocol V2 output disabled until a V2 encoder and compatibility matrix exist.
+3. Keep storage/protocol V2 output disabled until the inter-node and persisted wire contracts gain explicit V2 fields/versioning.
+4. If V2 sync output is needed later, introduce explicit `*V2` protocol helpers instead of changing current V1 helpers.
 5. Keep sync-runtime regressions proving that accepted V2 input is never replayed or broadcast as V2 bytes.
 
 ## Acceptance criteria for enabling the first V2 slice
@@ -43,5 +44,6 @@ decision about V2 output preservation.
 - fixtures are generated by upstream Yjs and checked into tests with a short description of the document operation that produced each fixture.
 - V2-derived snapshot/state vector/content IDs match the same operation after `ConvertUpdateToV1`.
 - V2 merge/diff/intersect match the same operation after `ConvertUpdateToV1` and return canonical V1 bytes.
+- opt-in V2 output APIs emit payloads detected as V2 and convert back to the expected canonical V1 payload.
 - malformed V2 inputs fail deterministically with parser errors, not panics.
 - restore-only paths such as `DecodePersistedSnapshotV1` continue returning `ErrUnsupportedUpdateFormatV2` for V2 restore payloads.

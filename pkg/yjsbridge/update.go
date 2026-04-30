@@ -86,9 +86,19 @@ func ConvertUpdateToV1(update []byte) ([]byte, error) {
 	return yupdate.ConvertUpdateToV1(update)
 }
 
+// ConvertUpdateToV2 normaliza um update suportado para a forma canônica V2.
+func ConvertUpdateToV2(update []byte) ([]byte, error) {
+	return yupdate.ConvertUpdateToV2(update)
+}
+
 // ConvertUpdatesToV1 consolida múltiplos payloads em um único update V1 canônico.
 func ConvertUpdatesToV1(updates ...[]byte) ([]byte, error) {
 	return yupdate.ConvertUpdatesToV1(updates...)
+}
+
+// ConvertUpdatesToV2 consolida múltiplos payloads em um único update V2 canônico.
+func ConvertUpdatesToV2(updates ...[]byte) ([]byte, error) {
+	return yupdate.ConvertUpdatesToV2(updates...)
 }
 
 // ConvertUpdatesToV1Context consolida múltiplos payloads respeitando cancelamento.
@@ -99,9 +109,22 @@ func ConvertUpdatesToV1Context(ctx context.Context, updates ...[]byte) ([]byte, 
 	return yupdate.ConvertUpdatesToV1Context(ctx, updates...)
 }
 
+// ConvertUpdatesToV2Context consolida múltiplos payloads em V2 respeitando cancelamento.
+func ConvertUpdatesToV2Context(ctx context.Context, updates ...[]byte) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return yupdate.ConvertUpdatesToV2Context(ctx, updates...)
+}
+
 // MergeUpdates consolida múltiplos updates em um único payload canônico V1.
 func MergeUpdates(updates ...[]byte) ([]byte, error) {
 	return yupdate.MergeUpdates(updates...)
+}
+
+// MergeUpdatesV2 consolida múltiplos updates em um único payload canônico V2.
+func MergeUpdatesV2(updates ...[]byte) ([]byte, error) {
+	return yupdate.MergeUpdatesV2(updates...)
 }
 
 // MergeUpdatesContext consolida múltiplos updates em V1 respeitando cancelamento.
@@ -112,9 +135,22 @@ func MergeUpdatesContext(ctx context.Context, updates ...[]byte) ([]byte, error)
 	return yupdate.MergeUpdatesContext(ctx, updates...)
 }
 
+// MergeUpdatesV2Context consolida múltiplos updates em V2 respeitando cancelamento.
+func MergeUpdatesV2Context(ctx context.Context, updates ...[]byte) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return yupdate.MergeUpdatesV2Context(ctx, updates...)
+}
+
 // DiffUpdate retorna a parte do update ainda não coberta pelo state vector em V1.
 func DiffUpdate(update, stateVector []byte) ([]byte, error) {
 	return yupdate.DiffUpdate(update, stateVector)
+}
+
+// DiffUpdateV2 retorna a parte do update ainda não coberta pelo state vector em V2.
+func DiffUpdateV2(update, stateVector []byte) ([]byte, error) {
+	return yupdate.DiffUpdateV2(update, stateVector)
 }
 
 // DiffUpdateContext retorna o diff em V1 respeitando cancelamento.
@@ -123,6 +159,14 @@ func DiffUpdateContext(ctx context.Context, update, stateVector []byte) ([]byte,
 		ctx = context.Background()
 	}
 	return yupdate.DiffUpdateContext(ctx, update, stateVector)
+}
+
+// DiffUpdateV2Context retorna o diff em V2 respeitando cancelamento.
+func DiffUpdateV2Context(ctx context.Context, update, stateVector []byte) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return yupdate.DiffUpdateV2Context(ctx, update, stateVector)
 }
 
 // DecodeStateVector decodifica um state vector serializado.
@@ -201,10 +245,23 @@ func IntersectUpdateWithContentIDs(update []byte, contentIDs *ContentIDs) ([]byt
 	return yupdate.IntersectUpdateWithContentIDs(update, contentIDs.toInternal())
 }
 
+// IntersectUpdateWithContentIDsV2 filtra um update e retorna payload V2.
+func IntersectUpdateWithContentIDsV2(update []byte, contentIDs *ContentIDs) ([]byte, error) {
+	return yupdate.IntersectUpdateWithContentIDsV2(update, contentIDs.toInternal())
+}
+
 // IntersectUpdateWithContentIDsContext filtra um update em V1 respeitando cancelamento.
 func IntersectUpdateWithContentIDsContext(ctx context.Context, update []byte, contentIDs *ContentIDs) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return yupdate.IntersectUpdateWithContentIDsContext(ctx, update, contentIDs.toInternal())
+}
+
+// IntersectUpdateWithContentIDsV2Context filtra um update em V2 respeitando cancelamento.
+func IntersectUpdateWithContentIDsV2Context(ctx context.Context, update []byte, contentIDs *ContentIDs) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return yupdate.IntersectUpdateWithContentIDsV2Context(ctx, update, contentIDs.toInternal())
 }

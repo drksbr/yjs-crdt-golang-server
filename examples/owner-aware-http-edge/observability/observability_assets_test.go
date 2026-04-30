@@ -143,6 +143,65 @@ func TestPrometheusSLORulesCoverProductionDimensions(t *testing.T) {
 	}
 }
 
+func TestPrometheusRulesAvoidCounterFunctionsOnKnownGauges(t *testing.T) {
+	t.Parallel()
+
+	knownGauges := []string{
+		"yjsbridge_storage_replay_through_offset",
+		"yjsbridge_storage_replay_last_epoch",
+		"yjsbridge_storage_recovery_checkpoint_offset",
+		"yjsbridge_storage_recovery_last_offset",
+		"yjsbridge_storage_recovery_tail_lag_updates",
+		"yjsbridge_storage_recovery_last_epoch",
+		"yjsbridge_storage_compaction_through_offset",
+		"yjsbridge_storage_compaction_last_epoch",
+	}
+
+	for _, path := range []string{"prometheus-rules.yml", "prometheus-slo-rules.yml"} {
+		path := path
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+
+			rules := readPrometheusRules(t, path)
+			for _, group := range rules.Groups {
+				for _, rule := range group.Rules {
+					for _, gauge := range knownGauges {
+						if strings.Contains(rule.Expr, "rate("+gauge+"[") || strings.Contains(rule.Expr, "increase("+gauge+"[") {
+							t.Fatalf("%q rule %q uses counter function on gauge %q: %s", path, ruleName(rule), gauge, rule.Expr)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestPrometheusRulesUseAnchoredNegativeRegexes(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{"prometheus-rules.yml", "prometheus-slo-rules.yml"} {
+		path := path
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+
+			rules := readPrometheusRules(t, path)
+			for _, group := range rules.Groups {
+				for _, rule := range group.Rules {
+					if !strings.Contains(rule.Expr, "!~") {
+						continue
+					}
+					for _, fragment := range strings.Split(rule.Expr, "!~")[1:] {
+						fragment = strings.TrimSpace(fragment)
+						if !strings.HasPrefix(fragment, `"^`) {
+							t.Fatalf("%q rule %q has unanchored negative regex in expr: %s", path, ruleName(rule), rule.Expr)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 func readPrometheusRules(t *testing.T, path string) prometheusRuleFile {
 	t.Helper()
 
@@ -156,4 +215,11 @@ func readPrometheusRules(t *testing.T, path string) prometheusRuleFile {
 		t.Fatalf("yaml.Unmarshal(%q) unexpected error: %v", path, err)
 	}
 	return rules
+}
+
+func ruleName(rule prometheusRule) string {
+	if rule.Alert != "" {
+		return rule.Alert
+	}
+	return rule.Record
 }

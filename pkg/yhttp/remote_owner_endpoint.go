@@ -39,6 +39,7 @@ type RemoteOwnerAuthRequest struct {
 	ClientID     uint32
 	Epoch        uint64
 	Flags        ynodeproto.Flags
+	Header       http.Header
 }
 
 // RemoteOwnerEndpoint materializa conexões roteadas vindas de outros nós
@@ -93,7 +94,7 @@ func (e *RemoteOwnerEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	socket.SetReadLimit(e.readLimitBytes)
 
 	stream := newWebSocketNodeMessageStream(socket)
-	if err := e.ServeStream(r.Context(), stream); err != nil && !isIgnorableNodeStreamError(err) {
+	if err := e.serveStream(r.Context(), stream, cloneHeader(r.Header)); err != nil && !isIgnorableNodeStreamError(err) {
 		_ = socket.Close(websocket.StatusPolicyViolation, "falha ao materializar owner remoto")
 	}
 }
@@ -101,6 +102,10 @@ func (e *RemoteOwnerEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 // ServeStream consome um `NodeMessageStream` tipado e o integra ao room local
 // do owner usando a mesma lógica de `Provider`/fanout do `Server`.
 func (e *RemoteOwnerEndpoint) ServeStream(ctx context.Context, stream NodeMessageStream) (err error) {
+	return e.serveStream(ctx, stream, nil)
+}
+
+func (e *RemoteOwnerEndpoint) serveStream(ctx context.Context, stream NodeMessageStream, header http.Header) (err error) {
 	if stream == nil {
 		return ErrNilNodeMessageStream
 	}
@@ -117,7 +122,7 @@ func (e *RemoteOwnerEndpoint) ServeStream(ctx context.Context, stream NodeMessag
 
 	req := requestFromHandshake(handshake)
 	observeRemoteOwnerMessage(e.local.metrics, req, remoteOwnerMetricsRoleOwner, remoteOwnerMetricsDirectionIn, nodeMessageMetricKind(handshake))
-	if err := e.authenticateHandshake(ctx, handshake); err != nil {
+	if err := e.authenticateHandshake(ctx, handshake, header); err != nil {
 		observeRemoteOwnerHandshake(e.local.metrics, req, remoteOwnerMetricsRoleOwner, time.Since(handshakeStart), err)
 		e.local.metrics.Error(req, "remote_owner_authenticate", err)
 		e.local.report(nil, req, err)
@@ -272,7 +277,7 @@ func (e *RemoteOwnerEndpoint) receiveHandshake(ctx context.Context, stream NodeM
 	return handshake, nil
 }
 
-func (e *RemoteOwnerEndpoint) authenticateHandshake(ctx context.Context, handshake *ynodeproto.Handshake) error {
+func (e *RemoteOwnerEndpoint) authenticateHandshake(ctx context.Context, handshake *ynodeproto.Handshake, header http.Header) error {
 	if e == nil || e.authenticate == nil {
 		return nil
 	}
@@ -283,6 +288,7 @@ func (e *RemoteOwnerEndpoint) authenticateHandshake(ctx context.Context, handsha
 		ClientID:     handshake.ClientID,
 		Epoch:        handshake.Epoch,
 		Flags:        handshake.Flags,
+		Header:       cloneHeader(header),
 	})
 }
 

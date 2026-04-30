@@ -1,0 +1,542 @@
+# yjs-crdt-golang-server
+
+Go module path:
+
+```text
+github.com/drksbr/yjs-crdt-golang-server
+```
+
+This repository is a Go foundation for collaborative document systems compatible
+with the Yjs ecosystem. It is infrastructure, not a full product.
+
+Use this file as the first stop when an LLM needs to build on top of the repo.
+The goal is to answer:
+
+- which package to import;
+- which function to call;
+- which APIs are V1-first and which APIs emit V2 explicitly;
+- which parts belong to the application versus the collaboration core.
+
+## Non-negotiable rules
+
+- The project is V1-first by default.
+- APIs without a `V2` suffix return canonical Yjs Update V1 bytes.
+- V2 output exists only through explicit opt-in APIs.
+- Storage, protocol replay, and inter-node messages stay canonical V1 unless
+  the wire contract is explicitly versioned.
+- Do not import `internal/...` packages from application code.
+- OAuth/OIDC, user catalogs, ACL/RBAC/ABAC, search, titles, folders, tags, and
+  document link semantics belong to the consuming application.
+
+## Recommended architecture
+
+1. Use `pkg/yjsbridge` for update conversion, merge, diff, state vectors,
+   content IDs, and snapshots.
+2. Use `pkg/storage` for persistence contracts and durable state.
+3. Use `pkg/yprotocol` for the in-process collaborative runtime.
+4. Use `pkg/yhttp` for HTTP/WebSocket transport and auth/rate-limit/quota/origin
+   hooks.
+5. Use `pkg/ycluster` for ownership, leases, shard resolution, and rebalance.
+6. Use `pkg/yawareness` for presence/awareness state.
+7. Use `pkg/ynodeproto` for typed inter-node frames and messages.
+
+## Common build patterns
+
+### Single-node collaborative service
+
+1. Accept request -> authenticate in app.
+2. Resolve document key.
+3. Load/update snapshot from `pkg/storage`.
+4. Use `pkg/yprotocol.Provider` or `pkg/yprotocol.Session` to apply sync.
+5. Persist snapshot and update log.
+6. Expose HTTP/WebSocket via `pkg/yhttp`.
+
+### Owner-aware distributed service
+
+1. Resolve owner via `pkg/ycluster`.
+2. Revalidate authority through lease/epoch/fence.
+3. Route locally or forward to remote owner.
+4. Keep replay/persistence canonical V1 unless a future wire version changes.
+
+### Explicit V2 output
+
+Use the `*V2` helpers only when the caller explicitly wants V2 bytes:
+
+- `ConvertUpdateToV2`
+- `ConvertUpdatesToV2`
+- `MergeUpdatesV2`
+- `DiffUpdateV2`
+- `IntersectUpdateWithContentIDsV2`
+
+## Package reference
+
+### `pkg/yjsbridge`
+
+Use this package for update normalization, merge/diff/intersect, state vectors,
+content IDs, and persisted snapshots.
+
+#### When to use
+
+- normalize any supported update before storage or replay;
+- merge multiple updates into one canonical payload;
+- compute a diff against a state vector;
+- filter an update by content IDs;
+- build or restore persisted snapshots;
+- convert between Update V1 and Update V2 explicitly.
+
+#### Function index
+
+- `FormatFromUpdate(update []byte)`: detect the update format for a single payload. Use before dispatching format-specific logic.
+- `FormatFromUpdates(updates ...[]byte)`: detect the common format for multiple payloads.
+- `FormatFromUpdatesContext(ctx, updates...)`: same as above, but honors cancellation.
+- `ConvertUpdateToV1(update []byte)`: normalize one supported update to canonical V1.
+- `ConvertUpdatesToV1(updates ...[]byte)`: normalize many updates to one canonical V1 payload.
+- `ConvertUpdatesToV1Context(ctx, updates...)`: same as above with cancellation.
+- `ConvertUpdateToV2(update []byte)`: normalize one supported update to canonical V2. Use only when explicit V2 output is needed.
+- `ConvertUpdatesToV2(updates ...[]byte)`: normalize many updates to one canonical V2 payload.
+- `ConvertUpdatesToV2Context(ctx, updates...)`: same as above with cancellation.
+- `MergeUpdates(updates ...[]byte)`: merge many updates into one canonical V1 payload.
+- `MergeUpdatesContext(ctx, updates...)`: same as above with cancellation.
+- `MergeUpdatesV2(updates ...[]byte)`: merge many updates into one canonical V2 payload.
+- `MergeUpdatesV2Context(ctx, updates...)`: same as above with cancellation.
+- `DiffUpdate(update, stateVector []byte)`: compute the missing part of an update as canonical V1.
+- `DiffUpdateContext(ctx, update, stateVector []byte)`: same as above with cancellation.
+- `DiffUpdateV2(update, stateVector []byte)`: compute the missing part as canonical V2.
+- `DiffUpdateV2Context(ctx, update, stateVector []byte)`: same as above with cancellation.
+- `IntersectUpdateWithContentIDs(update, contentIDs)`: filter an update to the requested content IDs and return V1.
+- `IntersectUpdateWithContentIDsContext(ctx, update, contentIDs)`: same as above with cancellation.
+- `IntersectUpdateWithContentIDsV2(update, contentIDs)`: same filter, but return V2.
+- `IntersectUpdateWithContentIDsV2Context(ctx, update, contentIDs)`: same as above with cancellation.
+- `StateVectorFromUpdate(update []byte)`: extract a state vector map from one update.
+- `StateVectorFromUpdates(updates ...[]byte)`: aggregate state vectors from many updates.
+- `StateVectorFromUpdatesContext(ctx, updates...)`: same as above with cancellation.
+- `EncodeStateVectorFromUpdate(update []byte)`: encode the state vector from one update.
+- `EncodeStateVectorFromUpdates(updates ...[]byte)`: encode the aggregate state vector from many updates.
+- `EncodeStateVectorFromUpdatesContext(ctx, updates...)`: same as above with cancellation.
+- `DecodeStateVector(data []byte)`: decode a serialized state vector into a map.
+- `CreateContentIDsFromUpdate(update []byte)`: extract content IDs from one update.
+- `ContentIDsFromUpdates(updates ...[]byte)`: aggregate content IDs from many updates.
+- `ContentIDsFromUpdatesContext(ctx, updates...)`: same as above with cancellation.
+- `EncodeContentIDs(contentIDs)`: serialize content IDs into the stable public payload.
+- `DecodeContentIDs(data []byte)`: decode the stable public content ID payload.
+- `MergeContentIDs(a, b...)`: merge content ID sets.
+- `IntersectContentIDs(a, b)`: intersect content ID sets.
+- `DiffContentIDs(subject, remove)`: subtract one content ID set from another.
+- `IsSubsetContentIDs(subject, container)`: test set inclusion.
+- `SnapshotFromUpdate(update []byte)`: build a materialized snapshot from one update.
+- `SnapshotFromUpdates(updates ...[]byte)`: build a snapshot from many updates.
+- `SnapshotFromUpdatesContext(ctx, updates...)`: same as above with cancellation.
+- `PersistedSnapshotFromUpdate(update []byte)`: build a persistable snapshot from one update.
+- `PersistedSnapshotFromUpdates(updates ...[]byte)`: build a persistable snapshot from many updates.
+- `PersistedSnapshotFromUpdatesContext(ctx, updates...)`: same as above with cancellation.
+- `EncodePersistedSnapshotV1(snapshot)`: serialize a persisted snapshot in V1.
+- `DecodePersistedSnapshotV1(payload []byte)`: restore a persisted snapshot from V1 bytes.
+- `DecodePersistedSnapshotV1Context(ctx, payload)`: same as above with cancellation.
+
+#### Key types and methods
+
+- `ContentIDs`: `Clone`, `IsEmpty`, `AddInsert`, `AddDelete`, `InsertRanges`, `DeleteRanges`.
+- Package-level content ID helpers: `NewContentIDs`, `CreateContentIDsFromUpdate`, `ContentIDsFromUpdates`, `ContentIDsFromUpdatesContext`, `EncodeContentIDs`, `DecodeContentIDs`, `MergeContentIDs`, `IntersectContentIDs`, `DiffContentIDs`, `IsSubsetContentIDs`.
+- `Snapshot`: `NewSnapshot`.
+- `PersistedSnapshot`: `NewPersistedSnapshot`.
+- `UpdateFormat`: returned by the format detection helpers.
+- `ParseError`: structured parsing error with offset context.
+
+#### Usage notes
+
+- Use `ConvertUpdateToV1` before storage, replay, or V1-only downstreams.
+- Use `ConvertUpdateToV2` only when the caller explicitly wants V2 bytes.
+- Use `PersistedSnapshotFromUpdates` when the application wants durable state
+  plus a normalized snapshot in one step.
+
+### `pkg/yprotocol`
+
+Use this package for the in-process collaborative runtime and Yjs protocol
+encoding/decoding.
+
+#### When to use
+
+- run a local document room in process;
+- apply sync payloads and awareness updates;
+- bootstrap a room from persisted state;
+- encode/decode protocol envelopes;
+- bridge storage-backed persistence to the room runtime.
+
+#### Function index
+
+- `EncodeProtocolMessage(protocol, payload)`: encode one protocol envelope message.
+- `EncodeProtocolEnvelope(message)`: encode a typed protocol envelope.
+- `EncodeProtocolEnvelopes(messages...)`: encode many envelope messages.
+- `EncodeProtocolSyncMessage(typ, payload)`: encode a sync message inside a protocol envelope.
+- `EncodeProtocolSyncUpdate(update)`: wrap a raw update as a sync message.
+- `EncodeProtocolSyncStep1(stateVector)`: encode a sync step 1 payload.
+- `EncodeProtocolSyncStep1FromUpdate(update)`: derive sync step 1 from one update.
+- `EncodeProtocolSyncStep1FromUpdates(updates...)`: derive sync step 1 from many updates.
+- `EncodeProtocolSyncStep1FromUpdatesContext(ctx, updates...)`: same as above with cancellation.
+- `EncodeProtocolSyncStep2(update)`: encode a sync step 2 payload.
+- `EncodeProtocolSyncStep2FromUpdates(updates...)`: derive sync step 2 from many updates.
+- `EncodeProtocolSyncStep2FromUpdatesContext(ctx, updates...)`: same as above with cancellation.
+- `EncodeProtocolQueryAwareness()`: encode a query-awareness message.
+- `EncodeProtocolAwarenessUpdate(update)`: encode an awareness update in protocol form.
+- `EncodeProtocolAuthMessage(typ, reason)`: encode an auth message in protocol form.
+- `EncodeProtocolAuthPermissionDenied(reason)`: encode a permission-denied auth message.
+- `DecodeProtocolMessage(src)`: decode a single protocol envelope.
+- `DecodeProtocolMessages(src)`: decode many protocol envelopes.
+- `ReadProtocolMessagesFromStream(ctx, stream)`: read envelopes from a stream until EOF or cancellation.
+- `ReadProtocolMessagesFromStreamN(ctx, stream, n)`: read `n` envelopes from a stream.
+- `ReadProtocolMessagesFromStreamNWithLimit(ctx, stream, n, limitBytes)`: same as above with a byte cap.
+- `DecodeProtocolSyncMessage(src)`: decode a protocol sync message.
+- `DecodeSyncMessage(src)`: decode a raw sync message.
+- `DecodeProtocolQueryAwareness(src)`: decode a query-awareness message.
+- `DecodeProtocolAwarenessUpdate(src)`: decode an awareness update.
+- `EncodeSyncMessage(typ, payload)`: encode a raw sync message.
+- `EncodeSyncUpdate(update)`: wrap a raw update as sync.
+- `EncodeSyncStep1(stateVector)`: encode sync step 1.
+- `EncodeSyncStep1FromUpdate(update)`: derive sync step 1 from one update.
+- `EncodeSyncStep1FromUpdates(updates...)`: derive sync step 1 from many updates.
+- `EncodeSyncStep1FromUpdatesContext(ctx, updates...)`: same as above with cancellation.
+- `EncodeSyncStep2(update)`: encode sync step 2.
+- `EncodeSyncStep2FromUpdates(updates...)`: derive sync step 2 from many updates.
+- `EncodeSyncStep2FromUpdatesContext(ctx, updates...)`: same as above with cancellation.
+- `EncodeAuthMessage(typ, reason)`: encode a raw auth message.
+- `EncodeAuthPermissionDenied(reason)`: encode a raw permission-denied auth message.
+
+#### Key types and methods
+
+- `Session`: `Awareness`, `HandleEncodedMessages`, `HandleProtocolMessage`, `HandleProtocolMessages`, `LoadUpdate`, `LoadPersistedSnapshot`, `PersistedSnapshot`, `UpdateV1`.
+- `Provider`: `Open`.
+- `Connection`: `ID`, `ClientID`, `DocumentKey`, `AuthorityEpoch`, `AuthorityLost`, `HandleEncodedMessages`, `HandleEncodedMessagesContext`, `Persist`, `RevalidateAuthority`, `Close`.
+- `ProtocolMessage`: envelope with sync, awareness, auth, or query-awareness payloads.
+- `ProviderConfig`: inject `Store`, `ResolveAuthorityFence`, `Metrics`, `StorageMetrics`.
+- `DispatchResult`: `Direct` is for the caller; `Broadcast` is for the room peers.
+
+#### Usage notes
+
+- Use `Session` for a minimal in-process sync runtime.
+- Use `Provider` when multiple connections share one room and one snapshot.
+- Use `Connection` when the application wants per-connection lifecycle and
+  persistence.
+- Valid Update V2 input is accepted, but the runtime normalizes to canonical V1
+  before broadcast and persistence.
+
+### `pkg/yhttp`
+
+Use this package for HTTP/WebSocket transport, owner-aware routing, and the
+security hooks around the collaboration runtime.
+
+#### When to use
+
+- expose a collaboration endpoint over HTTP and WebSocket;
+- authenticate and authorize requests;
+- enforce rate limits, quotas, and origin policy;
+- route a room to its owner or local runtime;
+- revalidate authority after rebalance or handoff;
+- proxy to a remote owner through the typed inter-node transport.
+
+#### Function index
+
+- `NewServer(cfg)`: build the base HTTP/WebSocket collaboration server.
+- `NewOwnerAwareServer(cfg)`: build the owner-aware edge router.
+- `NewRemoteOwnerEndpoint(cfg)`: build the owner-side endpoint that accepts forwarded traffic.
+- `NewWebSocketRemoteOwnerDialer(cfg)`: build a WebSocket-based remote owner dialer.
+- `NewRemoteOwnerForwardHandler(cfg)`: build a handler that forwards to the remote owner.
+- `NewRemoteOwnerForwardHandlers(cfg)`: build the forward and authority-loss handlers together.
+- `NewRebalanceAuthorityRevalidationCallback(cfg)`: build a callback that revalidates authority after rebalance decisions.
+- `NewInMemoryRemoteOwnerNonceStore(cfg)`: build the reference nonce store for replay protection.
+- `NewFixedWindowRateLimiter(cfg)`: build the reference fixed-window rate limiter.
+- `NewLocalQuotaLimiter(cfg)`: build the reference in-memory quota limiter.
+- `RemoteOwnerBearerAuthHeaders(token)`: build static bearer auth headers for inter-node calls.
+- `RemoteOwnerHMACAuthHeaders(cfg)`: build HMAC auth headers for inter-node calls.
+- `RemoteOwnerBearerAuthenticator(tokens...)`: validate inter-node bearer auth.
+- `RemoteOwnerHMACAuthenticator(cfg)`: validate inter-node HMAC auth and replay protection.
+- `RateLimitByPrincipalOrRemoteAddr(r, principal, req)`: build a rate-limit key from the authenticated principal or the remote address.
+- `RateLimitByTenant(r, principal, req)`: build a rate-limit key scoped by tenant.
+- `RateLimitByDocument(r, principal, req)`: build a rate-limit key scoped by document.
+- `ValidateProductionServerConfig(cfg)`: fail closed on incomplete production server config.
+- `ValidateProductionOwnerAwareConfig(cfg)`: fail closed on incomplete owner-aware config.
+- `ValidateProductionRemoteOwnerEndpointConfig(cfg)`: fail closed on incomplete remote owner endpoint config.
+
+#### Security and transport helpers
+
+- `Authenticator`, `Authorizer`, `RateLimiter`, `QuotaLimiter`, `OriginPolicy`,
+  `RequestRedactor`, `RemoteOwnerAuthenticator`, `RemoteOwnerDialer`, and
+  `RemoteOwnerNonceStore` are opt-in interfaces for application wiring.
+- `BearerTokenAuthenticator` is the simplest HTTP auth reference.
+- `TenantAuthorizer` is the simplest tenant boundary reference.
+- `FixedWindowRateLimiter` is a local reference, not distributed enforcement.
+- `LocalQuotaLimiter` is a local reference, not distributed enforcement.
+- `StaticOriginPolicy` is a strict CORS allowlist and preflight helper.
+- `HashingRequestRedactor` hashes request metadata before metrics/logs.
+- `RemoteOwnerHMAC*` helpers give the simplest secure inter-node reference path.
+
+#### Key types and methods
+
+- `Server`: `ServeHTTP`, `RevalidateDocumentAuthority`.
+- `OwnerAwareServer`: `ServeHTTP`.
+- `RemoteOwnerEndpoint`: `ServeHTTP`, `ServeStream`, `ServeNodeStream`.
+- `BearerTokenAuthenticator`: `AuthenticateHTTP`.
+- `FixedWindowRateLimiter`: `AllowHTTP`.
+- `LocalQuotaLimiter`: `OpenQuota`.
+- `StaticOriginPolicy`: `CheckHTTPOrigin`, `HandleCORSPreflight`, `WriteCORSHeaders`.
+- `TenantAuthorizer`: `AuthorizeHTTP`.
+- `HashingRequestRedactor`: `RedactHTTPRequest`, `RedactRequest`.
+
+#### Usage notes
+
+- Use `pkg/yhttp` at the edge, not inside application business logic.
+- The application should provide OAuth/OIDC identity and convert it into the
+  auth/authorization hooks exposed here.
+- Valid Update V2 input may enter the edge, but downstream owner state and
+  inter-node messages stay V1 canonical unless you version the wire contract.
+
+### `pkg/storage`
+
+Use this package for persistence contracts and helper functions that compose
+`snapshot + update log` and distributed ownership primitives.
+
+#### When to use
+
+- store and restore persisted document state;
+- replay update logs from a base snapshot;
+- compact update logs;
+- manage snapshot, placement, and lease contracts;
+- bridge local runtime state to durable storage.
+
+#### Function index
+
+- `ContextWithMetrics(ctx, metrics)`: attach storage metrics to a context.
+- `NewLeaseStaleEpochError(shardID, current, incoming)`: build a typed stale-epoch error.
+- `ReplaySnapshot(ctx, base, updates, ...)`: rebuild a persisted snapshot by replaying updates on top of a base snapshot.
+- `RecoverSnapshot(ctx, snapshots, updates, ...)`: recover a document state from snapshot and update-log stores.
+- `ReplayUpdateLog(store, key, base, ...)`: replay a single update log into a snapshot.
+- `ReplayUpdateLogContext(ctx, store, key, base, ...)`: same as above with cancellation.
+- `CompactUpdateLog(store, key, base, ...)`: compact an update log against a base snapshot.
+- `CompactUpdateLogContext(ctx, store, key, base, ...)`: same as above with cancellation.
+- `CompactUpdateLogAuthoritative(store, key, ...)`: compact authoritative snapshot/update-log stores.
+- `CompactUpdateLogAuthoritativeContext(ctx, store, key, ...)`: same as above with cancellation.
+
+#### Key types and contracts
+
+- `DocumentKey`: document identity. Use `Validate`.
+- `OwnerInfo`: stable owner identity for leases. Use `Validate`.
+- `AuthorityFence`: authoritative owner/epoch/token fence. Use `Validate` and `Clone`.
+- `LeaseRecord`: lease lifecycle record. Use `Validate` and `Clone`.
+- `PlacementRecord`: document-to-shard mapping. Use `Validate` and `Clone`.
+- `SnapshotRecord`, `UpdateLogRecord`, `LeaseRecord`, `PlacementRecord` are the
+  canonical durable records.
+- `SnapshotStore`, `UpdateLogStore`, `PlacementStore`, `LeaseStore`,
+  `LeaseHandoffStore`, and `DistributedStore` are the core interfaces to
+  implement for backends.
+- `AuthoritativeSnapshotStore`, `AuthoritativeUpdateLogStore`,
+  `SnapshotCheckpointStore`, `SnapshotLogStore`, and related authoritative
+  interfaces are the higher-level runtime contracts for owner-aware systems.
+
+#### Backends
+
+- `pkg/storage/memory.New()`: in-memory reference store for tests and examples.
+- `pkg/storage/postgres.New(ctx, cfg)`: PostgreSQL reference store with explicit SQL migrations.
+
+#### Usage notes
+
+- Use the memory backend for tests and local development only.
+- Use the Postgres backend for durable deployments.
+- The application still owns migration rollout, backups, retention, and recovery
+  policies.
+
+### `pkg/ycluster`
+
+Use this package for shard resolution, leases, ownership, rebalance planning,
+and storage-backed owner lookup.
+
+#### When to use
+
+- determine which node owns a document;
+- acquire, renew, hand off, or release leases;
+- run a local ownership runtime;
+- compute rebalance plans and execute them;
+- translate storage placement/lease records into runtime ownership.
+
+#### Function index
+
+- `NewDeterministicShardResolver(shardCount)`: resolve document keys to shard IDs deterministically.
+- `NewHealthyRebalanceTargetSource(cfg)`: build a target source filtered by node health.
+- `NewLeaseManager(cfg)`: build the local lease manager for one shard.
+- `NewDocumentOwnershipRuntime(cfg)`: build the shared local ownership runtime.
+- `NewPlacementOwnerLookup(localNode, resolver, placements)`: build a placement-backed owner lookup.
+- `NewStorageLeaseStore(store)`: adapt a `storage.LeaseStore` to the control-plane lease contract.
+- `NewStorageOwnerLookup(localNode, resolver, placements, ...)`: build a storage-backed owner lookup.
+- `NewStorageOwnershipCoordinator(cfg)`: build the coordinator for claim/promo/handoff/rebalance.
+- `NewStoragePlacementDocumentSource(cfg)`: build a document source from placement storage.
+- `NewStaticNodeHealthSource(nodes)`: build a fixed node-health source.
+- `AuthorityFenceFromResolution(resolution)`: derive a storage authority fence from an owner resolution.
+- `ResolveStorageAuthorityFence(ctx, lookup, key)`: resolve the fence for a document key.
+- `LeaseFromStorageRecord(record)`: convert a storage lease record into a cluster lease.
+- `StorageNodeID(id)`: convert a cluster node ID to a storage node ID.
+- `StorageShardID(id)`: convert a cluster shard ID to a storage shard ID.
+- `ParseStorageNodeID(id)`: parse a storage node ID into the cluster type.
+- `ParseStorageShardID(id)`: parse a storage shard ID into the cluster type.
+
+#### Key types and methods
+
+- `LeaseManager`: `Acquire`, `Current`, `Ensure`, `Release`, `Run`.
+- `DocumentOwnershipRuntime`: `AcquireDocumentOwnership`, `Close`.
+- `DocumentOwnershipHandle`: `Done`, `Err`, `Ownership`, `Release`.
+- `PlacementOwnerLookup`: `LookupOwner`.
+- `StorageLeaseStore`: `AcquireLease`, `RenewLease`, `HandoffLease`, `ReleaseLease`, `LoadLease`, `WithMetrics`.
+- `StorageOwnerLookup`: `LookupOwner`, `WithMetrics`.
+- `StorageOwnershipCoordinator`: `ClaimDocument`, `PromoteDocument`, `HandoffDocument`, `LookupOwner`, `ResolveAuthorityFence`, `LeaseManagerForDocument`, `PlanDocumentRebalance`, `ExecuteRebalancePlan`, `RebalanceDocument`, `RunDocumentOwnership`.
+- `RebalanceController`: `Run`, `RunOnce`.
+- `DocumentOwnership`: `Clone`.
+
+#### Usage notes
+
+- Use `LeaseManager` for one shard at a time.
+- Use `DocumentOwnershipRuntime` when multiple callers in one process should
+  share the same ownership execution.
+- Use `StorageOwnershipCoordinator` when the runtime needs claim/promo/handoff
+  backed by storage.
+
+### `pkg/yawareness`
+
+Use this package for awareness/presence payloads and the local state manager.
+
+#### Function index
+
+- `NewStateManager(localClientID)`: create a local awareness state manager.
+- `DecodeUpdate(src)`: decode a raw awareness update.
+- `DecodeProtocolUpdate(src)`: decode an awareness update from protocol framing.
+- `EncodeUpdate(update)`: encode a raw awareness update.
+- `EncodeProtocolUpdate(update)`: encode an awareness update for protocol framing.
+- `AppendUpdate(dst, update)`: append a raw awareness update to an existing buffer.
+
+#### Key types
+
+- `Update`: awareness payload.
+- `StateManager`: local awareness state cache.
+- `ClientState`, `ClientMeta`, `Change`, `ParseError`: awareness data and error contracts.
+
+#### Usage notes
+
+- Awareness is in-process state; it is not a storage protocol.
+- Use it together with `pkg/yprotocol` when wiring sync and presence.
+
+### `pkg/ynodeproto`
+
+Use this package for the typed inter-node wire protocol.
+
+#### When to use
+
+- encode and decode owner-to-owner or edge-to-owner frames;
+- model handshake, sync, awareness, query-awareness, close, ping, and pong;
+- pass typed messages through a transport layer.
+
+#### Function index
+
+- `NewHeader(typ, flags, payloadLength)`: build a typed frame header.
+- `DecodeHeader(src)`: decode a typed frame header.
+- `EncodeHeader(header)`: encode a typed frame header.
+- `NewFrame(typ, flags, payload)`: build a typed frame.
+- `DecodeFrame(src)`: decode a full frame.
+- `DecodeFramePrefix(src)`: decode the prefix and return how many bytes were consumed.
+- `AppendHeader(dst, header)`: append a header to a byte slice.
+- `AppendFrame(dst, frame)`: append a frame to a byte slice.
+- `EncodeFrame(frame)`: encode a frame into bytes.
+- `NewMessageFrame(message)`: build a frame from a typed message.
+- `EncodeMessageFrame(message)`: encode a typed message as a frame.
+- `EncodeMessagePayload(message)`: encode just the message payload.
+- `DecodeFrameMessage(frame)`: decode a typed message from a frame.
+- `DecodeMessageFrame(src)`: decode a typed message from bytes.
+- `DecodeMessagePayload(typ, flags, payload)`: decode a typed message from raw parts.
+
+#### Key types
+
+- `Handshake`, `HandshakeAck`
+- `DocumentSyncRequest`, `DocumentSyncResponse`
+- `DocumentUpdate`
+- `AwarenessUpdate`
+- `QueryAwarenessRequest`, `QueryAwarenessResponse`
+- `Disconnect`, `Close`, `Ping`, `Pong`
+- `Frame`, `Header`, `Message`, `MessageType`, `Flags`
+- `ParseError`
+
+#### Usage notes
+
+- `Message` implementations expose `Type`, `FrameFlags`, and `Validate`.
+- Strings use `varuint(length) + bytes`.
+- `epoch` and `nonce` use fixed-width big-endian encoding.
+
+## Opt-in security for production
+
+When building public services on top of this repository, wire these hooks
+before exposing traffic:
+
+- `Authenticator`
+- `Authorizer`
+- `RateLimiter`
+- `QuotaLimiter`
+- `OriginPolicy`
+- `RequestRedactor`
+- inter-node bearer or HMAC auth
+- production config validation helpers in `pkg/yhttp`
+
+Do not ship a public server with all of those absent unless the environment is
+strictly trusted and intentionally local.
+
+## Practical examples
+
+### Normalize updates
+
+```go
+v1, err := yjsbridge.ConvertUpdateToV1(update)
+if err != nil {
+    return err
+}
+```
+
+### Build a persistable snapshot
+
+```go
+snap, err := yjsbridge.PersistedSnapshotFromUpdates(updates...)
+if err != nil {
+    return err
+}
+```
+
+### Run a local room
+
+```go
+provider := yprotocol.NewProvider(cfg)
+conn, err := provider.Open(ctx, key, connectionID, localClientID)
+if err != nil {
+    return err
+}
+defer conn.Close()
+```
+
+### Expose HTTP/WebSocket
+
+```go
+server, err := yhttp.NewOwnerAwareServer(cfg)
+if err != nil {
+    return err
+}
+http.ListenAndServe(":8080", server)
+```
+
+### Add distributed ownership
+
+```go
+coord, err := ycluster.NewStorageOwnershipCoordinator(cfg)
+if err != nil {
+    return err
+}
+ownership, err := coord.ClaimDocument(ctx, req)
+```
+
+## Reference docs
+
+- `README.md`: short project overview.
+- `SPEC.md`: technical and product specification.
+- `TASK.md`: current roadmap and phase state.
+- `docs/known-gaps-by-function.md`: current public gaps and contracts.
+- `docs/v2-compatibility-map.md`: V2 compatibility status and explicit V2 APIs.

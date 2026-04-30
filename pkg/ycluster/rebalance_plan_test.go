@@ -127,6 +127,28 @@ func TestStorageOwnershipCoordinatorPlanRebalanceValidation(t *testing.T) {
 	}
 }
 
+func TestStorageOwnershipCoordinatorExecuteRebalancePlanStopsWhenContextCanceled(t *testing.T) {
+	t.Parallel()
+
+	coordinator := newRebalanceTestCoordinator(t, "node-a", mustRebalanceTestResolver(t), memory.New(), time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	results, err := coordinator.ExecuteRebalancePlan(ctx, &RebalancePlan{
+		Moves: []PlannedRebalance{{
+			DocumentKey: storage.DocumentKey{Namespace: "tests", DocumentID: "cancelled-rebalance"},
+			To:          "node-a",
+			Reason:      RebalanceReasonMissingOwner,
+		}},
+	}, RebalancePlanExecutionOptions{TTL: time.Minute})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ExecuteRebalancePlan(cancelled) error = %v, want %v", err, context.Canceled)
+	}
+	if len(results) != 0 {
+		t.Fatalf("len(results) = %d, want no moves after cancellation", len(results))
+	}
+}
+
 func distinctRebalanceKeys(t *testing.T, resolver ShardResolver, count int) []storage.DocumentKey {
 	t.Helper()
 

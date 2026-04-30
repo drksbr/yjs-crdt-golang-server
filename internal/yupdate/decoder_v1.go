@@ -122,6 +122,9 @@ func (d *decoderV1) skipAny(op string) error {
 		if err != nil {
 			return err
 		}
+		if err := validateDecodedCollectionLength(op+".object.len", d.offset(), length); err != nil {
+			return err
+		}
 		for i := uint32(0); i < length; i++ {
 			if _, err := d.readString(op + ".object.key"); err != nil {
 				return err
@@ -134,6 +137,9 @@ func (d *decoderV1) skipAny(op string) error {
 	case 117:
 		length, err := d.readVarUint(op + ".array.len")
 		if err != nil {
+			return err
+		}
+		if err := validateDecodedCollectionLength(op+".array.len", d.offset(), length); err != nil {
 			return err
 		}
 		for i := uint32(0); i < length; i++ {

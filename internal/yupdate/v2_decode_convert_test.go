@@ -421,6 +421,30 @@ func TestDecodeV2RejectsMalformedInputs(t *testing.T) {
 			data: appendByteToV2EncoderSection(t, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), 4, 0x01),
 		},
 		{
+			name: "unused_left_clock_encoder_value",
+			data: appendByteToV2EncoderSection(t, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), 2, 0x00),
+		},
+		{
+			name: "unused_right_clock_encoder_value",
+			data: appendByteToV2EncoderSection(t, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), 3, 0x00),
+		},
+		{
+			name: "unused_string_length_encoder_value",
+			data: appendByteToV2EncoderSection(t, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), 5, 0x00),
+		},
+		{
+			name: "unused_parent_info_rle_count",
+			data: appendByteToV2EncoderSection(t, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), 6, 0x01),
+		},
+		{
+			name: "unused_type_ref_encoder_value",
+			data: appendByteToV2EncoderSection(t, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), 7, 0x00),
+		},
+		{
+			name: "unused_length_encoder_value",
+			data: appendByteToV2EncoderSection(t, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), 8, 0x00),
+		},
+		{
 			name: "unused_key_clock_without_consumed_keys",
 			data: appendByteToV2EncoderSection(t, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), 0, 0x00),
 		},
@@ -431,6 +455,42 @@ func TestDecodeV2RejectsMalformedInputs(t *testing.T) {
 		{
 			name: "content_any_length_too_large",
 			data: replaceV2EncoderSection(t, mustDecodeHex(t, "000002a501000001080301610101010001060101007d017d4278797e77017300"), 8, appendVarUintV1(nil, ^uint32(0))),
+		},
+		{
+			name: "malformed_client_encoder_negative_without_count",
+			data: replaceV2EncoderSection(t, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), 1, []byte{0x40}),
+		},
+		{
+			name: "malformed_key_clock_encoder_count_truncated",
+			data: replaceV2EncoderSection(t, mustDecodeHex(t, "0002000203e50101010001000504004600860f0a7478626f6c64626f6c644100440001010000010300787e00"), 0, []byte{0x01}),
+		},
+		{
+			name: "malformed_info_rle_count_truncated",
+			data: replaceV2EncoderSection(t, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), 4, []byte{0x04, 0x80}),
+		},
+		{
+			name: "malformed_string_length_encoder_truncated",
+			data: appendByteToV2EncoderSection(t, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), 5, 0x80),
+		},
+		{
+			name: "malformed_parent_info_rle_count_truncated",
+			data: replaceV2EncoderSection(t, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), 6, []byte{0x01, 0x80}),
+		},
+		{
+			name: "malformed_type_ref_encoder_negative_without_count",
+			data: replaceV2EncoderSection(t, mustDecodeHex(t, "000003e50100010000030700280502616b4100030100000101010101020077017600"), 7, []byte{0x40}),
+		},
+		{
+			name: "malformed_length_encoder_negative_without_count",
+			data: replaceV2EncoderSection(t, mustDecodeHex(t, "000002a501000001080301610101010001060101007d017d4278797e77017300"), 8, []byte{0x40}),
+		},
+		{
+			name: "nested_any_object_length_too_large",
+			data: replaceBytesOnce(t,
+				mustDecodeHex(t, "000002a5010000012805026d6b41000101000101010100760101617d0100"),
+				[]byte{0x76, 0x01, 0x01, 0x61, 0x7d, 0x01, 0x00},
+				[]byte{0x76, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00},
+			),
 		},
 	}
 
@@ -585,6 +645,20 @@ func replaceV2EncoderSection(t *testing.T, data []byte, section int, payload []b
 
 	t.Fatalf("section %d not found", section)
 	return nil
+}
+
+func replaceBytesOnce(t *testing.T, data, old, replacement []byte) []byte {
+	t.Helper()
+
+	index := bytes.Index(data, old)
+	if index < 0 {
+		t.Fatalf("sequence %x not found in %x", old, data)
+	}
+	out := make([]byte, 0, len(data)-len(old)+len(replacement))
+	out = append(out, data[:index]...)
+	out = append(out, replacement...)
+	out = append(out, data[index+len(old):]...)
+	return out
 }
 
 func skipV2VarUint(t *testing.T, data []byte, offset int) int {

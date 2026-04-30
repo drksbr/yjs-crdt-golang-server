@@ -29,10 +29,12 @@ O exemplo semeia dois documentos:
 5. Delegacao ao `pkg/yhttp` quando o owner resolvido e local.
 6. Forward tipado edge -> owner usando `NodeMessageStream`.
 7. Endpoint owner-side `/node` compartilhando o mesmo runtime/fanout de `/ws`.
-8. Endpoint `/owner` que continua expondo a rota browser do owner e o epoch atual.
-9. Endpoint `/metrics` nos dois servidores de exemplo com métricas de transporte,
+8. Hook de autenticação inter-node em `RemoteOwnerEndpointConfig.Authenticate`
+   antes de materializar a sessão no owner remoto.
+9. Endpoint `/owner` que continua expondo a rota browser do owner e o epoch atual.
+10. Endpoint `/metrics` nos dois servidores de exemplo com métricas de transporte,
    owner lookup, lease, replay/recovery, lag, epoch e persistência.
-10. Bundle `observability/` com alertas Prometheus, dashboard Grafana operacional
+11. Bundle `observability/` com alertas Prometheus, dashboard Grafana operacional
     e dashboard central/oráculo por node.
 
 ## Como executar
@@ -57,6 +59,8 @@ O diretório `observability/` inclui:
 
 - `prometheus-rules.yml` para perda de autoridade, falhas de lease, lookup/handshake,
   lag de recovery, compaction parada e closes inesperados.
+- `prometheus-slo-rules.yml` com recording rules e alertas SLO agregados por
+  `env`, `region`, `tenant` e `deployment_role`.
 - `grafana-dashboard.json` com painéis de conexões, rotas, handoff/rebind, leases,
   offsets, epochs, erros e latências p95.
 - `grafana-oracle-dashboard.json` com visão holística por `node_id` e
@@ -65,6 +69,29 @@ O diretório `observability/` inclui:
 As regras assumem scrape dos endpoints `/metrics` do edge e do owner remoto.
 O exemplo rotula as métricas com `node_id`, `deployment_role` e `env`, simulando
 o que um Prometheus central veria ao coletar todos os nodes da plataforma.
+
+## Segurança
+
+Este exemplo demonstra apenas o seam inter-node: o endpoint `/node` do owner
+remoto usa `RemoteOwnerEndpointConfig.Authenticate` para rejeitar handshakes que
+não venham do `node-a` esperado. Isso valida o ponto de extensão, mas não é uma
+política de produção.
+
+Para expor esta topologia publicamente, a aplicação deve configurar também:
+
+- `Authenticator`/`Authorizer` no `Server` local e no `OwnerAwareServer`, por
+  exemplo `BearerTokenAuthenticator` com `TenantAuthorizer` para isolar
+  `DocumentKey.Namespace`;
+- `RateLimiter` na borda HTTP/WebSocket, preferencialmente com backend
+  distribuído quando houver mais de um edge;
+- quotas distribuídas por tenant/documento/conexão para forwarding, owner
+  lookup e custo de replay/storage; `pkg/yhttp.LocalQuotaLimiter` cobre apenas
+  a referência local por processo;
+- política inter-node obrigatória com identidade de nó, bearer/HMAC com
+  `key_id`/mTLS, expiração curta, distribuição segura de chaves e proteção contra
+  replay;
+- redaction de namespaces, document ids, principals, tokens e connection ids em
+  logs, labels de métricas, erros e dashboards.
 
 ## Como testar
 

@@ -204,6 +204,10 @@ func (c *StorageOwnershipCoordinator) ExecuteRebalancePlan(
 	results := make([]RebalancePlanExecutionResult, 0, len(plan.Moves))
 	var errs []error
 	for _, move := range plan.Moves {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
 		token := ""
 		if opts.TokenForDocument != nil {
 			token = opts.TokenForDocument(move)
