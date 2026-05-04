@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,6 +48,9 @@ func TestStoreSaveAndLoadSnapshotRoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(loaded.Snapshot.UpdateV1, snapshot.UpdateV1) {
 		t.Fatalf("LoadSnapshot().Snapshot.UpdateV1 = %v, want %v", loaded.Snapshot.UpdateV1, snapshot.UpdateV1)
+	}
+	if !bytes.Equal(loaded.Snapshot.UpdateV2, snapshot.UpdateV2) {
+		t.Fatalf("LoadSnapshot().Snapshot.UpdateV2 = %v, want %v", loaded.Snapshot.UpdateV2, snapshot.UpdateV2)
 	}
 	if loaded.Through != 0 {
 		t.Fatalf("LoadSnapshot().Through = %d, want 0", loaded.Through)
@@ -133,6 +137,84 @@ func TestStoreSaveAndLoadSnapshotCheckpointRoundTrip(t *testing.T) {
 	}
 	if loaded.Epoch != 7 {
 		t.Fatalf("LoadSnapshot().Epoch after epoch save = %d, want 7", loaded.Epoch)
+	}
+}
+
+func TestSaveSnapshotQueryWritesV2Payload(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := yjsbridge.PersistedSnapshotFromUpdates()
+	if err != nil {
+		t.Fatalf("PersistedSnapshotFromUpdates() unexpected error: %v", err)
+	}
+	payloadV1, payloadV2, err := encodePersistedSnapshotPayloads(snapshot)
+	if err != nil {
+		t.Fatalf("encodePersistedSnapshotPayloads() unexpected error: %v", err)
+	}
+
+	store := &Store{schema: "tenant_app"}
+	query, args, err := store.saveSnapshotQuery(
+		storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-1"},
+		payloadV1,
+		payloadV2,
+		19,
+		7,
+	)
+	if err != nil {
+		t.Fatalf("saveSnapshotQuery() unexpected error: %v", err)
+	}
+	if !strings.Contains(query, "snapshot_v2") {
+		t.Fatalf("saveSnapshotQuery() query = %q, want snapshot_v2 column", query)
+	}
+	if len(args) != 6 {
+		t.Fatalf("saveSnapshotQuery() args len = %d, want 6", len(args))
+	}
+	if !bytes.Equal(args[2].([]byte), payloadV1) {
+		t.Fatalf("saveSnapshotQuery() V1 arg = %v, want %v", args[2], payloadV1)
+	}
+	if !bytes.Equal(args[3].([]byte), payloadV2) {
+		t.Fatalf("saveSnapshotQuery() V2 arg = %v, want %v", args[3], payloadV2)
+	}
+	if args[4] != int64(19) {
+		t.Fatalf("saveSnapshotQuery() through arg = %v, want 19", args[4])
+	}
+	if args[5] != int64(7) {
+		t.Fatalf("saveSnapshotQuery() epoch arg = %v, want 7", args[5])
+	}
+}
+
+func TestDecodePersistedSnapshotPayloadPrefersV2WithV1Fallback(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := yjsbridge.PersistedSnapshotFromUpdates()
+	if err != nil {
+		t.Fatalf("PersistedSnapshotFromUpdates() unexpected error: %v", err)
+	}
+	payloadV1, payloadV2, err := encodePersistedSnapshotPayloads(snapshot)
+	if err != nil {
+		t.Fatalf("encodePersistedSnapshotPayloads() unexpected error: %v", err)
+	}
+
+	fromV2, err := decodePersistedSnapshotPayload([]byte{0xff}, payloadV2)
+	if err != nil {
+		t.Fatalf("decodePersistedSnapshotPayload(v2) unexpected error: %v", err)
+	}
+	if !bytes.Equal(fromV2.UpdateV1, snapshot.UpdateV1) {
+		t.Fatalf("decodePersistedSnapshotPayload(v2).UpdateV1 = %v, want %v", fromV2.UpdateV1, snapshot.UpdateV1)
+	}
+	if !bytes.Equal(fromV2.UpdateV2, payloadV2) {
+		t.Fatalf("decodePersistedSnapshotPayload(v2).UpdateV2 = %v, want %v", fromV2.UpdateV2, payloadV2)
+	}
+
+	fromV1, err := decodePersistedSnapshotPayload(payloadV1, nil)
+	if err != nil {
+		t.Fatalf("decodePersistedSnapshotPayload(v1 fallback) unexpected error: %v", err)
+	}
+	if !bytes.Equal(fromV1.UpdateV1, snapshot.UpdateV1) {
+		t.Fatalf("decodePersistedSnapshotPayload(v1 fallback).UpdateV1 = %v, want %v", fromV1.UpdateV1, snapshot.UpdateV1)
+	}
+	if !bytes.Equal(fromV1.UpdateV2, snapshot.UpdateV2) {
+		t.Fatalf("decodePersistedSnapshotPayload(v1 fallback).UpdateV2 = %v, want %v", fromV1.UpdateV2, snapshot.UpdateV2)
 	}
 }
 

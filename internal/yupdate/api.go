@@ -24,6 +24,36 @@ func ValidateUpdatesFormatWithReasonContext(ctx context.Context, updates ...[]by
 	return DetectUpdatesFormatWithReasonContext(ctx, updates...)
 }
 
+// ValidateUpdate decodifica um único update e retorna erro se o payload não for
+// estruturalmente válido para o formato detectado.
+func ValidateUpdate(update []byte) error {
+	_, err := DecodeUpdate(update)
+	return err
+}
+
+// ValidateUpdates decodifica múltiplos updates, preservando o índice do payload
+// inválido no erro retornado.
+func ValidateUpdates(updates ...[]byte) error {
+	return ValidateUpdatesContext(context.Background(), updates...)
+}
+
+// ValidateUpdatesContext decodifica múltiplos updates respeitando cancelamento
+// e preservando o índice do payload inválido no erro retornado.
+func ValidateUpdatesContext(ctx context.Context, updates ...[]byte) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for i, update := range updates {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := ValidateUpdate(update); err != nil {
+			return fmt.Errorf("update[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
 // FormatFromUpdate identifica o formato do update e retorna erro quando a
 // heurística não consegue classificar de forma definitiva.
 func FormatFromUpdate(update []byte) (UpdateFormat, error) {
@@ -88,51 +118,21 @@ func DecodeUpdate(update []byte) (*DecodedUpdate, error) {
 // StateVectorFromUpdate extrai o state vector de um único update conforme o
 // formato detectado no payload.
 func StateVectorFromUpdate(update []byte) (map[uint32]uint32, error) {
-	format, err := FormatFromUpdate(update)
+	decoded, err := DecodeUpdate(update)
 	if err != nil {
 		return nil, err
 	}
-	switch format {
-	case UpdateFormatV1:
-		encoded, err := EncodeStateVectorFromUpdateV1(update)
-		if err != nil {
-			return nil, err
-		}
-		return DecodeStateVectorV1(encoded)
-	case UpdateFormatV2:
-		converted, err := ConvertUpdateToV1(update)
-		if err != nil {
-			return nil, err
-		}
-		encoded, err := EncodeStateVectorFromUpdateV1(converted)
-		if err != nil {
-			return nil, err
-		}
-		return DecodeStateVectorV1(encoded)
-	default:
-		return nil, ErrUnknownUpdateFormat
-	}
+	return stateVectorFromStructs(decoded.Structs), nil
 }
 
 // EncodeStateVectorFromUpdate extrai e serializa o state vector de um único
 // update conforme o formato detectado no payload.
 func EncodeStateVectorFromUpdate(update []byte) ([]byte, error) {
-	format, err := FormatFromUpdate(update)
+	stateVector, err := StateVectorFromUpdate(update)
 	if err != nil {
 		return nil, err
 	}
-	switch format {
-	case UpdateFormatV1:
-		return EncodeStateVectorFromUpdateV1(update)
-	case UpdateFormatV2:
-		converted, err := ConvertUpdateToV1(update)
-		if err != nil {
-			return nil, err
-		}
-		return EncodeStateVectorFromUpdateV1(converted)
-	default:
-		return nil, ErrUnknownUpdateFormat
-	}
+	return encodeStateVectorMap(stateVector), nil
 }
 
 // CreateContentIDsFromUpdate extrai content ids de um único update conforme o
@@ -249,18 +249,41 @@ func ConvertUpdatesToV1Context(ctx context.Context, updates ...[]byte) ([]byte, 
 // payload canônico em V2, respeitando cancelamento e tratando payloads vazios
 // como no-op.
 func ConvertUpdatesToV2Context(ctx context.Context, updates ...[]byte) ([]byte, error) {
-	mergedV1, err := ConvertUpdatesToV1Context(ctx, updates...)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(updates) == 0 {
+		return EncodeUpdateV2(nil)
+	}
+
+	format, err := detectAggregateUpdateFormatSkippingEmptyContext(ctx, updates...)
 	if err != nil {
 		return nil, err
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	switch format {
+	case UpdateFormatUnknown:
+		return EncodeUpdateV2(nil)
+	case UpdateFormatV1, UpdateFormatV2:
+	default:
+		return nil, ErrUnknownUpdateFormat
 	}
-	decoded, err := DecodeV1(mergedV1)
+
+	filtered := make([][]byte, 0, len(updates))
+	for _, update := range updates {
+		if len(update) == 0 {
+			continue
+		}
+		filtered = append(filtered, update)
+	}
+
+	merged, err := aggregatePayloadsInParallel(ctx, filtered, 0, decodeMergeUpdate, mergeDecodedUpdatesV1)
 	if err != nil {
 		return nil, err
 	}
-	return EncodeUpdateV2(decoded)
+	return EncodeUpdateV2(&DecodedUpdate{
+		Structs:   merged.blockSet.structs(),
+		DeleteSet: merged.deleteSet,
+	})
 }
 
 // DiffUpdate trata o diff conforme o formato detectado e retorna payload V1.

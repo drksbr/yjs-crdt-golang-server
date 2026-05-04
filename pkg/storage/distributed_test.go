@@ -178,13 +178,24 @@ func TestUpdateLogRecordValidateAndClone(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name: "valid",
+			name: "valid_v1_compat",
 			record: UpdateLogRecord{
 				Key:      DocumentKey{Namespace: "tenant-a", DocumentID: "doc-1"},
 				Offset:   7,
 				UpdateV1: []byte{0x01, 0x02, 0x03},
 				Epoch:    4,
 				StoredAt: time.Unix(200, 0).UTC(),
+			},
+			wantErr: nil,
+		},
+		{
+			name: "valid_v2_canonical",
+			record: UpdateLogRecord{
+				Key:      DocumentKey{Namespace: "tenant-a", DocumentID: "doc-v2"},
+				Offset:   8,
+				UpdateV2: yjsbridge.NewPersistedSnapshot().UpdateV2,
+				Epoch:    5,
+				StoredAt: time.Unix(201, 0).UTC(),
 			},
 			wantErr: nil,
 		},
@@ -220,6 +231,7 @@ func TestUpdateLogRecordValidateAndClone(t *testing.T) {
 	record := &UpdateLogRecord{
 		Key:      DocumentKey{Namespace: "tenant-a", DocumentID: "doc-9"},
 		Offset:   11,
+		UpdateV2: yjsbridge.NewPersistedSnapshot().UpdateV2,
 		UpdateV1: []byte{0x0a, 0x0b},
 		Epoch:    9,
 		StoredAt: time.Unix(220, 0).UTC(),
@@ -231,12 +243,19 @@ func TestUpdateLogRecordValidateAndClone(t *testing.T) {
 	if !bytes.Equal(clone.UpdateV1, record.UpdateV1) {
 		t.Fatalf("Clone().UpdateV1 = %v, want %v", clone.UpdateV1, record.UpdateV1)
 	}
+	if !bytes.Equal(clone.UpdateV2, record.UpdateV2) {
+		t.Fatalf("Clone().UpdateV2 = %v, want %v", clone.UpdateV2, record.UpdateV2)
+	}
 	if clone.Epoch != record.Epoch {
 		t.Fatalf("Clone().Epoch = %d, want %d", clone.Epoch, record.Epoch)
 	}
 	clone.UpdateV1[0] = 0xff
 	if record.UpdateV1[0] == 0xff {
 		t.Fatal("Clone() compartilhou payload do log")
+	}
+	clone.UpdateV2[0] ^= 0xff
+	if bytes.Equal(clone.UpdateV2, record.UpdateV2) {
+		t.Fatal("Clone() compartilhou payload V2 do log")
 	}
 
 	if got := (*UpdateLogRecord)(nil).Clone(); got != nil {

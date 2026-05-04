@@ -169,7 +169,8 @@ func TestProviderStoreContracts(t *testing.T) {
 		}
 
 		provider := NewProvider(ProviderConfig{Store: store})
-		_, err := provider.Open(nil, storage.DocumentKey{
+		var nilCtx context.Context
+		_, err := provider.Open(nilCtx, storage.DocumentKey{
 			Namespace:  "tests",
 			DocumentID: "provider-store-open-error",
 		}, "conn-load", 11)
@@ -201,7 +202,8 @@ func TestProviderStoreContracts(t *testing.T) {
 		}
 
 		provider := NewProvider(ProviderConfig{Store: store})
-		conn, err := provider.Open(nil, storage.DocumentKey{
+		var nilCtx context.Context
+		conn, err := provider.Open(nilCtx, storage.DocumentKey{
 			Namespace:  "tests",
 			DocumentID: "provider-store-persist-error",
 		}, "conn-save", 12)
@@ -214,7 +216,7 @@ func TestProviderStoreContracts(t *testing.T) {
 			}
 		})
 
-		if _, err := conn.Persist(nil); !errors.Is(err, expected) {
+		if _, err := conn.Persist(nilCtx); !errors.Is(err, expected) {
 			t.Fatalf("Persist(nil) error = %v, want %v", err, expected)
 		}
 	})

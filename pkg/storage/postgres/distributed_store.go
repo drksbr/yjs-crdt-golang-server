@@ -10,10 +10,13 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 var _ storage.DistributedStore = (*Store)(nil)
 var _ storage.AuthoritativeUpdateLogStore = (*Store)(nil)
+var _ storage.UpdateLogStoreV2 = (*Store)(nil)
+var _ storage.AuthoritativeUpdateLogStoreV2 = (*Store)(nil)
 var _ storage.PlacementListStore = (*Store)(nil)
 var _ storage.LeaseHandoffStore = (*Store)(nil)
 
@@ -27,6 +30,7 @@ func (s *Store) AppendUpdate(ctx context.Context, key storage.DocumentKey, updat
 	if len(update) == 0 {
 		return nil, storage.ErrInvalidUpdatePayload
 	}
+	updateV2 := bestEffortUpdateV2(update)
 	pool, err := s.requirePool()
 	if err != nil {
 		return nil, err
@@ -40,8 +44,8 @@ WITH allocated AS (
 	DO UPDATE SET next_offset = heads.next_offset + 1
 	RETURNING next_offset - 1 AS log_offset
 )
-INSERT INTO %s.document_update_logs(namespace, document_id, log_offset, update_v1, owner_epoch, stored_at)
-SELECT $1, $2, allocated.log_offset, $3, 0, now()
+INSERT INTO %s.document_update_logs(namespace, document_id, log_offset, update_v1, update_v2, owner_epoch, stored_at)
+SELECT $1, $2, allocated.log_offset, $3, $4, 0, now()
 FROM allocated
 RETURNING log_offset, owner_epoch, stored_at
 `, quoteIdentifier(s.schema), quoteIdentifier(s.schema))
@@ -49,7 +53,7 @@ RETURNING log_offset, owner_epoch, stored_at
 	var offset int64
 	var epoch int64
 	var storedAt time.Time
-	if err := pool.QueryRow(ctx, query, key.Namespace, key.DocumentID, update).Scan(&offset, &epoch, &storedAt); err != nil {
+	if err := pool.QueryRow(ctx, query, key.Namespace, key.DocumentID, update, updateV2).Scan(&offset, &epoch, &storedAt); err != nil {
 		return nil, err
 	}
 
@@ -65,10 +69,19 @@ RETURNING log_offset, owner_epoch, stored_at
 	return &storage.UpdateLogRecord{
 		Key:      key,
 		Offset:   logOffset,
+		UpdateV2: append([]byte(nil), updateV2...),
 		UpdateV1: append([]byte(nil), update...),
 		Epoch:    epochValue,
 		StoredAt: storedAt,
 	}, nil
+}
+
+func (s *Store) AppendUpdateV2(ctx context.Context, key storage.DocumentKey, update []byte) (*storage.UpdateLogRecord, error) {
+	updateV1, err := yjsbridge.ConvertUpdateToV1(update)
+	if err != nil {
+		return nil, err
+	}
+	return s.appendUpdateV2(ctx, key, update, updateV1, 0, nil)
 }
 
 // AppendUpdateAuthoritative adiciona um update V1 ao fim do log do documento,
@@ -88,6 +101,7 @@ func (s *Store) AppendUpdateAuthoritative(
 	if len(update) == 0 {
 		return nil, storage.ErrInvalidUpdatePayload
 	}
+	updateV2 := bestEffortUpdateV2(update)
 	if err := fence.Validate(); err != nil {
 		return nil, err
 	}
@@ -108,7 +122,7 @@ func (s *Store) AppendUpdateAuthoritative(
 		return nil, err
 	}
 
-	logOffset, storedAt, err := s.appendUpdateTx(ctx, tx, key, update, fence.Owner.Epoch)
+	logOffset, storedAt, err := s.appendUpdateTx(ctx, tx, key, update, updateV2, fence.Owner.Epoch)
 	if err != nil {
 		return nil, err
 	}
@@ -119,8 +133,90 @@ func (s *Store) AppendUpdateAuthoritative(
 	return &storage.UpdateLogRecord{
 		Key:      key,
 		Offset:   logOffset,
+		UpdateV2: append([]byte(nil), updateV2...),
 		UpdateV1: append([]byte(nil), update...),
 		Epoch:    fence.Owner.Epoch,
+		StoredAt: storedAt,
+	}, nil
+}
+
+func (s *Store) AppendUpdateV2Authoritative(
+	ctx context.Context,
+	key storage.DocumentKey,
+	update []byte,
+	fence storage.AuthorityFence,
+) (*storage.UpdateLogRecord, error) {
+	updateV1, err := yjsbridge.ConvertUpdateToV1(update)
+	if err != nil {
+		return nil, err
+	}
+	return s.appendUpdateV2(ctx, key, update, updateV1, fence.Owner.Epoch, &fence)
+}
+
+func (s *Store) appendUpdateV2(
+	ctx context.Context,
+	key storage.DocumentKey,
+	updateV2 []byte,
+	updateV1 []byte,
+	epoch uint64,
+	fence *storage.AuthorityFence,
+) (*storage.UpdateLogRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := key.Validate(); err != nil {
+		return nil, err
+	}
+	if len(updateV2) == 0 {
+		return nil, storage.ErrInvalidUpdatePayload
+	}
+	if fence != nil {
+		if err := fence.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	pool, err := s.requirePool()
+	if err != nil {
+		return nil, err
+	}
+	if fence == nil {
+		logOffset, storedAt, err := s.appendUpdatePool(ctx, pool, key, updateV1, updateV2, epoch)
+		if err != nil {
+			return nil, err
+		}
+		return &storage.UpdateLogRecord{
+			Key:      key,
+			Offset:   logOffset,
+			UpdateV2: append([]byte(nil), updateV2...),
+			UpdateV1: append([]byte(nil), updateV1...),
+			Epoch:    epoch,
+			StoredAt: storedAt,
+		}, nil
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+	if err := s.validateAuthorityTx(ctx, tx, key, *fence, time.Now().UTC()); err != nil {
+		return nil, err
+	}
+	logOffset, storedAt, err := s.appendUpdateTx(ctx, tx, key, updateV1, updateV2, epoch)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &storage.UpdateLogRecord{
+		Key:      key,
+		Offset:   logOffset,
+		UpdateV2: append([]byte(nil), updateV2...),
+		UpdateV1: append([]byte(nil), updateV1...),
+		Epoch:    epoch,
 		StoredAt: storedAt,
 	}, nil
 }
@@ -143,7 +239,7 @@ func (s *Store) ListUpdates(ctx context.Context, key storage.DocumentKey, after 
 	}
 
 	query := fmt.Sprintf(`
-SELECT log_offset, update_v1, owner_epoch, stored_at
+SELECT log_offset, update_v1, update_v2, owner_epoch, stored_at
 FROM %s.document_update_logs
 WHERE namespace = $1 AND document_id = $2 AND log_offset > $3
 ORDER BY log_offset ASC
@@ -164,10 +260,11 @@ ORDER BY log_offset ASC
 	var records []*storage.UpdateLogRecord
 	for rows.Next() {
 		var offset int64
-		var payload []byte
+		var payloadV1 []byte
+		var payloadV2 []byte
 		var epoch int64
 		var storedAt time.Time
-		if err := rows.Scan(&offset, &payload, &epoch, &storedAt); err != nil {
+		if err := rows.Scan(&offset, &payloadV1, &payloadV2, &epoch, &storedAt); err != nil {
 			return nil, err
 		}
 
@@ -183,7 +280,8 @@ ORDER BY log_offset ASC
 		records = append(records, &storage.UpdateLogRecord{
 			Key:      key,
 			Offset:   logOffset,
-			UpdateV1: append([]byte(nil), payload...),
+			UpdateV2: append([]byte(nil), payloadV2...),
+			UpdateV1: append([]byte(nil), payloadV1...),
 			Epoch:    epochValue,
 			StoredAt: storedAt,
 		})
@@ -451,8 +549,6 @@ func (s *Store) SaveLease(ctx context.Context, lease storage.LeaseRecord) (*stor
 	case sameLeaseRecord(current, &lease):
 		// renew/update of the same active generation keeps the original start time.
 		lease.AcquiredAt = current.AcquiredAt
-		acquiredAt := normalizeTime(lease.AcquiredAt)
-		opTime = acquiredAt
 	case current.ExpiresAt.After(opTime):
 		if lease.Owner.Epoch <= current.Owner.Epoch {
 			return nil, storage.NewLeaseStaleEpochError(lease.ShardID, current.Owner.Epoch, lease.Owner.Epoch)
@@ -740,7 +836,6 @@ FOR UPDATE
 			return nil, 0, err
 		}
 	case isNoRows(err):
-		err = nil
 	default:
 		return nil, 0, err
 	}
@@ -842,7 +937,38 @@ func int64ToUint64(name string, value int64) (uint64, error) {
 	return uint64(value), nil
 }
 
-func (s *Store) appendUpdateTx(ctx context.Context, tx pgx.Tx, key storage.DocumentKey, update []byte, epoch uint64) (storage.UpdateOffset, time.Time, error) {
+func (s *Store) appendUpdatePool(ctx context.Context, pool queryRower, key storage.DocumentKey, updateV1, updateV2 []byte, epoch uint64) (storage.UpdateOffset, time.Time, error) {
+	epochValue, err := uint64ToInt64("owner epoch", epoch)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	query := fmt.Sprintf(`
+WITH allocated AS (
+	INSERT INTO %s.document_update_log_heads AS heads (namespace, document_id, next_offset)
+	VALUES ($1, $2, 2)
+	ON CONFLICT (namespace, document_id)
+	DO UPDATE SET next_offset = heads.next_offset + 1
+	RETURNING next_offset - 1 AS log_offset
+)
+INSERT INTO %s.document_update_logs(namespace, document_id, log_offset, update_v1, update_v2, owner_epoch, stored_at)
+SELECT $1, $2, allocated.log_offset, $3, $4, $5, now()
+FROM allocated
+RETURNING log_offset, stored_at
+`, quoteIdentifier(s.schema), quoteIdentifier(s.schema))
+
+	var offset int64
+	var storedAt time.Time
+	if err := pool.QueryRow(ctx, query, key.Namespace, key.DocumentID, updateV1, updateV2, epochValue).Scan(&offset, &storedAt); err != nil {
+		return 0, time.Time{}, err
+	}
+	logOffset, err := int64ToOffset(offset)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	return logOffset, storedAt, nil
+}
+
+func (s *Store) appendUpdateTx(ctx context.Context, tx pgx.Tx, key storage.DocumentKey, updateV1, updateV2 []byte, epoch uint64) (storage.UpdateOffset, time.Time, error) {
 	epochValue, err := uint64ToInt64("owner epoch", epoch)
 	if err != nil {
 		return 0, time.Time{}, err
@@ -856,15 +982,15 @@ WITH allocated AS (
 	DO UPDATE SET next_offset = heads.next_offset + 1
 	RETURNING next_offset - 1 AS log_offset
 )
-INSERT INTO %s.document_update_logs(namespace, document_id, log_offset, update_v1, owner_epoch, stored_at)
-SELECT $1, $2, allocated.log_offset, $3, $4, now()
+INSERT INTO %s.document_update_logs(namespace, document_id, log_offset, update_v1, update_v2, owner_epoch, stored_at)
+SELECT $1, $2, allocated.log_offset, $3, $4, $5, now()
 FROM allocated
 RETURNING log_offset, stored_at
 `, quoteIdentifier(s.schema), quoteIdentifier(s.schema))
 
 	var offset int64
 	var storedAt time.Time
-	if err := tx.QueryRow(ctx, query, key.Namespace, key.DocumentID, update, epochValue).Scan(&offset, &storedAt); err != nil {
+	if err := tx.QueryRow(ctx, query, key.Namespace, key.DocumentID, updateV1, updateV2, epochValue).Scan(&offset, &storedAt); err != nil {
 		return 0, time.Time{}, err
 	}
 
@@ -873,6 +999,18 @@ RETURNING log_offset, stored_at
 		return 0, time.Time{}, err
 	}
 	return logOffset, storedAt, nil
+}
+
+type queryRower interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func bestEffortUpdateV2(updateV1 []byte) []byte {
+	updateV2, err := yjsbridge.ConvertUpdateToV2(updateV1)
+	if err != nil {
+		return nil
+	}
+	return updateV2
 }
 
 func (s *Store) trimUpdatesTx(ctx context.Context, tx pgx.Tx, key storage.DocumentKey, through storage.UpdateOffset) error {

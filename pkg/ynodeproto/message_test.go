@@ -20,7 +20,7 @@ func TestTypedMessageRoundTrip(t *testing.T) {
 		{
 			name: "handshake",
 			message: &Handshake{
-				Flags:        Flags(0x11),
+				Flags:        Flags(0x11) | FlagSupportsUpdateV2,
 				NodeID:       "node-a",
 				DocumentKey:  storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-1"},
 				ConnectionID: "conn-1",
@@ -48,7 +48,7 @@ func TestTypedMessageRoundTrip(t *testing.T) {
 		{
 			name: "handshake_ack",
 			message: &HandshakeAck{
-				Flags:        Flags(0x12),
+				Flags:        Flags(0x12) | FlagSupportsUpdateV2,
 				NodeID:       "node-b",
 				DocumentKey:  storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-2"},
 				ConnectionID: "conn-2",
@@ -98,6 +98,30 @@ func TestTypedMessageRoundTrip(t *testing.T) {
 			},
 		},
 		{
+			name: "document_sync_request_v2",
+			message: &DocumentSyncRequestV2{
+				Flags:        Flags(0x29),
+				DocumentKey:  storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-3-v2"},
+				ConnectionID: "conn-3-v2",
+				Epoch:        109,
+				StateVector:  []byte{0x00, 0x01, 0x02},
+			},
+			assert: func(t *testing.T, decoded Message) {
+				t.Helper()
+
+				got, ok := decoded.(*DocumentSyncRequestV2)
+				if !ok {
+					t.Fatalf("decoded = %T, want *DocumentSyncRequestV2", decoded)
+				}
+				if got.DocumentKey.DocumentID != "doc-3-v2" || got.ConnectionID != "conn-3-v2" || got.Epoch != 109 {
+					t.Fatalf("got = %#v, want document/doc-3-v2 conn-3-v2 epoch 109", got)
+				}
+				if !bytes.Equal(got.StateVector, []byte{0x00, 0x01, 0x02}) {
+					t.Fatalf("got.StateVector = %v, want %v", got.StateVector, []byte{0x00, 0x01, 0x02})
+				}
+			},
+		},
+		{
 			name: "document_sync_response",
 			message: &DocumentSyncResponse{
 				Flags:        Flags(0x22),
@@ -122,6 +146,30 @@ func TestTypedMessageRoundTrip(t *testing.T) {
 			},
 		},
 		{
+			name: "document_sync_response_v2",
+			message: &DocumentSyncResponseV2{
+				Flags:        Flags(0x2a),
+				DocumentKey:  storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-4-v2"},
+				ConnectionID: "conn-4-v2",
+				Epoch:        110,
+				UpdateV2:     []byte{0x00, 0x0a, 0x0b},
+			},
+			assert: func(t *testing.T, decoded Message) {
+				t.Helper()
+
+				got, ok := decoded.(*DocumentSyncResponseV2)
+				if !ok {
+					t.Fatalf("decoded = %T, want *DocumentSyncResponseV2", decoded)
+				}
+				if got.DocumentKey.DocumentID != "doc-4-v2" || got.ConnectionID != "conn-4-v2" || got.Epoch != 110 {
+					t.Fatalf("got = %#v, want document/doc-4-v2 conn-4-v2 epoch 110", got)
+				}
+				if !bytes.Equal(got.UpdateV2, []byte{0x00, 0x0a, 0x0b}) {
+					t.Fatalf("got.UpdateV2 = %v, want %v", got.UpdateV2, []byte{0x00, 0x0a, 0x0b})
+				}
+			},
+		},
+		{
 			name: "document_update",
 			message: &DocumentUpdate{
 				Flags:        Flags(0x23),
@@ -142,6 +190,54 @@ func TestTypedMessageRoundTrip(t *testing.T) {
 				}
 				if !bytes.Equal(got.UpdateV1, []byte{0xaa}) {
 					t.Fatalf("got.UpdateV1 = %v, want %v", got.UpdateV1, []byte{0xaa})
+				}
+			},
+		},
+		{
+			name: "document_update_v2",
+			message: &DocumentUpdateV2{
+				Flags:        Flags(0x2b),
+				DocumentKey:  storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-5-v2"},
+				ConnectionID: "conn-5-v2",
+				Epoch:        111,
+				UpdateV2:     []byte{0x00, 0xaa},
+			},
+			assert: func(t *testing.T, decoded Message) {
+				t.Helper()
+
+				got, ok := decoded.(*DocumentUpdateV2)
+				if !ok {
+					t.Fatalf("decoded = %T, want *DocumentUpdateV2", decoded)
+				}
+				if got.DocumentKey.DocumentID != "doc-5-v2" || got.ConnectionID != "conn-5-v2" || got.Epoch != 111 {
+					t.Fatalf("got = %#v, want document/doc-5-v2 conn-5-v2 epoch 111", got)
+				}
+				if !bytes.Equal(got.UpdateV2, []byte{0x00, 0xaa}) {
+					t.Fatalf("got.UpdateV2 = %v, want %v", got.UpdateV2, []byte{0x00, 0xaa})
+				}
+			},
+		},
+		{
+			name: "document_update_v2_from_edge",
+			message: &DocumentUpdateV2FromEdge{
+				Flags:        Flags(0x2c),
+				DocumentKey:  storage.DocumentKey{Namespace: "team-a", DocumentID: "doc-5-v2-edge"},
+				ConnectionID: "conn-5-v2-edge",
+				Epoch:        112,
+				UpdateV2:     []byte{0x00, 0xbb},
+			},
+			assert: func(t *testing.T, decoded Message) {
+				t.Helper()
+
+				got, ok := decoded.(*DocumentUpdateV2FromEdge)
+				if !ok {
+					t.Fatalf("decoded = %T, want *DocumentUpdateV2FromEdge", decoded)
+				}
+				if got.DocumentKey.DocumentID != "doc-5-v2-edge" || got.ConnectionID != "conn-5-v2-edge" || got.Epoch != 112 {
+					t.Fatalf("got = %#v, want document/doc-5-v2-edge conn-5-v2-edge epoch 112", got)
+				}
+				if !bytes.Equal(got.UpdateV2, []byte{0x00, 0xbb}) {
+					t.Fatalf("got.UpdateV2 = %v, want %v", got.UpdateV2, []byte{0x00, 0xbb})
 				}
 			},
 		},
@@ -329,8 +425,12 @@ func TestTypedMessageValidationErrors(t *testing.T) {
 		{name: "invalid_sync_request_key", message: &DocumentSyncRequest{ConnectionID: "conn", Epoch: 1, StateVector: []byte{0x01}}, wantErr: storage.ErrInvalidDocumentKey},
 		{name: "invalid_sync_request_connection", message: &DocumentSyncRequest{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, Epoch: 1, StateVector: []byte{0x01}}, wantErr: ErrInvalidConnectionID},
 		{name: "invalid_sync_request_epoch", message: &DocumentSyncRequest{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, ConnectionID: "conn", StateVector: []byte{0x01}}, wantErr: ErrInvalidEpoch},
+		{name: "invalid_sync_request_v2_payload", message: &DocumentSyncRequestV2{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, ConnectionID: "conn", Epoch: 1}, wantErr: ErrMissingPayload},
 		{name: "invalid_sync_response_payload", message: &DocumentSyncResponse{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, ConnectionID: "conn", Epoch: 1}, wantErr: ErrMissingPayload},
 		{name: "invalid_document_update_payload", message: &DocumentUpdate{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, ConnectionID: "conn", Epoch: 1}, wantErr: ErrMissingPayload},
+		{name: "invalid_sync_response_v2_payload", message: &DocumentSyncResponseV2{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, ConnectionID: "conn", Epoch: 1}, wantErr: ErrMissingPayload},
+		{name: "invalid_document_update_v2_payload", message: &DocumentUpdateV2{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, ConnectionID: "conn", Epoch: 1}, wantErr: ErrMissingPayload},
+		{name: "invalid_document_update_v2_from_edge_payload", message: &DocumentUpdateV2FromEdge{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, ConnectionID: "conn", Epoch: 1}, wantErr: ErrMissingPayload},
 		{name: "invalid_awareness_payload", message: &AwarenessUpdate{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, ConnectionID: "conn", Epoch: 1}, wantErr: ErrMissingPayload},
 		{name: "invalid_query_awareness_request", message: &QueryAwarenessRequest{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, Epoch: 1}, wantErr: ErrInvalidConnectionID},
 		{name: "invalid_query_awareness_response_payload", message: &QueryAwarenessResponse{DocumentKey: storage.DocumentKey{DocumentID: "doc-1"}, ConnectionID: "conn", Epoch: 1}, wantErr: ErrMissingPayload},
@@ -514,9 +614,17 @@ func assertDecodedFlags(t *testing.T, message Message, want Flags) {
 		got = m.Flags
 	case *DocumentSyncRequest:
 		got = m.Flags
+	case *DocumentSyncRequestV2:
+		got = m.Flags
 	case *DocumentSyncResponse:
 		got = m.Flags
 	case *DocumentUpdate:
+		got = m.Flags
+	case *DocumentSyncResponseV2:
+		got = m.Flags
+	case *DocumentUpdateV2:
+		got = m.Flags
+	case *DocumentUpdateV2FromEdge:
 		got = m.Flags
 	case *AwarenessUpdate:
 		got = m.Flags

@@ -5,13 +5,6 @@ import (
 	"errors"
 )
 
-// detectAggregateUpdateFormatSkippingEmpty pré-valida o formato de uma lista de
-// updates, ignorando payloads vazios e preservando o comportamento no-op quando
-// toda a entrada está vazia.
-func detectAggregateUpdateFormatSkippingEmpty(updates ...[]byte) (UpdateFormat, error) {
-	return detectAggregateUpdateFormatSkippingEmptyContext(context.Background(), updates...)
-}
-
 func detectAggregateUpdateFormatSkippingEmptyContext(ctx context.Context, updates ...[]byte) (UpdateFormat, error) {
 	format, err := DetectUpdatesFormatWithReasonContext(ctx, updates...)
 	if err != nil {

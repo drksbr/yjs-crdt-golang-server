@@ -10,6 +10,28 @@ import (
 )
 
 func TestSessionRuntimeContracts(t *testing.T) {
+	t.Run("session exposes v2 canonical state with v1 compatibility", func(t *testing.T) {
+		session := NewSession(10)
+
+		emptyV2 := session.UpdateV2()
+		assertProtocolV2PayloadEquivalentToV1(t, emptyV2, yjsbridge.NewPersistedSnapshot().UpdateV1)
+
+		update := buildGCOnlyUpdate(10, 2)
+		if err := session.LoadUpdate(update); err != nil {
+			t.Fatalf("LoadUpdate(update) unexpected error: %v", err)
+		}
+		if !bytes.Equal(session.UpdateV1(), update) {
+			t.Fatalf("session.UpdateV1() = %x, want compatibility V1 %x", session.UpdateV1(), update)
+		}
+		assertProtocolV2PayloadEquivalentToV1(t, session.UpdateV2(), update)
+
+		mutated := session.UpdateV2()
+		mutated[0] ^= 0xff
+		if bytes.Equal(session.UpdateV2(), mutated) {
+			t.Fatal("session.UpdateV2() returned aliased storage")
+		}
+	})
+
 	t.Run("sync step1 returns sync step2 via encoded handler", func(t *testing.T) {
 		session := NewSession(1)
 
@@ -47,6 +69,55 @@ func TestSessionRuntimeContracts(t *testing.T) {
 		}
 		if !bytes.Equal(responses[0].Sync.Payload, expected) {
 			t.Fatalf("responses[0].Sync.Payload = %v, want %v", responses[0].Sync.Payload, expected)
+		}
+	})
+
+	t.Run("sync step1 can opt into v2 step2 output", func(t *testing.T) {
+		session := NewSession(12)
+
+		update := buildGCOnlyUpdate(12, 2)
+		if err := session.LoadUpdate(update); err != nil {
+			t.Fatalf("LoadUpdate(update) unexpected error: %v", err)
+		}
+		expectedV1, err := yjsbridge.DiffUpdate(update, []byte{0x00})
+		if err != nil {
+			t.Fatalf("DiffUpdate() unexpected error: %v", err)
+		}
+
+		encodedResponse, err := session.HandleEncodedMessagesWithOptions(
+			EncodeProtocolSyncStep1([]byte{0x00}),
+			SessionHandleOptions{SyncOutputFormat: yjsbridge.UpdateFormatV2},
+		)
+		if err != nil {
+			t.Fatalf("HandleEncodedMessagesWithOptions(v2) unexpected error: %v", err)
+		}
+
+		responses, err := DecodeProtocolMessages(encodedResponse)
+		if err != nil {
+			t.Fatalf("DecodeProtocolMessages() unexpected error: %v", err)
+		}
+		if len(responses) != 1 || responses[0].Sync == nil {
+			t.Fatalf("responses = %#v, want single sync response", responses)
+		}
+		if responses[0].Sync.Type != SyncMessageTypeStep2 {
+			t.Fatalf("responses[0].Sync.Type = %v, want %v", responses[0].Sync.Type, SyncMessageTypeStep2)
+		}
+		format, err := yjsbridge.FormatFromUpdate(responses[0].Sync.Payload)
+		if err != nil {
+			t.Fatalf("FormatFromUpdate(v2 step2) unexpected error: %v", err)
+		}
+		if format != yjsbridge.UpdateFormatV2 {
+			t.Fatalf("FormatFromUpdate(v2 step2) = %s, want %s", format, yjsbridge.UpdateFormatV2)
+		}
+		gotV1, err := yjsbridge.ConvertUpdateToV1(responses[0].Sync.Payload)
+		if err != nil {
+			t.Fatalf("ConvertUpdateToV1(v2 step2) unexpected error: %v", err)
+		}
+		if !bytes.Equal(gotV1, expectedV1) {
+			t.Fatalf("ConvertUpdateToV1(v2 step2) = %x, want %x", gotV1, expectedV1)
+		}
+		if !bytes.Equal(session.UpdateV1(), update) {
+			t.Fatalf("session.UpdateV1() changed after v2 egress")
 		}
 	})
 
@@ -88,7 +159,7 @@ func TestSessionRuntimeContracts(t *testing.T) {
 		}
 	})
 
-	t.Run("sync update and step2 normalize v2 payloads to canonical v1", func(t *testing.T) {
+	t.Run("sync update and step2 keep v2 canonical state with v1 compatibility", func(t *testing.T) {
 		session := NewSession(22)
 
 		v2Update := mustDecodeProtocolHex(t, "000002a50100000104060374686901020101000001010000")
@@ -120,6 +191,7 @@ func TestSessionRuntimeContracts(t *testing.T) {
 		if got := session.UpdateV1(); !bytes.Equal(got, want) {
 			t.Fatalf("session.UpdateV1() = %x, want %x", got, want)
 		}
+		assertProtocolV2PayloadEquivalentToV1(t, session.UpdateV2(), want)
 		snapshot, err := session.PersistedSnapshot()
 		if err != nil {
 			t.Fatalf("PersistedSnapshot() unexpected error: %v", err)

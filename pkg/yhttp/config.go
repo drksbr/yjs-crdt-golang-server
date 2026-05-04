@@ -9,6 +9,7 @@ import (
 
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
 
@@ -24,11 +25,12 @@ const (
 // de awareness; o provider usa esse valor para agregar estado efêmero e gerar
 // tombstones no fechamento da conexão.
 type Request struct {
-	DocumentKey    storage.DocumentKey
-	ConnectionID   string
-	ClientID       uint32
-	PersistOnClose bool
-	Principal      *Principal
+	DocumentKey      storage.DocumentKey
+	ConnectionID     string
+	ClientID         uint32
+	PersistOnClose   bool
+	SyncOutputFormat yjsbridge.UpdateFormat
+	Principal        *Principal
 }
 
 // ResolveRequestFunc mapeia a requisição HTTP para o documento e metadados da
@@ -103,13 +105,17 @@ type AuthorityLossHandler func(
 
 // ServerConfig define a configuração do handler HTTP/WebSocket.
 type ServerConfig struct {
-	Provider                      *yprotocol.Provider
-	OwnershipRuntime              *ycluster.DocumentOwnershipRuntime
-	ResolveRequest                ResolveRequestFunc
-	AcceptOptions                 *websocket.AcceptOptions
-	ReadLimitBytes                int64
-	WriteTimeout                  time.Duration
-	PersistTimeout                time.Duration
+	Provider         *yprotocol.Provider
+	OwnershipRuntime *ycluster.DocumentOwnershipRuntime
+	ResolveRequest   ResolveRequestFunc
+	AcceptOptions    *websocket.AcceptOptions
+	ReadLimitBytes   int64
+	WriteTimeout     time.Duration
+	PersistTimeout   time.Duration
+	// BootstrapOnConnect envia um bootstrap direto de sync + awareness quando o
+	// WebSocket é aceito. É útil para clientes y-websocket receberem presença já
+	// conhecida sem aguardar o próximo heartbeat de awareness.
+	BootstrapOnConnect            bool
 	AuthorityRevalidationInterval time.Duration
 	Authenticator                 Authenticator
 	Authorizer                    Authorizer

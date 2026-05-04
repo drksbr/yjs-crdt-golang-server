@@ -12,6 +12,7 @@ import (
 
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/ynodeproto"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
@@ -207,11 +208,17 @@ func (e *RemoteOwnerEndpoint) serveStream(ctx context.Context, stream NodeMessag
 	revalidateCh := e.startAuthorityRevalidator(sessionCtx, req, connection, cancelSession)
 	defer drainRemoteOwnerCloseSignal(revalidateCh)
 
+	syncOutputFormat := yjsbridge.UpdateFormatV1
+	if handshakeRequestsInterNodeV2(handshake) {
+		syncOutputFormat = yjsbridge.UpdateFormatV2
+	}
+
 	peer := e.local.registry.add(req.DocumentKey, req.ConnectionID, &remoteStreamPeer{
-		stream:       stream,
-		documentKey:  req.DocumentKey,
-		connectionID: req.ConnectionID,
-		epoch:        handshake.Epoch,
+		stream:           stream,
+		documentKey:      req.DocumentKey,
+		connectionID:     req.ConnectionID,
+		epoch:            handshake.Epoch,
+		syncOutputFormat: syncOutputFormat,
 		onDeliver: func(message ynodeproto.Message) {
 			observeRemoteOwnerMessage(e.local.metrics, req, remoteOwnerMetricsRoleOwner, remoteOwnerMetricsDirectionOut, nodeMessageMetricKind(message))
 		},
@@ -301,6 +308,9 @@ func requestFromHandshake(handshake *ynodeproto.Handshake) Request {
 	if handshake.Flags&ynodeproto.FlagPersistOnClose != 0 {
 		req.PersistOnClose = true
 	}
+	if handshakeRequestsInterNodeV2(handshake) {
+		req.SyncOutputFormat = yjsbridge.UpdateFormatV2
+	}
 	return req
 }
 
@@ -308,7 +318,12 @@ func (e *RemoteOwnerEndpoint) sendHandshakeAck(ctx context.Context, stream NodeM
 	writeCtx, cancel := context.WithTimeout(ctx, e.local.writeTimeout)
 	defer cancel()
 
+	flags := ynodeproto.FlagNone
+	if handshakeRequestsInterNodeV2(handshake) {
+		flags |= ynodeproto.FlagSupportsUpdateV2
+	}
 	return stream.Send(writeCtx, &ynodeproto.HandshakeAck{
+		Flags:        flags,
 		NodeID:       e.localNodeID.String(),
 		DocumentKey:  handshake.DocumentKey,
 		ConnectionID: handshake.ConnectionID,
@@ -554,7 +569,17 @@ func validateRemoteOwnerRoute(req Request, epoch uint64, message ynodeproto.Mess
 	switch message := message.(type) {
 	case *ynodeproto.DocumentSyncRequest:
 		return validateRemoteOwnerRouteFields(req, epoch, message.DocumentKey, message.ConnectionID, message.Epoch)
+	case *ynodeproto.DocumentSyncRequestV2:
+		if req.SyncOutputFormat != yjsbridge.UpdateFormatV2 {
+			return fmt.Errorf("yhttp: edge remoto enviou sync request V2 sem negociacao inter-node")
+		}
+		return validateRemoteOwnerRouteFields(req, epoch, message.DocumentKey, message.ConnectionID, message.Epoch)
 	case *ynodeproto.DocumentUpdate:
+		return validateRemoteOwnerRouteFields(req, epoch, message.DocumentKey, message.ConnectionID, message.Epoch)
+	case *ynodeproto.DocumentUpdateV2FromEdge:
+		if req.SyncOutputFormat != yjsbridge.UpdateFormatV2 {
+			return fmt.Errorf("yhttp: edge remoto enviou update V2 sem negociacao inter-node")
+		}
 		return validateRemoteOwnerRouteFields(req, epoch, message.DocumentKey, message.ConnectionID, message.Epoch)
 	case *ynodeproto.AwarenessUpdate:
 		return validateRemoteOwnerRouteFields(req, epoch, message.DocumentKey, message.ConnectionID, message.Epoch)

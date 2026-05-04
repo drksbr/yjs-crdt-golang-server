@@ -12,6 +12,7 @@ import (
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage/memory"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/yawareness"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/ycluster"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/ynodeproto"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
 )
@@ -463,7 +464,9 @@ func TestRemoteOwnerEndpointAuthenticatesHTTPHeaderBearer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialRemoteOwner() unexpected error: %v", err)
 	}
-	defer stream.Close()
+	defer func() {
+		_ = stream.Close()
+	}()
 
 	if err := stream.Send(ctx, &ynodeproto.Handshake{
 		NodeID:       "node-edge",
@@ -625,6 +628,166 @@ func TestRemoteOwnerEndpointRevalidatesAuthorityAndClosesIdleRemoteSession(t *te
 			result: "error",
 		}] == 1
 	})
+}
+
+func TestRemoteOwnerEndpointNegotiatedV2SendsRemoteUpdatesV2(t *testing.T) {
+	t.Parallel()
+
+	local := newLocalHTTPServer(t, nil)
+	endpoint, err := NewRemoteOwnerEndpoint(RemoteOwnerEndpointConfig{
+		Local:       local,
+		LocalNodeID: "node-owner-v2",
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteOwnerEndpoint() unexpected error: %v", err)
+	}
+
+	srv := newHTTPTestServerWithHandler(t, local)
+	localPeer := dialWS(t, srv.URL+"/ws?doc=room-remote-owner-v2&client=912&conn=local")
+
+	stream := newFakeRemoteOwnerStream()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- endpoint.ServeStream(ctx, stream)
+	}()
+
+	key := testDocumentKey("room-remote-owner-v2")
+	stream.pushReceive(&ynodeproto.Handshake{
+		Flags:        ynodeproto.FlagSupportsUpdateV2,
+		NodeID:       "node-edge-v2",
+		DocumentKey:  key,
+		ConnectionID: "remote-v2",
+		ClientID:     911,
+		Epoch:        55,
+	})
+
+	ack := readRemoteStreamMessage(t, stream)
+	handshakeAck, ok := ack.(*ynodeproto.HandshakeAck)
+	if !ok {
+		t.Fatalf("first stream message = %T, want *ynodeproto.HandshakeAck", ack)
+	}
+	if handshakeAck.Flags&ynodeproto.FlagSupportsUpdateV2 == 0 {
+		t.Fatalf("handshakeAck.Flags = %#x, want V2 support", handshakeAck.Flags)
+	}
+
+	localUpdate := buildGCOnlyUpdate(912, 2)
+	writeBinary(t, localPeer, yprotocol.EncodeProtocolSyncUpdate(localUpdate))
+
+	forwarded := readRemoteStreamMessage(t, stream)
+	updateV2, ok := forwarded.(*ynodeproto.DocumentUpdateV2)
+	if !ok {
+		t.Fatalf("forwarded = %T, want *ynodeproto.DocumentUpdateV2", forwarded)
+	}
+	if updateV2.DocumentKey != key || updateV2.ConnectionID != "remote-v2" || updateV2.Epoch != 55 {
+		t.Fatalf("forwarded route = %#v, want key/remote-v2/55", updateV2)
+	}
+	assertYHTTPV2EquivalentToV1(t, "owner endpoint remote peer", updateV2.UpdateV2, localUpdate)
+
+	remoteUpdateV1 := buildGCOnlyUpdate(913, 2)
+	remoteUpdateV2, err := yjsbridge.ConvertUpdateToV2(remoteUpdateV1)
+	if err != nil {
+		t.Fatalf("ConvertUpdateToV2(remote update) unexpected error: %v", err)
+	}
+	stream.pushReceive(&ynodeproto.DocumentUpdateV2FromEdge{
+		DocumentKey:  key,
+		ConnectionID: "remote-v2",
+		Epoch:        55,
+		UpdateV2:     remoteUpdateV2,
+	})
+
+	broadcast := readBinary(t, localPeer)
+	messages, err := yprotocol.DecodeProtocolMessages(broadcast)
+	if err != nil {
+		t.Fatalf("DecodeProtocolMessages(remote V2 broadcast) unexpected error: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Sync == nil {
+		t.Fatalf("remote V2 broadcast messages = %#v, want single sync message", messages)
+	}
+	if messages[0].Sync.Type != yprotocol.SyncMessageTypeUpdate {
+		t.Fatalf("remote V2 broadcast sync type = %v, want %v", messages[0].Sync.Type, yprotocol.SyncMessageTypeUpdate)
+	}
+	convertedBroadcast, err := yjsbridge.ConvertUpdateToV1(messages[0].Sync.Payload)
+	if err != nil {
+		t.Fatalf("ConvertUpdateToV1(remote V2 broadcast) unexpected error: %v", err)
+	}
+	if !bytes.Equal(convertedBroadcast, remoteUpdateV1) {
+		t.Fatalf("remote V2 broadcast payload = %x, want compatibility V1 %x", convertedBroadcast, remoteUpdateV1)
+	}
+
+	stream.pushReceive(&ynodeproto.Disconnect{
+		DocumentKey:  key,
+		ConnectionID: "remote-v2",
+		Epoch:        55,
+	})
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("ServeStream() unexpected error: %v", err)
+		}
+	case <-time.After(testIOTimeout):
+		t.Fatal("ServeStream() did not return after disconnect")
+	}
+}
+
+func TestRemoteOwnerEndpointRejectsV2DocumentUpdateWithoutNegotiation(t *testing.T) {
+	t.Parallel()
+
+	local := newLocalHTTPServer(t, nil)
+	endpoint, err := NewRemoteOwnerEndpoint(RemoteOwnerEndpointConfig{
+		Local:       local,
+		LocalNodeID: "node-owner-v2-reject",
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteOwnerEndpoint() unexpected error: %v", err)
+	}
+
+	stream := newFakeRemoteOwnerStream()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- endpoint.ServeStream(ctx, stream)
+	}()
+
+	key := testDocumentKey("room-remote-owner-v2-reject")
+	stream.pushReceive(&ynodeproto.Handshake{
+		NodeID:       "node-edge-v1",
+		DocumentKey:  key,
+		ConnectionID: "remote-v1",
+		ClientID:     914,
+		Epoch:        56,
+	})
+
+	ack := readRemoteStreamMessage(t, stream)
+	handshakeAck, ok := ack.(*ynodeproto.HandshakeAck)
+	if !ok {
+		t.Fatalf("first stream message = %T, want *ynodeproto.HandshakeAck", ack)
+	}
+	if handshakeAck.Flags&ynodeproto.FlagSupportsUpdateV2 != 0 {
+		t.Fatalf("handshakeAck.Flags = %#x, want no V2 support", handshakeAck.Flags)
+	}
+
+	updateV2, err := yjsbridge.ConvertUpdateToV2(buildGCOnlyUpdate(914, 2))
+	if err != nil {
+		t.Fatalf("ConvertUpdateToV2() unexpected error: %v", err)
+	}
+	stream.pushReceive(&ynodeproto.DocumentUpdateV2FromEdge{
+		DocumentKey:  key,
+		ConnectionID: "remote-v1",
+		Epoch:        56,
+		UpdateV2:     updateV2,
+	})
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("ServeStream() error = nil, want V2 negotiation error")
+		}
+	case <-time.After(testIOTimeout):
+		t.Fatal("ServeStream() did not reject unnegotiated V2 update")
+	}
 }
 
 func TestRemoteOwnerEndpointRejectsStaleHandshakeEpoch(t *testing.T) {

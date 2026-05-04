@@ -72,6 +72,9 @@ func TestStoreSaveAndLoadSnapshot(t *testing.T) {
 			if !bytes.Equal(saved.Snapshot.UpdateV1, tt.first.UpdateV1) {
 				t.Fatalf("snapshot gravado = %v, want %v", saved.Snapshot.UpdateV1, tt.first.UpdateV1)
 			}
+			if !bytes.Equal(saved.Snapshot.UpdateV2, tt.first.UpdateV2) {
+				t.Fatalf("snapshot V2 gravado = %v, want %v", saved.Snapshot.UpdateV2, tt.first.UpdateV2)
+			}
 
 			loaded, err := store.LoadSnapshot(context.Background(), tt.key)
 			if err != nil {
@@ -79,6 +82,9 @@ func TestStoreSaveAndLoadSnapshot(t *testing.T) {
 			}
 			if !bytes.Equal(loaded.Snapshot.UpdateV1, tt.first.UpdateV1) {
 				t.Fatalf("snapshot carregado = %v, want %v", loaded.Snapshot.UpdateV1, tt.first.UpdateV1)
+			}
+			if !bytes.Equal(loaded.Snapshot.UpdateV2, tt.first.UpdateV2) {
+				t.Fatalf("snapshot V2 carregado = %v, want %v", loaded.Snapshot.UpdateV2, tt.first.UpdateV2)
 			}
 			if loaded.Through != 0 {
 				t.Fatalf("LoadSnapshot().Through = %d, want 0", loaded.Through)
@@ -88,6 +94,7 @@ func TestStoreSaveAndLoadSnapshot(t *testing.T) {
 			}
 
 			loaded.Snapshot.UpdateV1 = []byte{0xff}
+			loaded.Snapshot.UpdateV2 = []byte{0xee}
 			reloaded, err := store.LoadSnapshot(context.Background(), tt.key)
 			if err != nil {
 				t.Fatalf("LoadSnapshot() unexpected error after mutation: %v", err)
@@ -95,10 +102,16 @@ func TestStoreSaveAndLoadSnapshot(t *testing.T) {
 			if bytes.Equal(reloaded.Snapshot.UpdateV1, loaded.Snapshot.UpdateV1) {
 				t.Fatalf("mutacao vazou do retorno de LoadSnapshot: %v", loaded.Snapshot.UpdateV1)
 			}
+			if bytes.Equal(reloaded.Snapshot.UpdateV2, loaded.Snapshot.UpdateV2) {
+				t.Fatalf("mutacao V2 vazou do retorno de LoadSnapshot: %v", loaded.Snapshot.UpdateV2)
+			}
 
 			if tt.second == nil {
 				if !bytes.Equal(reloaded.Snapshot.UpdateV1, tt.first.UpdateV1) {
 					t.Fatalf("snapshot após re-leitura = %v, want %v", reloaded.Snapshot.UpdateV1, tt.first.UpdateV1)
+				}
+				if !bytes.Equal(reloaded.Snapshot.UpdateV2, tt.first.UpdateV2) {
+					t.Fatalf("snapshot V2 após re-leitura = %v, want %v", reloaded.Snapshot.UpdateV2, tt.first.UpdateV2)
 				}
 				return
 			}
@@ -119,6 +132,9 @@ func TestStoreSaveAndLoadSnapshot(t *testing.T) {
 			if !bytes.Equal(saved.Snapshot.UpdateV1, tt.second.UpdateV1) {
 				t.Fatalf("snapshot gravado no segundo save = %v, want %v", saved.Snapshot.UpdateV1, tt.second.UpdateV1)
 			}
+			if !bytes.Equal(saved.Snapshot.UpdateV2, tt.second.UpdateV2) {
+				t.Fatalf("snapshot V2 gravado no segundo save = %v, want %v", saved.Snapshot.UpdateV2, tt.second.UpdateV2)
+			}
 
 			latest, err := store.LoadSnapshot(context.Background(), tt.key)
 			if err != nil {
@@ -126,6 +142,9 @@ func TestStoreSaveAndLoadSnapshot(t *testing.T) {
 			}
 			if !bytes.Equal(latest.Snapshot.UpdateV1, tt.second.UpdateV1) {
 				t.Fatalf("snapshot após sobrescricao = %v, want %v", latest.Snapshot.UpdateV1, tt.second.UpdateV1)
+			}
+			if !bytes.Equal(latest.Snapshot.UpdateV2, tt.second.UpdateV2) {
+				t.Fatalf("snapshot V2 após sobrescricao = %v, want %v", latest.Snapshot.UpdateV2, tt.second.UpdateV2)
 			}
 		})
 	}

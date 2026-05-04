@@ -62,7 +62,7 @@ func ReadProtocolMessagesFromStreamNWithLimit(ctx context.Context, stream io.Rea
 
 	const readChunkSize = 4096
 
-	messages := make([]*ProtocolMessage, 0, 0)
+	messages := make([]*ProtocolMessage, 0)
 	if n > 0 {
 		messages = make([]*ProtocolMessage, 0, n)
 	}

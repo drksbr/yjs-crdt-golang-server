@@ -18,7 +18,7 @@ Neste momento o repositório já possui:
 - pacote `pkg/yawareness` com API pública de awareness runtime/wire em V1 (estado local, deltas, operadores de campo, proteção do estado local, expiração e heartbeat)
 - runtime in-process mínimo em `pkg/yprotocol` com `Session`, `HandleProtocolMessage` e `HandleEncodedMessages` para composição local de sync/awareness sem provider completo
 - camada mínima de provider em `pkg/yprotocol` acima de `Session`, com `Provider`, `Open`, `Connection`, `DispatchResult`, `Persist` e `Close`, ainda sem provider completo/transporte distribuído próprio, mas normalizando sync V2 válido para V1 antes de broadcast e persistência
-- pacote `pkg/yhttp` com handler `net/http` + WebSocket acima de `pkg/yprotocol.Provider`, com fanout local, persistência opcional no close e compatibilidade por adaptação com Gin/Echo/afins
+- pacote `pkg/yhttp` com handler `net/http` + WebSocket acima de `pkg/yprotocol.Provider`, com fanout local, persistência opcional no close, egress sync V2 por request opt-in e compatibilidade por adaptação com Gin/Echo/afins
 - subpacotes `pkg/yhttp/gin`, `pkg/yhttp/echo` e `pkg/yhttp/chi` com adapters mínimos para acoplamento direto em frameworks HTTP
 - hooks opcionais de observabilidade em `pkg/yhttp` via interface `Metrics`, com adapter Prometheus em `pkg/yhttp/prometheus`
 - um runtime local por documento em `pkg/yprotocol.Provider` que passa a servir como embrião do futuro owner distribuído
@@ -41,9 +41,10 @@ Neste momento o repositório já possui:
 - primeiro corte V2 com reader interno e conversão canônica para V1, validado por fixtures upstream do Yjs
 - cobertura V2 single-update ampliada com texto Unicode, `Any` aninhado em array/map e XML com atributo/texto usando fixtures upstream do Yjs
 - cobertura V2 multi-update com fixtures upstream de `Y.mergeUpdatesV2` para append de texto entre clientes, deleção após insert, formatação sobre texto deletado, sets independentes/sobrescritos em map, escrita em map aninhado, XML, deleção em array e subdoc com update subsequente
-- encoder V2 e APIs públicas opt-in `ConvertUpdateToV2`, `ConvertUpdatesToV2`, `MergeUpdatesV2`, `DiffUpdateV2` e `IntersectUpdateWithContentIDsV2`, mantendo as APIs sem sufixo em V1 canônico
+- encoder V2 e APIs públicas opt-in `ConvertUpdateToV2`, `ConvertUpdatesToV2`, `MergeUpdatesV2`, `DiffUpdateV2` e `IntersectUpdateWithContentIDsV2`, mantendo as APIs sem sufixo em V1-compatible
 - hardening V2 adicional rejeitando valores não consumidos em encoders laterais já cobertos pelo reader, como `client`, `info` e `keyClock` sem chaves consumidas, além de `parentInfo` inválido e coleções JSON/Any superdimensionadas
-- `pkg/yprotocol.Session` e `pkg/yprotocol.Provider` agora aceitam `sync update`/`step2` com V2 válido e convertem para V1 canônico antes de atualizar estado, emitir broadcast, append no update log ou snapshot persistido
+- `pkg/yprotocol.Session` e `pkg/yprotocol.Provider` agora aceitam `sync update`/`step2` com V2 válido, mantêm estado V2-canônico e derivam V1 para APIs antigas, stores sem contrato V2 ou egress de cliente não negociado
+- `pkg/yhttp.Request.SyncOutputFormat` agora permite egress WebSocket de `SyncStep2`/`Update` em V2 por cliente, com parser de referência `SyncOutputFormatFromHTTPRequest`, preservando compatibilidade V1 para clientes legados; edge <-> owner pode negociar V2 inter-node explicitamente
 - segurança HTTP/WebSocket ampliada com `OriginPolicy`/`StaticOriginPolicy` para allowlist/preflight CORS e `RequestRedactor`/`HashingRequestRedactor` para sanitizar métricas e handlers de erro
 - hardening público ampliado com `QuotaLimiter`/`LocalQuotaLimiter`, auth inter-node HMAC com `key_id`, timestamp/nonce/replay protection, rotação de segredo e validadores fail-closed de configuração de produção
 - leitura de stream endurecida com contratos explícitos de cancelamento quando disponíveis
@@ -59,9 +60,9 @@ Neste momento o repositório já possui:
 - guards de slice endurecidos com aritmética segura contra overflow em `sliceStructWindowV1` e `ParsedContent.SliceWindow`
 - `MergeUpdates` agora trata listas compostas apenas por payloads vazios como `no-op`, retornando update V1 vazio
 - cobertura context-aware adicional para payload V1 malformado em `MergeUpdatesV1Context` e `ValidateUpdatesFormatWithReasonContext`
-- primeiro corte funcional de `conversion/snapshots` em V1 com `ConvertUpdateToV1`, `ConvertUpdatesToV1`, `SnapshotFromUpdate(s)`, `PersistedSnapshotFromUpdate(s)` e codec explícito `Encode/DecodePersistedSnapshotV1` para estado em memória, bytes canônicos e restore V1
-- `ConvertUpdateToV1`, `ConvertUpdatesToV1` e construtores de `PersistedSnapshot` agora aceitam V2 válido via reader interno fixture-backed e emitem V1 canônico; restore `DecodePersistedSnapshotV1` continua V1-only
-- ciclo de hidratação reversa de `PersistedSnapshot` em V1 com `EncodePersistedSnapshotV1` e `DecodePersistedSnapshotV1` (`context` incluído), mantendo restore V2 rejeitado
+- primeiro corte funcional de `conversion/snapshots` evoluído para V2 canônico com `ConvertUpdateToV1`, `ConvertUpdatesToV1`, `SnapshotFromUpdate(s)`, `PersistedSnapshotFromUpdate(s)` e codecs explícitos V1/V2 para estado em memória, bytes canônicos e restore
+- `ConvertUpdateToV1`, `ConvertUpdatesToV1` e construtores de `PersistedSnapshot` agora aceitam V2 válido via reader interno fixture-backed, mantêm `UpdateV2` canônico e emitem V1 apenas no limite de compatibilidade; restore `DecodePersistedSnapshotV1` continua V1-only
+- ciclo de hidratação reversa de `PersistedSnapshot` em V1 e V2 com `EncodePersistedSnapshotV1`/`DecodePersistedSnapshotV1` e `EncodePersistedSnapshotV2`/`DecodePersistedSnapshotV2` (`context` incluído)
 - testes cobrindo casos válidos e inválidos
 - `pkg/yjsbridge` já expõe API pública mínima para `Snapshot`, `PersistedSnapshot` e operações de persistência V1 (`Convert`, `Encode`, `Decode`)
 - `pkg/yjsbridge` também recebeu a promoção da API pública de `update` em V1, com superfície exposta para operações de merge/diff/intersect e utilitários de `state vector`/`content ids`; V2 válido alimenta essas operações por conversão canônica para V1
@@ -76,9 +77,10 @@ Neste momento o repositório já possui:
 - `pkg/ycluster` agora só resolve ownership a partir de lease ativa e válida; placement sozinho não classifica mais owner local/remoto
 - `pkg/ynodeproto` agora expõe o framing binário versionado do protocolo inter-node com `Header`, `Frame`, `MessageType`, `Encode/DecodeFrame` e decode por prefixo
 - `pkg/ynodeproto` agora também carrega `clientID` em `handshake`/`handshake-ack` e mensagens roteadas para `query-awareness`, `disconnect` e `close`
+- `pkg/ynodeproto` agora também expõe `FlagSupportsUpdateV2`, `DocumentSyncResponseV2`, `DocumentUpdateV2`, `DocumentSyncRequestV2` e `DocumentUpdateV2FromEdge` para sync/update V2 inter-node negociado nos sentidos owner->edge e edge->owner, sem sobrecarregar os campos `UpdateV1`
 - `pkg/storage/memory` e `pkg/storage/postgres` já implementam stores operacionais de snapshots com persistência canônica em V1
 - `pkg/storage/memory` e `pkg/storage/postgres` agora também já implementam `DistributedStore` com update log, placement e lease
-- `pkg/yhttp` agora expõe um forwarder remoto typed plugável em `OwnerAwareServerConfig.OnRemoteOwner`, baseado em `RemoteOwnerDialer`/`NodeMessageStream`, normalizando payloads sync V2 válidos para V1 canônico antes de preencher mensagens inter-node `UpdateV1`
+- `pkg/yhttp` agora expõe um forwarder remoto typed plugável em `OwnerAwareServerConfig.OnRemoteOwner`, baseado em `RemoteOwnerDialer`/`NodeMessageStream`, preservando V2 no forwarding edge->owner e no egress owner->edge quando handshake/capability negociaram suporte
 - `pkg/yhttp.Server` agora pode receber `DocumentOwnershipRuntime` para assumir ownership local antes de abrir o provider e liberar a lease no fechamento de conexões locais, streams owner-side e takeover `remote -> local`
 - `pkg/yhttp.OwnerAwareServer` agora pode promover localmente, via flag explícita, quando o lookup indica owner ausente/expirado e o `Server` local possui `DocumentOwnershipRuntime`
 - `pkg/yhttp.RemoteOwnerEndpoint` agora valida o epoch autoritativo real do provider contra o epoch do handshake inter-node, e o edge reconhece `Close` retryable ainda durante o handshake, retornando `503`/`Retry-After` quando o upgrade precisa ser refeito
@@ -166,15 +168,17 @@ Nesta etapa, a aceitação é:
 - [x] `MergeUpdates` alinhado para `no-op` quando todos os payloads agregados são vazios
 - [x] Contratos adicionais cobrindo payload V1 malformado nos caminhos context-aware de merge e validação agregada
 - [x] Primeiro corte funcional de `conversion/snapshots` em V1 com normalização pública de update (`ConvertUpdateToV1`/`ConvertUpdatesToV1`) e extração de snapshot em memória (`state vector` + `delete set`)
-- [x] Primeiro corte V2 fixture-backed: reader interno, `DecodeUpdate`, `ConvertUpdateToV1`, `ConvertUpdatesToV1` e construtores de `PersistedSnapshot` convertendo V2 válido para V1 canônico
+- [x] Primeiro corte V2 fixture-backed: reader interno, `DecodeUpdate`, `ConvertUpdateToV1`, `ConvertUpdatesToV1` e construtores de `PersistedSnapshot` mantendo `UpdateV2` canônico e `UpdateV1` compatível
 - [x] `StateVectorFromUpdate(s)`, `EncodeStateVectorFromUpdate(s)`, `CreateContentIDsFromUpdate(s)` e `SnapshotFromUpdate(s)` aceitam V2 válido por conversão canônica para V1
 - [x] Cobertura V2 ampliada com fixtures upstream para `binary`, `embed`, `format`, texto Unicode, `Any` aninhado, XML com atributo/texto, tipo aninhado e subdoc, além de hardening contra truncamento, tabela de strings inconsistente, overflow em delete set, `parentInfo` inválido, coleções superdimensionadas e valores não consumidos em encoders laterais consumidos
 - [x] Cobertura V2 multi-update com fixtures upstream de `Y.mergeUpdatesV2` validando `MergeUpdates`, `ConvertUpdatesToV1`, `DiffUpdate` e `IntersectUpdateWithContentIDs` em texto/format, map, XML, array, subdoc e tipo aninhado
 - [x] `MergeUpdates`, `DiffUpdate` e `IntersectUpdateWithContentIDs` aceitam V2 válido por conversão canônica para V1
-- [x] `PersistedSnapshotFromUpdate(s)` implementa corte funcional de snapshot binário persistido V1 (canônico V1), aceitando V2 válido por conversão para V1
+- [x] `PersistedSnapshotFromUpdate(s)` implementa corte funcional de snapshot binário persistido V2-canônico, aceitando V1/V2 e materializando V1 de compatibilidade
 - [x] `EncodePersistedSnapshotV1`/`DecodePersistedSnapshotV1` fecham o ciclo mínimo de persistência/restore em V1, já integrados ao primeiro corte operacional de storage
+- [x] `EncodePersistedSnapshotV2`/`DecodePersistedSnapshotV2` expõem restore/egress V2 canônico para snapshots persistidos, mantendo `PersistedSnapshot.UpdateV1` apenas como compatibilidade
 - [x] Documentação dos blocos núcleo (`AGENT.md`, `SPEC.md`, `docs/yjs-functions-to-port.md`) sincronizada com o estado do código
 - [x] Helpers de `SyncStep1`/`SyncStep2` a partir de múltiplos updates V1
+- [x] Helpers explícitos de sync V2 em `pkg/yprotocol` para `SyncStep2`/`Update`, além de opção de sessão para responder `SyncStep1` com `SyncStep2` V2 quando o caller negociou suporte
 - [x] Cobertura adicional para `type/doc/binary/embed/format/any`
 
 
@@ -195,8 +199,8 @@ Nesta etapa, a aceitação é:
 - [x] Consolidar a promoção da API pública de update em `pkg/yjsbridge` para V1 (`MergeUpdates`, `DiffUpdate`, `IntersectUpdateWithContentIDs`, `StateVectorFromUpdate`, `CreateContentIDsFromUpdate`), aceitando V2 válido por conversão canônica para V1
 - [x] Consolidar a promoção da API pública de sync protocol em `pkg/yprotocol` (`SyncStep1`, `SyncStep2`, envelope websocket e codecs), com V2 válido normalizado para V1 nos payloads de sync e sem provider completo
 - [x] Consolidar a promoção da API pública de awareness em `pkg/yawareness` (wire format mínimo, merge runtime e heartbeat), com limites V1 e sem provider completo
-- [x] Introduzir runtime in-process mínimo em `pkg/yprotocol` com `Session`, `HandleProtocolMessage`, `HandleEncodedMessages` e encoder público tipado de `ProtocolMessage`, ainda sem provider completo e com V2 válido convertido para V1 nos caminhos mutáveis de sync
-- [x] Introduzir camada mínima de provider em `pkg/yprotocol` acima de `Session`, com `Provider`, `Open`, `Connection`, `DispatchResult`, `Persist` e `Close`, ainda sem provider completo/transporte distribuído próprio e com broadcast/persistência sempre em V1 canônico
+- [x] Introduzir runtime in-process mínimo em `pkg/yprotocol` com `Session`, `HandleProtocolMessage`, `HandleEncodedMessages` e encoder público tipado de `ProtocolMessage`, com estado interno V2-canônico e V1 derivado para compatibilidade
+- [x] Introduzir camada mínima de provider em `pkg/yprotocol` acima de `Session`, com `Provider`, `Open`, `Connection`, `DispatchResult`, `Persist` e `Close`, com estado V2-canônico e broadcast/persistência V2 quando negociado/suportado
 - [x] Introduzir borda pública de transporte HTTP/WebSocket em `pkg/yhttp`, apoiada em `net/http` e `pkg/yprotocol.Provider`, sem dependência direta de frameworks como Gin/Echo
 - [x] Introduzir adapters mínimos em `pkg/yhttp/gin`, `pkg/yhttp/echo` e `pkg/yhttp/chi` para wiring direto em frameworks HTTP suportados
 - [x] Documentar contrato público mínimo de erros, cancelamento com `context.Context` e limites de suporte V1/V2
@@ -277,7 +281,7 @@ Nota de progresso atual:
 - `pkg/yhttp.Server` agora pode acoplar `DocumentOwnershipRuntime` para claim/release automático de lease por documento enquanto houver conexões locais, streams owner-side ou takeover local ativos;
 - o handshake inter-node owner-side agora rejeita epoch obsoleto antes do ack e força relookup/cutover via `Close` retryable, com mapeamento HTTP `503` no edge quando isso ocorre antes do upgrade;
 - a camada de segurança de `pkg/yhttp` já cobre hooks opt-in para autenticação, autorização, rate limit, quotas por conexão/frame, Origin/CORS, redaction, autenticação do handshake inter-node e validadores fail-closed explícitos para produção pública;
-- o que segue em aberto fora do corte distribuído é versionar V2 em storage/protocolo se necessário, ajustar SLOs com dados reais de tráfego/topologia/tenant e hardening público multi-tenant.
+- o que segue em aberto fora do corte distribuído é versionar V2 em storage/replay se necessário, ajustar SLOs com dados reais de tráfego/topologia/tenant e hardening público multi-tenant.
 
 #### Próximas frentes de segurança
 - [ ] Evoluir `QuotaLimiter`/`LocalQuotaLimiter` para enforcement distribuído por tenant/documento/conexão, incluindo forwarding, owner lookup e custo de replay/storage

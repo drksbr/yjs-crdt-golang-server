@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
+	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
 )
 
 // DecodeStateVector decodifica um state vector em mapa por client.
@@ -24,11 +25,18 @@ func StateVectorFromUpdatesContext(ctx context.Context, updates ...[]byte) (map[
 	case UpdateFormatUnknown:
 		return map[uint32]uint32{}, nil
 	case UpdateFormatV2:
-		converted, err := ConvertUpdatesToV1Context(ctx, updates...)
+		filtered := make([][]byte, 0, len(updates))
+		for _, update := range updates {
+			if len(update) == 0 {
+				continue
+			}
+			filtered = append(filtered, update)
+		}
+		merged, err := aggregatePayloadsInParallel(ctx, filtered, 0, decodeMergeUpdate, mergeDecodedUpdatesV1)
 		if err != nil {
 			return nil, err
 		}
-		return extractStateVectorFromUpdateV1(ctx, 0, converted)
+		return stateVectorFromStructs(merged.blockSet.structs()), nil
 	}
 
 	stateVectors, err := aggregatePayloadsInParallel(ctx, updates, 0, extractStateVectorFromUpdateV1, mergeStateVectors)
@@ -36,6 +44,21 @@ func StateVectorFromUpdatesContext(ctx context.Context, updates ...[]byte) (map[
 		return nil, err
 	}
 	return stateVectors, nil
+}
+
+func stateVectorFromStructs(structs []ytypes.Struct) map[uint32]uint32 {
+	stateVector := make(map[uint32]uint32)
+	for _, current := range structs {
+		if current == nil {
+			continue
+		}
+		client := current.ID().Client
+		endClock := current.EndClock()
+		if endClock > stateVector[client] {
+			stateVector[client] = endClock
+		}
+	}
+	return stateVector
 }
 
 // StateVectorFromUpdates agrega state vectors por cliente a partir de uma lista

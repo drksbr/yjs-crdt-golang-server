@@ -81,6 +81,29 @@ func FormatFromUpdatesContext(ctx context.Context, updates ...[]byte) (UpdateFor
 	return yupdate.FormatFromUpdatesContext(ctx, updates...)
 }
 
+// ValidateUpdate valida estruturalmente um único update.
+//
+// Diferente de `FormatFromUpdate`, esta função decodifica o payload detectado e
+// confirma que ele é consumível pelo reader V1/V2 correspondente.
+func ValidateUpdate(update []byte) error {
+	return yupdate.ValidateUpdate(update)
+}
+
+// ValidateUpdates valida estruturalmente múltiplos updates e preserva o índice
+// do payload inválido no erro retornado.
+func ValidateUpdates(updates ...[]byte) error {
+	return yupdate.ValidateUpdates(updates...)
+}
+
+// ValidateUpdatesContext valida estruturalmente múltiplos updates respeitando
+// cancelamento.
+func ValidateUpdatesContext(ctx context.Context, updates ...[]byte) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return yupdate.ValidateUpdatesContext(ctx, updates...)
+}
+
 // ConvertUpdateToV1 normaliza um update suportado para a forma canônica V1.
 func ConvertUpdateToV1(update []byte) ([]byte, error) {
 	return yupdate.ConvertUpdateToV1(update)

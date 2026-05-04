@@ -22,8 +22,6 @@ type decoderV2 struct {
 	lengths    *uintOptRleDecoder
 	keys       []string
 	dsCurrVal  uint32
-
-	allowUndrainedKeyClock bool
 }
 
 func newDecoderV2(data []byte) (*decoderV2, error) {
@@ -105,13 +103,8 @@ func (d *decoderV2) remaining() int {
 }
 
 func (d *decoderV2) ensureDrained() error {
-	// keyClock can contain upstream key-cache entries for XML/format paths that
-	// are not materialized by this V1-canonical reader. Without consumed keys or
-	// an explicit XML key-cache path, remaining keyClock bytes are malformed.
-	if len(d.keys) == 0 && !d.allowUndrainedKeyClock {
-		if err := d.keyClock.ensureDrained(); err != nil {
-			return err
-		}
+	if err := d.keyClock.ensureDrained(); err != nil {
+		return err
 	}
 	checks := []func() error{
 		d.client.ensureDrained,

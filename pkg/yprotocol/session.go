@@ -9,11 +9,11 @@ import (
 )
 
 // Session mantém um estado mínimo em-processo para handshake e ingestão de
-// envelopes y-protocols com saída de documento em V1 canônico.
+// envelopes y-protocols com documento canônico em Update V2.
 //
 // O runtime cobre apenas:
-// - update V1 canônico do documento;
-// - normalização de updates V2 válidos para V1 canônico;
+// - update V2 canônico do documento;
+// - compatibilidade V1 derivada nas APIs antigas;
 // - awareness local/remoto via `StateManager`;
 // - resposta a `SyncStep1` com `SyncStep2`;
 // - resposta a `query-awareness` com snapshot de awareness.
@@ -22,14 +22,23 @@ import (
 // completo.
 type Session struct {
 	mu        sync.RWMutex
-	updateV1  []byte
+	updateV2  []byte
 	awareness *yawareness.StateManager
+}
+
+// SessionHandleOptions controla opções explícitas de saída do runtime local.
+type SessionHandleOptions struct {
+	// SyncOutputFormat define o formato usado em respostas SyncStep2.
+	//
+	// Zero value e UpdateFormatV1 preservam compatibilidade V1. Use
+	// UpdateFormatV2 quando o caller já negociou suporte V2 com o peer.
+	SyncOutputFormat yjsbridge.UpdateFormat
 }
 
 // NewSession cria um runtime in-process vazio para um client local.
 func NewSession(localClientID uint32) *Session {
 	return &Session{
-		updateV1:  append([]byte(nil), yjsbridge.NewPersistedSnapshot().UpdateV1...),
+		updateV2:  newEmptyUpdateV2(),
 		awareness: yawareness.NewStateManager(localClientID),
 	}
 }
@@ -42,32 +51,49 @@ func (s *Session) Awareness() *yawareness.StateManager {
 	return s.awareness
 }
 
-// UpdateV1 retorna uma cópia do update V1 canônico atual.
+// UpdateV1 retorna uma cópia compatível V1 derivada do estado V2 atual.
 func (s *Session) UpdateV1() []byte {
+	if s == nil {
+		return nil
+	}
+
+	updateV2 := s.UpdateV2()
+	if len(updateV2) == 0 {
+		return nil
+	}
+	updateV1, err := yjsbridge.ConvertUpdateToV1(updateV2)
+	if err != nil {
+		return nil
+	}
+	return updateV1
+}
+
+// UpdateV2 retorna uma cópia do update V2 canônico atual.
+func (s *Session) UpdateV2() []byte {
 	if s == nil {
 		return nil
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return append([]byte(nil), s.updateV1...)
+	return append([]byte(nil), s.updateV2...)
 }
 
 // LoadUpdate substitui o estado atual pelo update suportado informado,
-// normalizado para V1 canônico.
+// normalizado para V2 canônico.
 func (s *Session) LoadUpdate(update []byte) error {
 	if s == nil {
 		return ErrNilSession
 	}
 
-	updateV1, err := yjsbridge.ConvertUpdateToV1(update)
+	updateV2, err := yjsbridge.ConvertUpdateToV2(update)
 	if err != nil {
 		return err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.updateV1 = append([]byte(nil), updateV1...)
+	s.updateV2 = append([]byte(nil), updateV2...)
 	return nil
 }
 
@@ -79,24 +105,35 @@ func (s *Session) LoadPersistedSnapshot(snapshot *yjsbridge.PersistedSnapshot) e
 	}
 	if snapshot == nil || snapshot.IsEmpty() {
 		s.mu.Lock()
-		s.updateV1 = append([]byte(nil), yjsbridge.NewPersistedSnapshot().UpdateV1...)
+		s.updateV2 = newEmptyUpdateV2()
 		s.mu.Unlock()
 		return nil
 	}
-	return s.LoadUpdate(snapshot.UpdateV1)
+	updateV2, err := yjsbridge.EncodePersistedSnapshotV2(snapshot)
+	if err != nil {
+		return err
+	}
+	return s.LoadUpdate(updateV2)
 }
 
-// PersistedSnapshot materializa um snapshot persistível a partir do estado atual.
+// PersistedSnapshot materializa um snapshot persistível V1-compatible a partir
+// do estado V2 atual.
 func (s *Session) PersistedSnapshot() (*yjsbridge.PersistedSnapshot, error) {
 	if s == nil {
 		return nil, ErrNilSession
 	}
-	return yjsbridge.PersistedSnapshotFromUpdate(s.UpdateV1())
+	return yjsbridge.PersistedSnapshotFromUpdate(s.UpdateV2())
 }
 
 // HandleProtocolMessage aplica uma mensagem inbound e retorna as respostas
 // necessárias do runtime mínimo.
 func (s *Session) HandleProtocolMessage(message *ProtocolMessage) ([]*ProtocolMessage, error) {
+	return s.HandleProtocolMessageWithOptions(message, SessionHandleOptions{})
+}
+
+// HandleProtocolMessageWithOptions aplica uma mensagem inbound usando opções
+// explícitas de saída, preservando o estado interno V2-canônico.
+func (s *Session) HandleProtocolMessageWithOptions(message *ProtocolMessage, opts SessionHandleOptions) ([]*ProtocolMessage, error) {
 	if s == nil {
 		return nil, ErrNilSession
 	}
@@ -106,7 +143,7 @@ func (s *Session) HandleProtocolMessage(message *ProtocolMessage) ([]*ProtocolMe
 
 	switch message.Protocol {
 	case ProtocolTypeSync:
-		return s.handleSyncMessage(message.Sync)
+		return s.handleSyncMessage(message.Sync, opts)
 	case ProtocolTypeAwareness:
 		s.awareness.Apply(message.Awareness)
 		return nil, nil
@@ -126,13 +163,19 @@ func (s *Session) HandleProtocolMessage(message *ProtocolMessage) ([]*ProtocolMe
 // HandleProtocolMessages processa uma sequência de mensagens inbound e agrega as
 // respostas no mesmo ordenamento.
 func (s *Session) HandleProtocolMessages(messages ...*ProtocolMessage) ([]*ProtocolMessage, error) {
+	return s.HandleProtocolMessagesWithOptions(SessionHandleOptions{}, messages...)
+}
+
+// HandleProtocolMessagesWithOptions processa uma sequência de mensagens inbound
+// usando opções explícitas de saída e agrega as respostas no mesmo ordenamento.
+func (s *Session) HandleProtocolMessagesWithOptions(opts SessionHandleOptions, messages ...*ProtocolMessage) ([]*ProtocolMessage, error) {
 	if s == nil {
 		return nil, ErrNilSession
 	}
 
 	out := make([]*ProtocolMessage, 0)
 	for idx, message := range messages {
-		responses, err := s.HandleProtocolMessage(message)
+		responses, err := s.HandleProtocolMessageWithOptions(message, opts)
 		if err != nil {
 			return nil, fmt.Errorf("handle protocol message %d: %w", idx, err)
 		}
@@ -144,6 +187,12 @@ func (s *Session) HandleProtocolMessages(messages ...*ProtocolMessage) ([]*Proto
 // HandleEncodedMessages decodifica um stream inbound, aplica as mensagens à
 // sessão e retorna o stream outbound concatenado.
 func (s *Session) HandleEncodedMessages(src []byte) ([]byte, error) {
+	return s.HandleEncodedMessagesWithOptions(src, SessionHandleOptions{})
+}
+
+// HandleEncodedMessagesWithOptions decodifica um stream inbound, aplica as
+// mensagens à sessão e retorna o stream outbound usando opções explícitas.
+func (s *Session) HandleEncodedMessagesWithOptions(src []byte, opts SessionHandleOptions) ([]byte, error) {
 	if s == nil {
 		return nil, ErrNilSession
 	}
@@ -152,17 +201,17 @@ func (s *Session) HandleEncodedMessages(src []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	responses, err := s.HandleProtocolMessages(messages...)
+	responses, err := s.HandleProtocolMessagesWithOptions(opts, messages...)
 	if err != nil {
 		return nil, err
 	}
 	return EncodeProtocolEnvelopes(responses...)
 }
 
-func (s *Session) handleSyncMessage(message *SyncMessage) ([]*ProtocolMessage, error) {
+func (s *Session) handleSyncMessage(message *SyncMessage, opts SessionHandleOptions) ([]*ProtocolMessage, error) {
 	switch message.Type {
 	case SyncMessageTypeStep1:
-		diff, err := yjsbridge.DiffUpdate(s.UpdateV1(), message.Payload)
+		diff, err := s.diffForSyncStep1(message.Payload, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -174,21 +223,59 @@ func (s *Session) handleSyncMessage(message *SyncMessage) ([]*ProtocolMessage, e
 			},
 		}}, nil
 	case SyncMessageTypeStep2, SyncMessageTypeUpdate:
-		current := s.UpdateV1()
-		updateV1, err := yjsbridge.ConvertUpdateToV1(message.Payload)
+		current := s.UpdateV2()
+		updateV2, err := yjsbridge.ConvertUpdateToV2(message.Payload)
 		if err != nil {
 			return nil, err
 		}
-		merged, err := yjsbridge.MergeUpdates(current, updateV1)
+		merged, err := yjsbridge.MergeUpdatesV2(current, updateV2)
 		if err != nil {
 			return nil, err
 		}
 
 		s.mu.Lock()
-		s.updateV1 = append([]byte(nil), merged...)
+		s.updateV2 = append([]byte(nil), merged...)
 		s.mu.Unlock()
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("%w: %d", ErrUnknownSyncMessageType, message.Type)
 	}
+}
+
+func (s *Session) diffForSyncStep1(stateVector []byte, opts SessionHandleOptions) ([]byte, error) {
+	return diffForSyncOutputFormat(s.UpdateV2(), stateVector, opts.SyncOutputFormat)
+}
+
+func diffForSyncOutputFormat(updateV2, stateVector []byte, format yjsbridge.UpdateFormat) ([]byte, error) {
+	switch format {
+	case yjsbridge.UpdateFormatUnknown, yjsbridge.UpdateFormatV1:
+		updateV1, err := yjsbridge.ConvertUpdateToV1(updateV2)
+		if err != nil {
+			return nil, err
+		}
+		return yjsbridge.DiffUpdate(updateV1, stateVector)
+	case yjsbridge.UpdateFormatV2:
+		return yjsbridge.DiffUpdateV2(updateV2, stateVector)
+	default:
+		return nil, fmt.Errorf("%w: %s", yjsbridge.ErrUnknownUpdateFormat, format)
+	}
+}
+
+func convertForSyncOutputFormat(updateV2 []byte, format yjsbridge.UpdateFormat) ([]byte, error) {
+	switch format {
+	case yjsbridge.UpdateFormatUnknown, yjsbridge.UpdateFormatV1:
+		return yjsbridge.ConvertUpdateToV1(updateV2)
+	case yjsbridge.UpdateFormatV2:
+		return append([]byte(nil), updateV2...), nil
+	default:
+		return nil, fmt.Errorf("%w: %s", yjsbridge.ErrUnknownUpdateFormat, format)
+	}
+}
+
+func newEmptyUpdateV2() []byte {
+	snapshot := yjsbridge.NewPersistedSnapshot()
+	if snapshot == nil || len(snapshot.UpdateV2) == 0 {
+		return nil
+	}
+	return append([]byte(nil), snapshot.UpdateV2...)
 }

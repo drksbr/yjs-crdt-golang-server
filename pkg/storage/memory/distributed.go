@@ -8,16 +8,19 @@ import (
 	"time"
 
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
+	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 var (
-	_ storage.UpdateLogStore              = (*Store)(nil)
-	_ storage.AuthoritativeUpdateLogStore = (*Store)(nil)
-	_ storage.PlacementStore              = (*Store)(nil)
-	_ storage.PlacementListStore          = (*Store)(nil)
-	_ storage.LeaseStore                  = (*Store)(nil)
-	_ storage.LeaseHandoffStore           = (*Store)(nil)
-	_ storage.DistributedStore            = (*Store)(nil)
+	_ storage.UpdateLogStore                = (*Store)(nil)
+	_ storage.UpdateLogStoreV2              = (*Store)(nil)
+	_ storage.AuthoritativeUpdateLogStore   = (*Store)(nil)
+	_ storage.AuthoritativeUpdateLogStoreV2 = (*Store)(nil)
+	_ storage.PlacementStore                = (*Store)(nil)
+	_ storage.PlacementListStore            = (*Store)(nil)
+	_ storage.LeaseStore                    = (*Store)(nil)
+	_ storage.LeaseHandoffStore             = (*Store)(nil)
+	_ storage.DistributedStore              = (*Store)(nil)
 )
 
 // AppendUpdate adiciona um update V1 ao fim do log incremental do documento.
@@ -41,16 +44,19 @@ func (s *Store) AppendUpdate(ctx context.Context, key storage.DocumentKey, updat
 	s.ensureStoreInitializedLocked()
 
 	offset := s.updateNext[key] + 1
-	record := &storage.UpdateLogRecord{
-		Key:      key,
-		Offset:   offset,
-		UpdateV1: append([]byte(nil), update...),
-		Epoch:    0,
-		StoredAt: s.nowTime(),
-	}
+	record := newUpdateLogRecord(key, offset, update, nil, 0, s.nowTime())
 	s.updateLogs[key] = append(s.updateLogs[key], record)
 	s.updateNext[key] = offset
 	return record.Clone(), nil
+}
+
+// AppendUpdateV2 adiciona um update V2 ao fim do log incremental do documento.
+func (s *Store) AppendUpdateV2(ctx context.Context, key storage.DocumentKey, update []byte) (*storage.UpdateLogRecord, error) {
+	updateV1, err := yjsbridge.ConvertUpdateToV1(update)
+	if err != nil {
+		return nil, err
+	}
+	return s.appendUpdateV2(ctx, key, update, updateV1, 0, nil)
 }
 
 // AppendUpdateAuthoritative adiciona um update V1 ao fim do log incremental do
@@ -89,16 +95,85 @@ func (s *Store) AppendUpdateAuthoritative(
 	}
 
 	offset := s.updateNext[key] + 1
-	record := &storage.UpdateLogRecord{
-		Key:      key,
-		Offset:   offset,
-		UpdateV1: append([]byte(nil), update...),
-		Epoch:    fence.Owner.Epoch,
-		StoredAt: now,
-	}
+	record := newUpdateLogRecord(key, offset, update, nil, fence.Owner.Epoch, now)
 	s.updateLogs[key] = append(s.updateLogs[key], record)
 	s.updateNext[key] = offset
 	return record.Clone(), nil
+}
+
+// AppendUpdateV2Authoritative adiciona um update V2 ao log sob fencing.
+func (s *Store) AppendUpdateV2Authoritative(
+	ctx context.Context,
+	key storage.DocumentKey,
+	update []byte,
+	fence storage.AuthorityFence,
+) (*storage.UpdateLogRecord, error) {
+	updateV1, err := yjsbridge.ConvertUpdateToV1(update)
+	if err != nil {
+		return nil, err
+	}
+	return s.appendUpdateV2(ctx, key, update, updateV1, fence.Owner.Epoch, &fence)
+}
+
+func (s *Store) appendUpdateV2(
+	ctx context.Context,
+	key storage.DocumentKey,
+	updateV2 []byte,
+	updateV1 []byte,
+	epoch uint64,
+	fence *storage.AuthorityFence,
+) (*storage.UpdateLogRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s == nil {
+		return nil, errNilStore
+	}
+	if err := key.Validate(); err != nil {
+		return nil, err
+	}
+	if len(updateV2) == 0 {
+		return nil, fmt.Errorf("%w: updateV2 obrigatorio", storage.ErrInvalidUpdatePayload)
+	}
+	if fence != nil {
+		if err := fence.Validate(); err != nil {
+			return nil, err
+		}
+	}
+
+	now := s.nowTime()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.ensureStoreInitializedLocked()
+	if fence != nil {
+		if err := s.validateAuthorityLocked(key, *fence, now); err != nil {
+			return nil, err
+		}
+	}
+	offset := s.updateNext[key] + 1
+	record := newUpdateLogRecord(key, offset, updateV1, updateV2, epoch, now)
+	s.updateLogs[key] = append(s.updateLogs[key], record)
+	s.updateNext[key] = offset
+	return record.Clone(), nil
+}
+
+func newUpdateLogRecord(key storage.DocumentKey, offset storage.UpdateOffset, updateV1, updateV2 []byte, epoch uint64, storedAt time.Time) *storage.UpdateLogRecord {
+	record := &storage.UpdateLogRecord{
+		Key:      key,
+		Offset:   offset,
+		Epoch:    epoch,
+		StoredAt: storedAt,
+	}
+	if len(updateV1) > 0 {
+		record.UpdateV1 = append([]byte(nil), updateV1...)
+	}
+	if len(updateV2) > 0 {
+		record.UpdateV2 = append([]byte(nil), updateV2...)
+	} else if converted, err := yjsbridge.ConvertUpdateToV2(updateV1); err == nil {
+		record.UpdateV2 = converted
+	}
+	return record
 }
 
 // ListUpdates lista updates com offset estritamente maior que after.

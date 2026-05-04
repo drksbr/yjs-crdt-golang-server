@@ -108,11 +108,11 @@ func (s *Store) SaveSnapshotCheckpointEpoch(ctx context.Context, key storage.Doc
 		return nil, err
 	}
 
-	payload, err := yjsbridge.EncodePersistedSnapshotV1(snapshot)
+	payloadV1, payloadV2, err := encodePersistedSnapshotPayloads(snapshot)
 	if err != nil {
 		return nil, err
 	}
-	storedAt, err := s.saveSnapshotPool(ctx, pool, key, payload, through, epoch)
+	storedAt, err := s.saveSnapshotPool(ctx, pool, key, payloadV1, payloadV2, through, epoch)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +163,7 @@ func (s *Store) SaveSnapshotCheckpointAuthoritative(
 		return nil, err
 	}
 
-	payload, err := yjsbridge.EncodePersistedSnapshotV1(snapshot)
+	payloadV1, payloadV2, err := encodePersistedSnapshotPayloads(snapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +180,7 @@ func (s *Store) SaveSnapshotCheckpointAuthoritative(
 		return nil, err
 	}
 
-	storedAt, err := s.saveSnapshotTx(ctx, tx, key, payload, through, fence.Owner.Epoch)
+	storedAt, err := s.saveSnapshotTx(ctx, tx, key, payloadV1, payloadV2, through, fence.Owner.Epoch)
 	if err != nil {
 		return nil, err
 	}
@@ -211,23 +211,24 @@ func (s *Store) LoadSnapshot(ctx context.Context, key storage.DocumentKey) (*sto
 	}
 
 	query := fmt.Sprintf(`
-SELECT snapshot_v1, through_offset, owner_epoch, stored_at
+SELECT snapshot_v1, snapshot_v2, through_offset, owner_epoch, stored_at
 FROM %s.document_snapshots
 WHERE namespace = $1 AND document_id = $2
 `, quoteIdentifier(s.schema))
 
-	var payload []byte
+	var payloadV1 []byte
+	var payloadV2 []byte
 	var through int64
 	var epoch int64
 	var storedAt time.Time
-	if err := pool.QueryRow(ctx, query, key.Namespace, key.DocumentID).Scan(&payload, &through, &epoch, &storedAt); err != nil {
+	if err := pool.QueryRow(ctx, query, key.Namespace, key.DocumentID).Scan(&payloadV1, &payloadV2, &through, &epoch, &storedAt); err != nil {
 		if isNoRows(err) {
 			return nil, storage.ErrSnapshotNotFound
 		}
 		return nil, err
 	}
 
-	snapshot, err := yjsbridge.DecodePersistedSnapshotV1(payload)
+	snapshot, err := decodePersistedSnapshotPayload(payloadV1, payloadV2)
 	if err != nil {
 		return nil, err
 	}
@@ -253,8 +254,8 @@ func isNoRows(err error) bool {
 	return errors.Is(err, pgx.ErrNoRows)
 }
 
-func (s *Store) saveSnapshotPool(ctx context.Context, pool *pgxpool.Pool, key storage.DocumentKey, payload []byte, through storage.UpdateOffset, epoch uint64) (time.Time, error) {
-	query, args, err := s.saveSnapshotQuery(key, payload, through, epoch)
+func (s *Store) saveSnapshotPool(ctx context.Context, pool *pgxpool.Pool, key storage.DocumentKey, payloadV1, payloadV2 []byte, through storage.UpdateOffset, epoch uint64) (time.Time, error) {
+	query, args, err := s.saveSnapshotQuery(key, payloadV1, payloadV2, through, epoch)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -266,8 +267,8 @@ func (s *Store) saveSnapshotPool(ctx context.Context, pool *pgxpool.Pool, key st
 	return storedAt, nil
 }
 
-func (s *Store) saveSnapshotTx(ctx context.Context, tx pgx.Tx, key storage.DocumentKey, payload []byte, through storage.UpdateOffset, epoch uint64) (time.Time, error) {
-	query, args, err := s.saveSnapshotQuery(key, payload, through, epoch)
+func (s *Store) saveSnapshotTx(ctx context.Context, tx pgx.Tx, key storage.DocumentKey, payloadV1, payloadV2 []byte, through storage.UpdateOffset, epoch uint64) (time.Time, error) {
+	query, args, err := s.saveSnapshotQuery(key, payloadV1, payloadV2, through, epoch)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -279,7 +280,7 @@ func (s *Store) saveSnapshotTx(ctx context.Context, tx pgx.Tx, key storage.Docum
 	return storedAt, nil
 }
 
-func (s *Store) saveSnapshotQuery(key storage.DocumentKey, payload []byte, through storage.UpdateOffset, epoch uint64) (string, []any, error) {
+func (s *Store) saveSnapshotQuery(key storage.DocumentKey, payloadV1, payloadV2 []byte, through storage.UpdateOffset, epoch uint64) (string, []any, error) {
 	throughOffset, err := offsetToInt64(through)
 	if err != nil {
 		return "", nil, err
@@ -290,11 +291,30 @@ func (s *Store) saveSnapshotQuery(key storage.DocumentKey, payload []byte, throu
 	}
 
 	query := fmt.Sprintf(`
-INSERT INTO %s.document_snapshots(namespace, document_id, snapshot_v1, through_offset, owner_epoch, stored_at)
-VALUES ($1, $2, $3, $4, $5, now())
+INSERT INTO %s.document_snapshots(namespace, document_id, snapshot_v1, snapshot_v2, through_offset, owner_epoch, stored_at)
+VALUES ($1, $2, $3, $4, $5, $6, now())
 ON CONFLICT (namespace, document_id)
-DO UPDATE SET snapshot_v1 = EXCLUDED.snapshot_v1, through_offset = EXCLUDED.through_offset, owner_epoch = EXCLUDED.owner_epoch, stored_at = now()
+DO UPDATE SET snapshot_v1 = EXCLUDED.snapshot_v1, snapshot_v2 = EXCLUDED.snapshot_v2, through_offset = EXCLUDED.through_offset, owner_epoch = EXCLUDED.owner_epoch, stored_at = now()
 RETURNING stored_at
 `, quoteIdentifier(s.schema))
-	return query, []any{key.Namespace, key.DocumentID, payload, throughOffset, epochValue}, nil
+	return query, []any{key.Namespace, key.DocumentID, payloadV1, payloadV2, throughOffset, epochValue}, nil
+}
+
+func encodePersistedSnapshotPayloads(snapshot *yjsbridge.PersistedSnapshot) ([]byte, []byte, error) {
+	payloadV1, err := yjsbridge.EncodePersistedSnapshotV1(snapshot)
+	if err != nil {
+		return nil, nil, err
+	}
+	payloadV2, err := yjsbridge.EncodePersistedSnapshotV2(snapshot)
+	if err != nil {
+		return nil, nil, err
+	}
+	return payloadV1, payloadV2, nil
+}
+
+func decodePersistedSnapshotPayload(payloadV1, payloadV2 []byte) (*yjsbridge.PersistedSnapshot, error) {
+	if len(payloadV2) > 0 {
+		return yjsbridge.DecodePersistedSnapshotV2(payloadV2)
+	}
+	return yjsbridge.DecodePersistedSnapshotV1(payloadV1)
 }

@@ -19,11 +19,12 @@ The goal is to answer:
 
 ## Non-negotiable rules
 
-- The project is V1-first by default.
-- APIs without a `V2` suffix return canonical Yjs Update V1 bytes.
-- V2 output exists only through explicit opt-in APIs.
-- Storage, protocol replay, and inter-node messages stay canonical V1 unless
-  the wire contract is explicitly versioned.
+- V2 is canonical for V2-aware snapshots, session/provider state and replay.
+- APIs without a `V2` suffix return Yjs Update V1-compatible bytes for legacy callers.
+- V2 client egress exists only through explicit negotiation/options.
+- Storage preserves V2 when the store implements the V2 snapshot/log contracts
+  and derives V1 for compatibility. Inter-node sync may use negotiated
+  dedicated V2 message types in both owner->edge and edge->owner directions.
 - Do not import `internal/...` packages from application code.
 - OAuth/OIDC, user catalogs, ACL/RBAC/ABAC, search, titles, folders, tags, and
   document link semantics belong to the consuming application.
@@ -130,8 +131,11 @@ content IDs, and persisted snapshots.
 - `PersistedSnapshotFromUpdates(updates ...[]byte)`: build a persistable snapshot from many updates.
 - `PersistedSnapshotFromUpdatesContext(ctx, updates...)`: same as above with cancellation.
 - `EncodePersistedSnapshotV1(snapshot)`: serialize a persisted snapshot in V1.
+- `EncodePersistedSnapshotV2(snapshot)`: serialize the canonical V2 snapshot payload.
 - `DecodePersistedSnapshotV1(payload []byte)`: restore a persisted snapshot from V1 bytes.
 - `DecodePersistedSnapshotV1Context(ctx, payload)`: same as above with cancellation.
+- `DecodePersistedSnapshotV2(payload []byte)`: restore canonical V2 snapshot bytes and materialize V1 compatibility bytes.
+- `DecodePersistedSnapshotV2Context(ctx, payload)`: same as above with cancellation.
 
 #### Key types and methods
 
@@ -169,6 +173,7 @@ encoding/decoding.
 - `EncodeProtocolEnvelopes(messages...)`: encode many envelope messages.
 - `EncodeProtocolSyncMessage(typ, payload)`: encode a sync message inside a protocol envelope.
 - `EncodeProtocolSyncUpdate(update)`: wrap a raw update as a sync message.
+- `EncodeProtocolSyncUpdateV2(update)`: convert a supported update to V2 and wrap it as a sync message.
 - `EncodeProtocolSyncStep1(stateVector)`: encode a sync step 1 payload.
 - `EncodeProtocolSyncStep1FromUpdate(update)`: derive sync step 1 from one update.
 - `EncodeProtocolSyncStep1FromUpdates(updates...)`: derive sync step 1 from many updates.
@@ -176,6 +181,8 @@ encoding/decoding.
 - `EncodeProtocolSyncStep2(update)`: encode a sync step 2 payload.
 - `EncodeProtocolSyncStep2FromUpdates(updates...)`: derive sync step 2 from many updates.
 - `EncodeProtocolSyncStep2FromUpdatesContext(ctx, updates...)`: same as above with cancellation.
+- `EncodeProtocolSyncStep2FromUpdatesV2(updates...)`: derive sync step 2 from many updates and emit V2.
+- `EncodeProtocolSyncStep2FromUpdatesV2Context(ctx, updates...)`: same as above with cancellation.
 - `EncodeProtocolQueryAwareness()`: encode a query-awareness message.
 - `EncodeProtocolAwarenessUpdate(update)`: encode an awareness update in protocol form.
 - `EncodeProtocolAuthMessage(typ, reason)`: encode an auth message in protocol form.
@@ -191,6 +198,7 @@ encoding/decoding.
 - `DecodeProtocolAwarenessUpdate(src)`: decode an awareness update.
 - `EncodeSyncMessage(typ, payload)`: encode a raw sync message.
 - `EncodeSyncUpdate(update)`: wrap a raw update as sync.
+- `EncodeSyncUpdateV2(update)`: convert a supported update to V2 and wrap it as sync.
 - `EncodeSyncStep1(stateVector)`: encode sync step 1.
 - `EncodeSyncStep1FromUpdate(update)`: derive sync step 1 from one update.
 - `EncodeSyncStep1FromUpdates(updates...)`: derive sync step 1 from many updates.
@@ -198,12 +206,15 @@ encoding/decoding.
 - `EncodeSyncStep2(update)`: encode sync step 2.
 - `EncodeSyncStep2FromUpdates(updates...)`: derive sync step 2 from many updates.
 - `EncodeSyncStep2FromUpdatesContext(ctx, updates...)`: same as above with cancellation.
+- `EncodeSyncStep2FromUpdatesV2(updates...)`: derive sync step 2 from many updates and emit V2.
+- `EncodeSyncStep2FromUpdatesV2Context(ctx, updates...)`: same as above with cancellation.
 - `EncodeAuthMessage(typ, reason)`: encode a raw auth message.
 - `EncodeAuthPermissionDenied(reason)`: encode a raw permission-denied auth message.
 
 #### Key types and methods
 
-- `Session`: `Awareness`, `HandleEncodedMessages`, `HandleProtocolMessage`, `HandleProtocolMessages`, `LoadUpdate`, `LoadPersistedSnapshot`, `PersistedSnapshot`, `UpdateV1`.
+- `Session`: `Awareness`, `HandleEncodedMessages`, `HandleEncodedMessagesWithOptions`, `HandleProtocolMessage`, `HandleProtocolMessageWithOptions`, `HandleProtocolMessages`, `HandleProtocolMessagesWithOptions`, `LoadUpdate`, `LoadPersistedSnapshot`, `PersistedSnapshot`, `UpdateV1`, `UpdateV2`.
+- `SessionHandleOptions`: opt-in sync egress format selection for direct session handling.
 - `Provider`: `Open`.
 - `Connection`: `ID`, `ClientID`, `DocumentKey`, `AuthorityEpoch`, `AuthorityLost`, `HandleEncodedMessages`, `HandleEncodedMessagesContext`, `Persist`, `RevalidateAuthority`, `Close`.
 - `ProtocolMessage`: envelope with sync, awareness, auth, or query-awareness payloads.
@@ -242,6 +253,7 @@ security hooks around the collaboration runtime.
 - `NewRemoteOwnerForwardHandler(cfg)`: build a handler that forwards to the remote owner.
 - `NewRemoteOwnerForwardHandlers(cfg)`: build the forward and authority-loss handlers together.
 - `NewRebalanceAuthorityRevalidationCallback(cfg)`: build a callback that revalidates authority after rebalance decisions.
+- `SyncOutputFormatFromHTTPRequest(r)`: parse explicit V1/V2 WebSocket sync egress negotiation from query, header, or subprotocol.
 - `NewInMemoryRemoteOwnerNonceStore(cfg)`: build the reference nonce store for replay protection.
 - `NewFixedWindowRateLimiter(cfg)`: build the reference fixed-window rate limiter.
 - `NewLocalQuotaLimiter(cfg)`: build the reference in-memory quota limiter.
@@ -286,8 +298,14 @@ security hooks around the collaboration runtime.
 - Use `pkg/yhttp` at the edge, not inside application business logic.
 - The application should provide OAuth/OIDC identity and convert it into the
   auth/authorization hooks exposed here.
-- Valid Update V2 input may enter the edge, but downstream owner state and
-  inter-node messages stay V1 canonical unless you version the wire contract.
+- Valid Update V2 input may enter the edge, and downstream owner state stays V2
+  canonical. Storage preserves V2 when the store implements the V2 log/snapshot
+  contracts and derives V1 for compatibility. Inter-node sync can use negotiated
+  dedicated V2 message types in both directions; edge->owner no longer tunnels
+  V2 through legacy sync/update fields.
+- Set `Request.SyncOutputFormat` to `UpdateFormatV2` only after explicit client
+  negotiation; default WebSocket egress remains V1. The reference negotiation
+  accepts `sync=v2`, `X-Yjs-Sync-Output-Format: v2`, or `yjs-sync-v2`.
 
 ### `pkg/storage`
 
@@ -424,6 +442,15 @@ Use this package for awareness/presence payloads and the local state manager.
 
 Use this package for the typed inter-node wire protocol.
 
+V2 inter-node sync is explicit and negotiated:
+
+- `FlagSupportsUpdateV2` advertises support during `Handshake`/`HandshakeAck`.
+- `DocumentSyncResponseV2` carries an owner->edge sync response as Update V2.
+- `DocumentUpdateV2` carries an owner->edge incremental update as Update V2.
+- `DocumentSyncRequestV2` requests edge->owner catch-up with V2 response semantics.
+- `DocumentUpdateV2FromEdge` carries an edge->owner incremental update as Update V2.
+- Do not place V2 bytes in any legacy `UpdateV1` field; use negotiated dedicated V2 message types for both directions.
+
 #### When to use
 
 - encode and decode owner-to-owner or edge-to-owner frames;
@@ -451,8 +478,8 @@ Use this package for the typed inter-node wire protocol.
 #### Key types
 
 - `Handshake`, `HandshakeAck`
-- `DocumentSyncRequest`, `DocumentSyncResponse`
-- `DocumentUpdate`
+- `DocumentSyncRequest`, `DocumentSyncRequestV2`, `DocumentSyncResponse`, `DocumentSyncResponseV2`
+- `DocumentUpdate`, `DocumentUpdateV2`, `DocumentUpdateV2FromEdge`
 - `AwarenessUpdate`
 - `QueryAwarenessRequest`, `QueryAwarenessResponse`
 - `Disconnect`, `Close`, `Ping`, `Pong`

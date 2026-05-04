@@ -57,7 +57,9 @@ func TestWebSocketRemoteOwnerDialerAddsNodeAuthHeadersWithoutForwardingClientAut
 	if err != nil {
 		t.Fatalf("DialRemoteOwner() unexpected error: %v", err)
 	}
-	defer stream.Close()
+	defer func() {
+		_ = stream.Close()
+	}()
 
 	select {
 	case headers := <-headersCh:

@@ -201,9 +201,35 @@ func EncodeSyncStep2FromUpdatesContext(ctx context.Context, updates ...[]byte) (
 	return EncodeSyncMessage(SyncMessageTypeStep2, merged)
 }
 
+// EncodeSyncStep2FromUpdatesV2 consolida múltiplos updates em V2 e serializa o resultado.
+func EncodeSyncStep2FromUpdatesV2(updates ...[]byte) ([]byte, error) {
+	return EncodeSyncStep2FromUpdatesV2Context(context.Background(), updates...)
+}
+
+// EncodeSyncStep2FromUpdatesV2Context consolida múltiplos updates em V2 respeitando cancelamento.
+func EncodeSyncStep2FromUpdatesV2Context(ctx context.Context, updates ...[]byte) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	merged, err := yjsbridge.MergeUpdatesV2Context(ctx, updates...)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeSyncMessage(SyncMessageTypeStep2, merged)
+}
+
 // EncodeSyncUpdate serializa uma mensagem incremental de update.
 func EncodeSyncUpdate(update []byte) []byte {
 	return internal.EncodeSyncUpdate(update)
+}
+
+// EncodeSyncUpdateV2 converte um update suportado para V2 e serializa uma mensagem incremental.
+func EncodeSyncUpdateV2(update []byte) ([]byte, error) {
+	converted, err := yjsbridge.ConvertUpdateToV2(update)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeSyncMessage(SyncMessageTypeUpdate, converted)
 }
 
 // DecodeSyncMessage decodifica uma mensagem de sync isolada.
@@ -269,9 +295,35 @@ func EncodeProtocolSyncStep2FromUpdatesContext(ctx context.Context, updates ...[
 	return EncodeProtocolSyncMessage(SyncMessageTypeStep2, merged)
 }
 
+// EncodeProtocolSyncStep2FromUpdatesV2 consolida updates em V2 e serializa protocolo + SyncStep2.
+func EncodeProtocolSyncStep2FromUpdatesV2(updates ...[]byte) ([]byte, error) {
+	return EncodeProtocolSyncStep2FromUpdatesV2Context(context.Background(), updates...)
+}
+
+// EncodeProtocolSyncStep2FromUpdatesV2Context consolida updates em V2 e serializa protocolo + SyncStep2.
+func EncodeProtocolSyncStep2FromUpdatesV2Context(ctx context.Context, updates ...[]byte) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	merged, err := yjsbridge.MergeUpdatesV2Context(ctx, updates...)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeProtocolSyncMessage(SyncMessageTypeStep2, merged)
+}
+
 // EncodeProtocolSyncUpdate serializa protocolo + Update incremental.
 func EncodeProtocolSyncUpdate(update []byte) []byte {
 	return internal.EncodeProtocolSyncUpdate(update)
+}
+
+// EncodeProtocolSyncUpdateV2 converte um update suportado para V2 e serializa protocolo + Update incremental.
+func EncodeProtocolSyncUpdateV2(update []byte) ([]byte, error) {
+	converted, err := yjsbridge.ConvertUpdateToV2(update)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeProtocolSyncMessage(SyncMessageTypeUpdate, converted)
 }
 
 // DecodeProtocolSyncMessage decodifica uma mensagem completa de sync.

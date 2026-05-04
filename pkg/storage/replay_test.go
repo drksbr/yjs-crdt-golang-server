@@ -164,10 +164,17 @@ func TestReplaySnapshot(t *testing.T) {
 	if !bytes.Equal(replayed.UpdateV1, want.UpdateV1) {
 		t.Fatalf("ReplaySnapshot().UpdateV1 = %v, want %v", replayed.UpdateV1, want.UpdateV1)
 	}
+	if !bytes.Equal(replayed.UpdateV2, want.UpdateV2) {
+		t.Fatalf("ReplaySnapshot().UpdateV2 = %v, want %v", replayed.UpdateV2, want.UpdateV2)
+	}
 
 	base.UpdateV1[0] ^= 0xff
 	if bytes.Equal(replayed.UpdateV1, base.UpdateV1) {
 		t.Fatal("ReplaySnapshot() retained mutable base payload reference")
+	}
+	base.UpdateV2[0] ^= 0xff
+	if bytes.Equal(replayed.UpdateV2, base.UpdateV2) {
+		t.Fatal("ReplaySnapshot() retained mutable base V2 payload reference")
 	}
 }
 

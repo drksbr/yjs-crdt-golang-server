@@ -222,9 +222,6 @@ func readItemContentV2(decoder *decoderV2, info byte) (ParsedContent, error) {
 		if err != nil {
 			return ParsedContent{}, err
 		}
-		if isV2XMLKeyCacheType(typeRef) {
-			decoder.allowUndrainedKeyClock = true
-		}
 		typeName, err := readTypePayloadV2(decoder, typeRef)
 		if err != nil {
 			return ParsedContent{}, err
@@ -276,18 +273,9 @@ func readTypePayloadV2(decoder *decoderV2, typeRef uint32) (string, error) {
 	case typeRefYArray, typeRefYMap, typeRefYText, typeRefYXmlFragment, typeRefYXmlText:
 		return "", nil
 	case typeRefYXmlElement, typeRefYXmlHook:
-		return decoder.readString()
+		return decoder.readKey()
 	default:
 		return "", wrapError("ReadV2TypePayload", decoder.offset(), fmt.Errorf("%w: %d", ErrUnknownTypeRef, typeRef))
-	}
-}
-
-func isV2XMLKeyCacheType(typeRef uint32) bool {
-	switch typeRef {
-	case typeRefYXmlElement, typeRefYXmlFragment, typeRefYXmlHook, typeRefYXmlText:
-		return true
-	default:
-		return false
 	}
 }
 

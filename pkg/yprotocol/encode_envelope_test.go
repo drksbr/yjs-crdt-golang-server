@@ -2,6 +2,7 @@ package yprotocol
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -158,7 +159,8 @@ func TestPublicEncodeProtocolEnvelopes_StreamRoundTrip(t *testing.T) {
 		assertPublicProtocolMessageEqual(t, decoded[i], messages[i])
 	}
 
-	fromStream, err := ReadProtocolMessagesFromStream(nil, bytes.NewReader(stream))
+	var nilCtx context.Context
+	fromStream, err := ReadProtocolMessagesFromStream(nilCtx, bytes.NewReader(stream))
 	if err != nil {
 		t.Fatalf("ReadProtocolMessagesFromStream() unexpected error: %v", err)
 	}

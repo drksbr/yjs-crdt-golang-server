@@ -449,6 +449,14 @@ func TestDecodeV2RejectsMalformedInputs(t *testing.T) {
 			data: appendByteToV2EncoderSection(t, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), 0, 0x00),
 		},
 		{
+			name: "unused_key_clock_after_format_key",
+			data: appendByteToV2EncoderSection(t, mustDecodeHex(t, "0002000203e50101010001000504004600860f0a7478626f6c64626f6c644100440001010000010300787e00"), 0, 0x00),
+		},
+		{
+			name: "unused_key_clock_after_xml_key",
+			data: appendByteToV2EncoderSection(t, mustDecodeHex(t, "00010003e5010203010004000707002800070004130e786d6c70636c61737368656c6c6f0301450003010000020306010101040077046c65616400"), 0, 0x00),
+		},
+		{
 			name: "invalid_parent_info_value",
 			data: replaceV2EncoderSection(t, mustDecodeHex(t, "000002a50100000104060374686901020101000001010000"), 6, []byte{0x02}),
 		},

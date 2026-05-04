@@ -18,8 +18,8 @@ func TestLoadMigrations(t *testing.T) {
 	if migrations[0].version != 1 {
 		t.Fatalf("migrations[0].version = %d, want 1", migrations[0].version)
 	}
-	if migrations[len(migrations)-1].version < 6 {
-		t.Fatalf("last migration version = %d, want at least 6", migrations[len(migrations)-1].version)
+	if migrations[len(migrations)-1].version < 7 {
+		t.Fatalf("last migration version = %d, want at least 7", migrations[len(migrations)-1].version)
 	}
 	if !strings.Contains(migrations[0].sql, `"tenant_app".document_snapshots`) {
 		t.Fatalf("migration sql = %q, want quoted schema substitution", migrations[0].sql)
@@ -29,6 +29,7 @@ func TestLoadMigrations(t *testing.T) {
 	var foundZeroSeed bool
 	var foundSnapshotThrough bool
 	var foundOwnerEpochColumns bool
+	var foundSnapshotV2 bool
 	for _, migration := range migrations {
 		if migration.version == 3 &&
 			strings.Contains(migration.sql, `"tenant_app".shard_lease_generations`) &&
@@ -49,6 +50,11 @@ func TestLoadMigrations(t *testing.T) {
 			strings.Contains(migration.sql, "owner_epoch") {
 			foundOwnerEpochColumns = true
 		}
+		if migration.version == 7 &&
+			strings.Contains(migration.sql, `"tenant_app".document_snapshots`) &&
+			strings.Contains(migration.sql, "snapshot_v2") {
+			foundSnapshotV2 = true
+		}
 	}
 	if !foundGenerationTable {
 		t.Fatal("migration version 3 does not define/backfill shard_lease_generations")
@@ -61,5 +67,8 @@ func TestLoadMigrations(t *testing.T) {
 	}
 	if !foundOwnerEpochColumns {
 		t.Fatal("migration version 6 does not add owner_epoch metadata to snapshots and update logs")
+	}
+	if !foundSnapshotV2 {
+		t.Fatal("migration version 7 does not add optional V2 snapshot payloads")
 	}
 }

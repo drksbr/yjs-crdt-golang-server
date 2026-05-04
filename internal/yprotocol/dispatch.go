@@ -20,11 +20,16 @@ type ProtocolMessage struct {
 }
 
 // AppendProtocolMessagePayload escreve o envelope externo com protocolo e payload bruto.
+// O protocolo de awareness segue o framing do y-websocket: o payload typed é
+// carregado dentro de um varUint8Array após o tipo externo.
 func AppendProtocolMessagePayload(dst []byte, protocol ProtocolType, payload []byte) ([]byte, error) {
 	if !protocol.Valid() {
 		return nil, fmt.Errorf("%w: %d", ErrUnknownProtocolType, protocol)
 	}
 	dst = AppendProtocolType(dst, protocol)
+	if protocol == ProtocolTypeAwareness {
+		dst = varint.Append(dst, uint32(len(payload)))
+	}
 	return append(dst, payload...), nil
 }
 
@@ -103,6 +108,28 @@ func (c AwarenessClient) IsNull() bool {
 }
 
 func readAwarenessMessage(r *ybinary.Reader) (*AwarenessMessage, error) {
+	start := r.Offset()
+	payloadLength, _, err := varint.Read(r)
+	if err != nil {
+		return nil, wrapError("ReadAwarenessMessage.payloadLen", start, err)
+	}
+	payload, err := r.ReadN(int(payloadLength))
+	if err != nil {
+		return nil, wrapError("ReadAwarenessMessage.payload", r.Offset(), err)
+	}
+
+	payloadReader := ybinary.NewReader(payload)
+	message, err := readAwarenessPayload(payloadReader)
+	if err != nil {
+		return nil, err
+	}
+	if payloadReader.Remaining() != 0 {
+		return nil, wrapError("ReadAwarenessMessage.payload.trailing", payloadReader.Offset(), ErrTrailingBytes)
+	}
+	return message, nil
+}
+
+func readAwarenessPayload(r *ybinary.Reader) (*AwarenessMessage, error) {
 	start := r.Offset()
 	count, _, err := varint.Read(r)
 	if err != nil {

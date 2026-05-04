@@ -2,6 +2,7 @@ package yupdate
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -114,6 +115,39 @@ func TestV2OutputAPIsPreserveV2Format(t *testing.T) {
 				t.Fatalf("IntersectUpdateWithContentIDsV1() unexpected error: %v", err)
 			}
 			assertV2EquivalentToV1(t, "IntersectUpdateWithContentIDsV2", intersectedV2, intersectedV1)
+		})
+	}
+}
+
+func TestV2OutputAggregateAPIsRejectMixedFormats(t *testing.T) {
+	t.Parallel()
+
+	v1 := buildUpdate(clientBlock{
+		client: 1,
+		clock:  0,
+		structs: []structEncoding{
+			itemString(rootParent("doc"), "v1"),
+		},
+	})
+	v2 := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
+
+	calls := []struct {
+		name string
+		call func(...[]byte) ([]byte, error)
+	}{
+		{name: "ConvertUpdatesToV2", call: ConvertUpdatesToV2},
+		{name: "MergeUpdatesV2", call: MergeUpdatesV2},
+	}
+
+	for _, tt := range calls {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := tt.call(nil, v2, []byte{}, v1)
+			if !errors.Is(err, ErrMismatchedUpdateFormats) {
+				t.Fatalf("%s() error = %v, want %v", tt.name, err, ErrMismatchedUpdateFormats)
+			}
 		})
 	}
 }

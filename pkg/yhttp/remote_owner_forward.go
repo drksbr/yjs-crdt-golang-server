@@ -96,9 +96,10 @@ type remoteOwnerForwarder struct {
 }
 
 type remoteOwnerSession struct {
-	stream     NodeMessageStream
-	resolution ycluster.OwnerResolution
-	epoch      uint64
+	stream            NodeMessageStream
+	resolution        ycluster.OwnerResolution
+	epoch             uint64
+	ownerToEdgeFormat yjsbridge.UpdateFormat
 }
 
 type remoteOwnerBridgeResult struct {
@@ -274,7 +275,7 @@ func (f *remoteOwnerForwarder) handleLocalAuthorityLoss(
 	observeOwnershipTransition(f.metrics, req, ownershipStateLocal, ownershipStateRemote, time.Since(transitionStart), nil)
 	if handoffState := authorityLossHandoffStateFromRequest(r); handoffState != nil {
 		session := target.session
-		handoffState.upstreamPeer.switchSession(session.stream, session.epoch)
+		handoffState.upstreamPeer.switchSession(session.stream, session.epoch, session.ownerToEdgeFormat)
 		closeReason := "client_closed"
 		defer f.cleanup(r, req, socket, session, closeReason, false)
 		return f.bridgeRemoteOwnerSessions(
@@ -332,7 +333,7 @@ func (f *remoteOwnerForwarder) serveRemoteForwardedSocket(
 	clientCtx, cancelClient := context.WithCancel(r.Context())
 	defer cancelClient()
 	upstreamPeer := newSwitchableRemoteStreamPeer(req.DocumentKey, req.ConnectionID)
-	upstreamPeer.switchSession(session.stream, session.epoch)
+	upstreamPeer.switchSession(session.stream, session.epoch, session.ownerToEdgeFormat)
 	clientErrCh := make(chan error, 1)
 	go func() {
 		clientErrCh <- f.pipeClientToRemote(clientCtx, req, socket, upstreamPeer, quota)
@@ -413,7 +414,7 @@ func (f *remoteOwnerForwarder) bridgeRemoteOwnerSessions(
 
 		observeOwnershipTransition(f.metrics, req, ownershipStateRemote, ownershipStateRemote, time.Since(transitionStart), nil)
 		*session = target.session
-		upstreamPeer.switchSession(session.stream, session.epoch)
+		upstreamPeer.switchSession(session.stream, session.epoch, session.ownerToEdgeFormat)
 	}
 }
 
@@ -442,7 +443,8 @@ func (f *remoteOwnerForwarder) openRemoteOwnerSession(
 	}
 	observeRemoteOwnerMessage(f.metrics, req, remoteOwnerMetricsRoleEdge, remoteOwnerMetricsDirectionOut, "handshake")
 
-	if err := f.receiveHandshakeAck(ctx, req, resolution, stream, epoch); err != nil {
+	ownerToEdgeFormat, err := f.receiveHandshakeAck(ctx, req, resolution, stream, epoch)
+	if err != nil {
 		observeRemoteOwnerHandshake(f.metrics, req, remoteOwnerMetricsRoleEdge, time.Since(handshakeStart), err)
 		f.closeStream(nil, req, stream)
 		return remoteOwnerSession{}, err
@@ -451,15 +453,16 @@ func (f *remoteOwnerForwarder) openRemoteOwnerSession(
 	observeRemoteOwnerConnectionOpened(f.metrics, req, remoteOwnerMetricsRoleEdge)
 
 	session := remoteOwnerSession{
-		stream:     stream,
-		resolution: resolution,
-		epoch:      epoch,
+		stream:            stream,
+		resolution:        resolution,
+		epoch:             epoch,
+		ownerToEdgeFormat: ownerToEdgeFormat,
 	}
 	if !bootstrap {
 		return session, nil
 	}
 
-	if err := f.sendBootstrapRequests(ctx, req, stream, epoch); err != nil {
+	if err := f.sendBootstrapRequests(ctx, req, stream, epoch, ownerToEdgeFormat); err != nil {
 		f.closeRemoteOwnerSession(nil, req, session, "rebind_bootstrap_error", false)
 		return remoteOwnerSession{}, err
 	}
@@ -574,7 +577,7 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 		return err
 	}
 
-	peer := quotaWrapPeer(&websocketPeer{conn: socket}, quota)
+	peer := f.local.socketPeer(socket, req, quota)
 	f.local.registry.add(req.DocumentKey, req.ConnectionID, peer)
 
 	sessionCtx, cancelSession := context.WithCancel(r.Context())
@@ -623,7 +626,7 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 
 				observeOwnershipTransition(f.metrics, req, ownershipStateLocal, ownershipStateRemote, time.Since(transitionStart), nil)
 				session := target.session
-				upstreamPeer.switchSession(session.stream, session.epoch)
+				upstreamPeer.switchSession(session.stream, session.epoch, session.ownerToEdgeFormat)
 				return f.bridgeRemoteOwnerSessions(
 					r,
 					req,
@@ -660,7 +663,7 @@ func (f *remoteOwnerForwarder) takeoverLocalOwner(
 
 				observeOwnershipTransition(f.metrics, req, ownershipStateLocal, ownershipStateRemote, time.Since(transitionStart), nil)
 				session := target.session
-				upstreamPeer.switchSession(session.stream, session.epoch)
+				upstreamPeer.switchSession(session.stream, session.epoch, session.ownerToEdgeFormat)
 				return f.bridgeRemoteOwnerSessions(
 					r,
 					req,
@@ -692,7 +695,7 @@ func (f *remoteOwnerForwarder) bridge(
 
 	remoteErrCh := make(chan error, 1)
 	go func() {
-		remoteErrCh <- f.pipeRemoteToClient(ctx, req, session.resolution, socket, session.stream, session.epoch, quota)
+		remoteErrCh <- f.pipeRemoteToClient(ctx, req, session.resolution, socket, session.stream, session.epoch, session.ownerToEdgeFormat, quota)
 	}()
 
 	for {
@@ -789,6 +792,7 @@ func (f *remoteOwnerForwarder) pipeRemoteToClient(
 	socket *websocket.Conn,
 	stream NodeMessageStream,
 	epoch uint64,
+	ownerToEdgeFormat yjsbridge.UpdateFormat,
 	quota QuotaLease,
 ) error {
 	for {
@@ -801,7 +805,7 @@ func (f *remoteOwnerForwarder) pipeRemoteToClient(
 			f.report(nil, req, err)
 			return err
 		}
-		if err := validateRemoteOwnerUpstreamMessage(req, resolution, epoch, message); err != nil {
+		if err := validateRemoteOwnerUpstreamMessage(req, resolution, epoch, ownerToEdgeFormat, message); err != nil {
 			f.metrics.Error(req, "remote_owner_validate_upstream", err)
 			f.report(nil, req, err)
 			return err
@@ -819,6 +823,14 @@ func (f *remoteOwnerForwarder) pipeRemoteToClient(
 		}
 		if len(payload) == 0 {
 			continue
+		}
+		if ownerToEdgeFormat != yjsbridge.UpdateFormatV2 {
+			payload, err = protocolPayloadForSyncOutputFormat(payload, req.SyncOutputFormat)
+			if err != nil {
+				f.metrics.Error(req, "remote_owner_encode_downstream", err)
+				f.report(nil, req, err)
+				return err
+			}
 		}
 		if err := f.allowQuotaFrame(nil, req, quota, QuotaDirectionOutbound, len(payload)); err != nil {
 			if closeErr := socket.Close(quotaCloseStatus(err), quotaCloseReason(err)); closeErr != nil && !isIgnorableTransportError(closeErr) {
@@ -869,6 +881,9 @@ func (f *remoteOwnerForwarder) sendHandshake(ctx context.Context, req Request, s
 	if req.PersistOnClose {
 		flags |= ynodeproto.FlagPersistOnClose
 	}
+	if requestWantsInterNodeV2(req) {
+		flags |= ynodeproto.FlagSupportsUpdateV2
+	}
 	return stream.Send(ctx, &ynodeproto.Handshake{
 		Flags:        flags,
 		NodeID:       f.localNodeID.String(),
@@ -885,34 +900,34 @@ func (f *remoteOwnerForwarder) receiveHandshakeAck(
 	resolution ycluster.OwnerResolution,
 	stream NodeMessageStream,
 	epoch uint64,
-) error {
+) (yjsbridge.UpdateFormat, error) {
 	readCtx, cancel := context.WithTimeout(ctx, f.writeTimeout)
 	defer cancel()
 
 	message, err := stream.Receive(readCtx)
 	if err != nil {
-		return err
+		return yjsbridge.UpdateFormatV1, err
 	}
 
 	handshakeAck, ok := message.(*ynodeproto.HandshakeAck)
 	if !ok {
 		if closeMessage, closeOK := message.(*ynodeproto.Close); closeOK {
 			if err := validateRemoteOwnerRouteFields(req, epoch, closeMessage.DocumentKey, closeMessage.ConnectionID, closeMessage.Epoch); err != nil {
-				return err
+				return yjsbridge.UpdateFormatV1, err
 			}
 			observeRemoteOwnerMessage(f.metrics, req, remoteOwnerMetricsRoleEdge, remoteOwnerMetricsDirectionIn, nodeMessageMetricKind(closeMessage))
-			return &remoteOwnerClosedError{signal: remoteOwnerCloseSignalFromMessage(closeMessage)}
+			return yjsbridge.UpdateFormatV1, &remoteOwnerClosedError{signal: remoteOwnerCloseSignalFromMessage(closeMessage)}
 		}
-		return fmt.Errorf("yhttp: handshake ack inicial obrigatorio, recebido %T", message)
+		return yjsbridge.UpdateFormatV1, fmt.Errorf("yhttp: handshake ack inicial obrigatorio, recebido %T", message)
 	}
 	if err := handshakeAck.Validate(); err != nil {
-		return err
+		return yjsbridge.UpdateFormatV1, err
 	}
 	if err := validateRemoteOwnerHandshakeAck(req, resolution, epoch, handshakeAck); err != nil {
-		return err
+		return yjsbridge.UpdateFormatV1, err
 	}
 	observeRemoteOwnerMessage(f.metrics, req, remoteOwnerMetricsRoleEdge, remoteOwnerMetricsDirectionIn, nodeMessageMetricKind(handshakeAck))
-	return nil
+	return ownerToEdgeFormatFromAck(req, handshakeAck), nil
 }
 
 func statusFromRemoteOwnerOpenError(err error) int {
@@ -923,19 +938,31 @@ func statusFromRemoteOwnerOpenError(err error) int {
 	return remoteOwnerDialErrorStatusCode
 }
 
-func (f *remoteOwnerForwarder) sendBootstrapRequests(ctx context.Context, req Request, stream NodeMessageStream, epoch uint64) error {
+func (f *remoteOwnerForwarder) sendBootstrapRequests(ctx context.Context, req Request, stream NodeMessageStream, epoch uint64, format yjsbridge.UpdateFormat) error {
 	stateVector, err := yjsbridge.EncodeStateVectorFromUpdates(nil)
 	if err != nil {
 		return err
 	}
 
-	messages := []ynodeproto.Message{
-		&ynodeproto.DocumentSyncRequest{
+	var syncRequest ynodeproto.Message
+	if format == yjsbridge.UpdateFormatV2 {
+		syncRequest = &ynodeproto.DocumentSyncRequestV2{
 			DocumentKey:  req.DocumentKey,
 			ConnectionID: req.ConnectionID,
 			Epoch:        epoch,
 			StateVector:  stateVector,
-		},
+		}
+	} else {
+		syncRequest = &ynodeproto.DocumentSyncRequest{
+			DocumentKey:  req.DocumentKey,
+			ConnectionID: req.ConnectionID,
+			Epoch:        epoch,
+			StateVector:  stateVector,
+		}
+	}
+
+	messages := []ynodeproto.Message{
+		syncRequest,
 		&ynodeproto.QueryAwarenessRequest{
 			DocumentKey:  req.DocumentKey,
 			ConnectionID: req.ConnectionID,
@@ -1009,12 +1036,13 @@ func newSwitchableRemoteStreamPeer(key storage.DocumentKey, connectionID string)
 	}
 }
 
-func (p *switchableRemoteStreamPeer) switchSession(stream NodeMessageStream, epoch uint64) {
-	p.switchTarget(&remoteStreamPeer{
-		stream:       stream,
-		documentKey:  p.documentKey,
-		connectionID: p.connectionID,
-		epoch:        epoch,
+func (p *switchableRemoteStreamPeer) switchSession(stream NodeMessageStream, epoch uint64, format yjsbridge.UpdateFormat) {
+	p.switchTarget(&remoteOwnerUpstreamPeer{
+		stream:           stream,
+		documentKey:      p.documentKey,
+		connectionID:     p.connectionID,
+		epoch:            epoch,
+		syncOutputFormat: format,
 	})
 }
 
@@ -1168,6 +1196,7 @@ func validateRemoteOwnerUpstreamMessage(
 	req Request,
 	resolution ycluster.OwnerResolution,
 	epoch uint64,
+	ownerToEdgeFormat yjsbridge.UpdateFormat,
 	message ynodeproto.Message,
 ) error {
 	switch message := message.(type) {
@@ -1176,6 +1205,16 @@ func validateRemoteOwnerUpstreamMessage(
 	case *ynodeproto.DocumentSyncResponse:
 		return validateRemoteOwnerRouteFields(req, epoch, message.DocumentKey, message.ConnectionID, message.Epoch)
 	case *ynodeproto.DocumentUpdate:
+		return validateRemoteOwnerRouteFields(req, epoch, message.DocumentKey, message.ConnectionID, message.Epoch)
+	case *ynodeproto.DocumentSyncResponseV2:
+		if ownerToEdgeFormat != yjsbridge.UpdateFormatV2 {
+			return fmt.Errorf("yhttp: owner remoto enviou V2 sem negociacao inter-node")
+		}
+		return validateRemoteOwnerRouteFields(req, epoch, message.DocumentKey, message.ConnectionID, message.Epoch)
+	case *ynodeproto.DocumentUpdateV2:
+		if ownerToEdgeFormat != yjsbridge.UpdateFormatV2 {
+			return fmt.Errorf("yhttp: owner remoto enviou V2 sem negociacao inter-node")
+		}
 		return validateRemoteOwnerRouteFields(req, epoch, message.DocumentKey, message.ConnectionID, message.Epoch)
 	case *ynodeproto.AwarenessUpdate:
 		return validateRemoteOwnerRouteFields(req, epoch, message.DocumentKey, message.ConnectionID, message.Epoch)

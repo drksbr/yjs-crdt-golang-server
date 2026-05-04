@@ -141,7 +141,7 @@ func (r *DocumentOwnershipRuntime) AcquireDocumentOwnership(ctx context.Context,
 
 	handle, err := r.waitEntryReady(ctx, entry)
 	if err != nil {
-		r.releaseEntry(context.Background(), entry, false)
+		_ = r.releaseEntry(context.Background(), entry, false)
 		return nil, err
 	}
 	return handle, nil
