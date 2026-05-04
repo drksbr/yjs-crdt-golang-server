@@ -48,18 +48,92 @@ func (p quotaPeer) close(reason string) error {
 	return p.base.close(reason)
 }
 
+type syncOutputFormatPeer struct {
+	base   roomPeer
+	format yjsbridge.UpdateFormat
+}
+
+func (p syncOutputFormatPeer) deliver(ctx context.Context, payload []byte) error {
+	converted, err := protocolPayloadForSyncOutputFormat(payload, p.format)
+	if err != nil {
+		return err
+	}
+	return p.base.deliver(ctx, converted)
+}
+
+func (p syncOutputFormatPeer) close(reason string) error {
+	return p.base.close(reason)
+}
+
+func syncOutputFormatWrapPeer(peer roomPeer, format yjsbridge.UpdateFormat) roomPeer {
+	if peer == nil || format == yjsbridge.UpdateFormatUnknown || format == yjsbridge.UpdateFormatV1 {
+		return peer
+	}
+	return syncOutputFormatPeer{base: peer, format: format}
+}
+
+func validateRequestSyncOutputFormat(format yjsbridge.UpdateFormat) error {
+	switch format {
+	case yjsbridge.UpdateFormatUnknown, yjsbridge.UpdateFormatV1, yjsbridge.UpdateFormatV2:
+		return nil
+	default:
+		return fmt.Errorf("%w: %s", yjsbridge.ErrUnknownUpdateFormat, format)
+	}
+}
+
+func protocolPayloadForSyncOutputFormat(payload []byte, format yjsbridge.UpdateFormat) ([]byte, error) {
+	switch format {
+	case yjsbridge.UpdateFormatUnknown, yjsbridge.UpdateFormatV1:
+		return payload, nil
+	case yjsbridge.UpdateFormatV2:
+	default:
+		return nil, fmt.Errorf("%w: %s", yjsbridge.ErrUnknownUpdateFormat, format)
+	}
+
+	messages, err := yprotocol.DecodeProtocolMessages(payload)
+	if err != nil {
+		return nil, err
+	}
+	for _, message := range messages {
+		if message == nil || message.Sync == nil {
+			continue
+		}
+		if message.Sync.Type != yprotocol.SyncMessageTypeStep2 && message.Sync.Type != yprotocol.SyncMessageTypeUpdate {
+			continue
+		}
+		converted, err := yjsbridge.ConvertUpdateToV2(message.Sync.Payload)
+		if err != nil {
+			return nil, err
+		}
+		message.Sync.Payload = converted
+	}
+	return yprotocol.EncodeProtocolEnvelopes(messages...)
+}
+
 type remoteStreamPeer struct {
-	stream       NodeMessageStream
-	documentKey  storage.DocumentKey
-	connectionID string
-	epoch        uint64
-	onDeliver    func(ynodeproto.Message)
+	stream           NodeMessageStream
+	documentKey      storage.DocumentKey
+	connectionID     string
+	epoch            uint64
+	syncOutputFormat yjsbridge.UpdateFormat
+	onDeliver        func(ynodeproto.Message)
+
+	writeMu sync.Mutex
+}
+
+type remoteOwnerUpstreamPeer struct {
+	stream           NodeMessageStream
+	documentKey      storage.DocumentKey
+	connectionID     string
+	epoch            uint64
+	syncOutputFormat yjsbridge.UpdateFormat
+	onDeliver        func(ynodeproto.Message)
 
 	writeMu sync.Mutex
 }
 
 func (p *remoteStreamPeer) deliver(ctx context.Context, payload []byte) error {
-	messages, err := protocolPayloadToRemoteMessages(p.documentKey, p.connectionID, p.epoch, payload)
+	messages, err := protocolPayloadToRemoteMessagesForFormat(p.documentKey, p.connectionID, p.epoch, payload, p.syncOutputFormat)
 	if err != nil {
 		return err
 	}
@@ -82,17 +156,8 @@ func (p *remoteStreamPeer) close(string) error {
 	return p.stream.Close()
 }
 
-type ownerStreamPeer struct {
-	stream       NodeMessageStream
-	documentKey  storage.DocumentKey
-	connectionID string
-	epoch        uint64
-
-	writeMu sync.Mutex
-}
-
-func (p *ownerStreamPeer) deliver(ctx context.Context, payload []byte) error {
-	messages, err := protocolPayloadToOwnerMessages(p.documentKey, p.connectionID, p.epoch, payload)
+func (p *remoteOwnerUpstreamPeer) deliver(ctx context.Context, payload []byte) error {
+	messages, err := protocolPayloadToOwnerMessagesForFormat(p.documentKey, p.connectionID, p.epoch, payload, p.syncOutputFormat)
 	if err != nil {
 		return err
 	}
@@ -104,11 +169,14 @@ func (p *ownerStreamPeer) deliver(ctx context.Context, payload []byte) error {
 		if err := p.stream.Send(ctx, message); err != nil {
 			return err
 		}
+		if p.onDeliver != nil {
+			p.onDeliver(message)
+		}
 	}
 	return nil
 }
 
-func (p *ownerStreamPeer) close(string) error {
+func (p *remoteOwnerUpstreamPeer) close(string) error {
 	return p.stream.Close()
 }
 
@@ -118,8 +186,21 @@ func protocolPayloadToRemoteMessages(
 	epoch uint64,
 	payload []byte,
 ) ([]ynodeproto.Message, error) {
+	return protocolPayloadToRemoteMessagesForFormat(key, connectionID, epoch, payload, yjsbridge.UpdateFormatV1)
+}
+
+func protocolPayloadToRemoteMessagesForFormat(
+	key storage.DocumentKey,
+	connectionID string,
+	epoch uint64,
+	payload []byte,
+	format yjsbridge.UpdateFormat,
+) ([]ynodeproto.Message, error) {
 	protocolMessages, err := yprotocol.DecodeProtocolMessages(payload)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateRequestSyncOutputFormat(format); err != nil {
 		return nil, err
 	}
 
@@ -129,27 +210,53 @@ func protocolPayloadToRemoteMessages(
 		case message.Sync != nil:
 			switch message.Sync.Type {
 			case yprotocol.SyncMessageTypeStep2:
-				updateV1, err := yjsbridge.ConvertUpdateToV1(message.Sync.Payload)
-				if err != nil {
-					return nil, err
+				if format == yjsbridge.UpdateFormatV2 {
+					updateV2, err := yjsbridge.ConvertUpdateToV2(message.Sync.Payload)
+					if err != nil {
+						return nil, err
+					}
+					messages = append(messages, &ynodeproto.DocumentSyncResponseV2{
+						DocumentKey:  key,
+						ConnectionID: connectionID,
+						Epoch:        epoch,
+						UpdateV2:     updateV2,
+					})
+				} else {
+					updateV1, err := yjsbridge.ConvertUpdateToV1(message.Sync.Payload)
+					if err != nil {
+						return nil, err
+					}
+					messages = append(messages, &ynodeproto.DocumentSyncResponse{
+						DocumentKey:  key,
+						ConnectionID: connectionID,
+						Epoch:        epoch,
+						UpdateV1:     updateV1,
+					})
 				}
-				messages = append(messages, &ynodeproto.DocumentSyncResponse{
-					DocumentKey:  key,
-					ConnectionID: connectionID,
-					Epoch:        epoch,
-					UpdateV1:     updateV1,
-				})
 			case yprotocol.SyncMessageTypeUpdate:
-				updateV1, err := yjsbridge.ConvertUpdateToV1(message.Sync.Payload)
-				if err != nil {
-					return nil, err
+				if format == yjsbridge.UpdateFormatV2 {
+					updateV2, err := yjsbridge.ConvertUpdateToV2(message.Sync.Payload)
+					if err != nil {
+						return nil, err
+					}
+					messages = append(messages, &ynodeproto.DocumentUpdateV2{
+						DocumentKey:  key,
+						ConnectionID: connectionID,
+						Epoch:        epoch,
+						UpdateV2:     updateV2,
+					})
+				} else {
+					updateV1, err := yjsbridge.ConvertUpdateToV1(message.Sync.Payload)
+					if err != nil {
+						return nil, err
+					}
+					messages = append(messages, &ynodeproto.DocumentUpdate{
+						DocumentKey:  key,
+						ConnectionID: connectionID,
+						Epoch:        epoch,
+						UpdateV1:     updateV1,
+					})
 				}
-				messages = append(messages, &ynodeproto.DocumentUpdate{
-					DocumentKey:  key,
-					ConnectionID: connectionID,
-					Epoch:        epoch,
-					UpdateV1:     updateV1,
-				})
 			default:
 				return nil, fmt.Errorf("yhttp: sync remoto outbound nao suportado no indice %d: %v", idx, message.Sync.Type)
 			}
@@ -208,8 +315,21 @@ func protocolPayloadToOwnerMessages(
 	epoch uint64,
 	payload []byte,
 ) ([]ynodeproto.Message, error) {
+	return protocolPayloadToOwnerMessagesForFormat(key, connectionID, epoch, payload, yjsbridge.UpdateFormatV1)
+}
+
+func protocolPayloadToOwnerMessagesForFormat(
+	key storage.DocumentKey,
+	connectionID string,
+	epoch uint64,
+	payload []byte,
+	format yjsbridge.UpdateFormat,
+) ([]ynodeproto.Message, error) {
 	protocolMessages, err := yprotocol.DecodeProtocolMessages(payload)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateRequestSyncOutputFormat(format); err != nil {
 		return nil, err
 	}
 
@@ -219,23 +339,45 @@ func protocolPayloadToOwnerMessages(
 		case message.Sync != nil:
 			switch message.Sync.Type {
 			case yprotocol.SyncMessageTypeStep1:
-				messages = append(messages, &ynodeproto.DocumentSyncRequest{
-					DocumentKey:  key,
-					ConnectionID: connectionID,
-					Epoch:        epoch,
-					StateVector:  append([]byte(nil), message.Sync.Payload...),
-				})
-			case yprotocol.SyncMessageTypeStep2, yprotocol.SyncMessageTypeUpdate:
-				updateV1, err := yjsbridge.ConvertUpdateToV1(message.Sync.Payload)
-				if err != nil {
-					return nil, err
+				if format == yjsbridge.UpdateFormatV2 {
+					messages = append(messages, &ynodeproto.DocumentSyncRequestV2{
+						DocumentKey:  key,
+						ConnectionID: connectionID,
+						Epoch:        epoch,
+						StateVector:  append([]byte(nil), message.Sync.Payload...),
+					})
+				} else {
+					messages = append(messages, &ynodeproto.DocumentSyncRequest{
+						DocumentKey:  key,
+						ConnectionID: connectionID,
+						Epoch:        epoch,
+						StateVector:  append([]byte(nil), message.Sync.Payload...),
+					})
 				}
-				messages = append(messages, &ynodeproto.DocumentUpdate{
-					DocumentKey:  key,
-					ConnectionID: connectionID,
-					Epoch:        epoch,
-					UpdateV1:     updateV1,
-				})
+			case yprotocol.SyncMessageTypeStep2, yprotocol.SyncMessageTypeUpdate:
+				if format == yjsbridge.UpdateFormatV2 {
+					updateV2, err := yjsbridge.ConvertUpdateToV2(message.Sync.Payload)
+					if err != nil {
+						return nil, err
+					}
+					messages = append(messages, &ynodeproto.DocumentUpdateV2FromEdge{
+						DocumentKey:  key,
+						ConnectionID: connectionID,
+						Epoch:        epoch,
+						UpdateV2:     updateV2,
+					})
+				} else {
+					updateV1, err := yjsbridge.ConvertUpdateToV1(message.Sync.Payload)
+					if err != nil {
+						return nil, err
+					}
+					messages = append(messages, &ynodeproto.DocumentUpdate{
+						DocumentKey:  key,
+						ConnectionID: connectionID,
+						Epoch:        epoch,
+						UpdateV1:     updateV1,
+					})
+				}
 			default:
 				return nil, fmt.Errorf("yhttp: sync remoto inbound nao suportado no indice %d: %v", idx, message.Sync.Type)
 			}
@@ -269,8 +411,12 @@ func remoteMessageToProtocolPayload(message ynodeproto.Message) ([]byte, *ynodep
 		return nil, nil, nil
 	case *ynodeproto.DocumentSyncResponse:
 		return yprotocol.EncodeProtocolSyncStep2(message.UpdateV1), nil, nil
+	case *ynodeproto.DocumentSyncResponseV2:
+		return yprotocol.EncodeProtocolSyncStep2(message.UpdateV2), nil, nil
 	case *ynodeproto.DocumentUpdate:
 		return yprotocol.EncodeProtocolSyncUpdate(message.UpdateV1), nil, nil
+	case *ynodeproto.DocumentUpdateV2:
+		return yprotocol.EncodeProtocolSyncUpdate(message.UpdateV2), nil, nil
 	case *ynodeproto.AwarenessUpdate:
 		payload, err := yprotocol.EncodeProtocolMessage(yprotocol.ProtocolTypeAwareness, message.Payload)
 		return payload, nil, err
@@ -290,8 +436,12 @@ func ownerMessageToProtocolPayload(message ynodeproto.Message) ([]byte, error) {
 	switch message := message.(type) {
 	case *ynodeproto.DocumentSyncRequest:
 		return yprotocol.EncodeProtocolSyncStep1(message.StateVector), nil
+	case *ynodeproto.DocumentSyncRequestV2:
+		return yprotocol.EncodeProtocolSyncStep1(message.StateVector), nil
 	case *ynodeproto.DocumentUpdate:
 		return yprotocol.EncodeProtocolSyncUpdate(message.UpdateV1), nil
+	case *ynodeproto.DocumentUpdateV2FromEdge:
+		return yprotocol.EncodeProtocolSyncUpdate(message.UpdateV2), nil
 	case *ynodeproto.AwarenessUpdate:
 		return yprotocol.EncodeProtocolMessage(yprotocol.ProtocolTypeAwareness, message.Payload)
 	case *ynodeproto.QueryAwarenessRequest:

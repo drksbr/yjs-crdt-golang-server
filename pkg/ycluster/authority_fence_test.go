@@ -132,7 +132,7 @@ func TestResolveStorageAuthorityFence(t *testing.T) {
 		}, nil
 	})
 
-	fence, err := ResolveStorageAuthorityFence(nil, lookup, storage.DocumentKey{DocumentID: "doc-fence"})
+	fence, err := ResolveStorageAuthorityFence(context.Background(), lookup, storage.DocumentKey{DocumentID: "doc-fence"})
 	if err != nil {
 		t.Fatalf("ResolveStorageAuthorityFence() unexpected error: %v", err)
 	}

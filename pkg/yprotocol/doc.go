@@ -13,5 +13,7 @@
 // `Session`, mantendo snapshot autoritativo por documento, fanout local entre
 // conexões do mesmo processo, apply context-aware e persistência explícita
 // opcional via `pkg/storage`. Updates V2 válidos podem entrar no sync runtime,
-// mas são normalizados para V1 canônico antes de broadcast, persistência e replay.
+// e o estado interno do documento permanece V2-canônico; bytes V1 são derivados
+// apenas para APIs antigas, stores sem contrato V2 e egress de cliente não
+// negociado.
 package yprotocol

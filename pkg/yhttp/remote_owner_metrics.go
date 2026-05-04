@@ -34,10 +34,18 @@ func nodeMessageMetricKind(message ynodeproto.Message) string {
 		return "pong"
 	case *ynodeproto.DocumentSyncRequest:
 		return "document_sync_request"
+	case *ynodeproto.DocumentSyncRequestV2:
+		return "document_sync_request_v2"
 	case *ynodeproto.DocumentSyncResponse:
 		return "document_sync_response"
 	case *ynodeproto.DocumentUpdate:
 		return "document_update"
+	case *ynodeproto.DocumentUpdateV2FromEdge:
+		return "document_update_v2_from_edge"
+	case *ynodeproto.DocumentSyncResponseV2:
+		return "document_sync_response_v2"
+	case *ynodeproto.DocumentUpdateV2:
+		return "document_update_v2"
 	case *ynodeproto.AwarenessUpdate:
 		return "awareness_update"
 	case *ynodeproto.QueryAwarenessRequest:

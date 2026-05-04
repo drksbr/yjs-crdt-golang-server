@@ -82,7 +82,9 @@ func EncodeProtocolUpdate(update *Update) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(yprotocol.AppendProtocolType(nil, yprotocol.ProtocolTypeAwareness), payload...), nil
+	dst := yprotocol.AppendProtocolType(nil, yprotocol.ProtocolTypeAwareness)
+	dst = varint.Append(dst, uint32(len(payload)))
+	return append(dst, payload...), nil
 }
 
 // ReadUpdate lê um payload awareness de um stream.
@@ -131,7 +133,25 @@ func ReadProtocolUpdate(r *ybinary.Reader) (*Update, error) {
 	if typ != yprotocol.ProtocolTypeAwareness {
 		return nil, wrapError("ReadProtocolUpdate.protocol", start, fmt.Errorf("%w: %s", yprotocol.ErrUnexpectedProtocolType, typ))
 	}
-	return ReadUpdate(r)
+
+	payloadLengthStart := r.Offset()
+	payloadLength, _, err := varint.Read(r)
+	if err != nil {
+		return nil, wrapError("ReadProtocolUpdate.payloadLen", payloadLengthStart, err)
+	}
+	payload, err := r.ReadN(int(payloadLength))
+	if err != nil {
+		return nil, wrapError("ReadProtocolUpdate.payload", r.Offset(), err)
+	}
+	payloadReader := ybinary.NewReader(payload)
+	update, err := ReadUpdate(payloadReader)
+	if err != nil {
+		return nil, err
+	}
+	if payloadReader.Remaining() != 0 {
+		return nil, wrapError("ReadProtocolUpdate.payload.trailing", payloadReader.Offset(), ErrTrailingBytes)
+	}
+	return update, nil
 }
 
 // DecodeUpdate decodifica um payload awareness isolado e rejeita bytes extras.

@@ -89,6 +89,57 @@ func TestHTTPServerBroadcastsLocalSyncAndAwareness(t *testing.T) {
 	}
 }
 
+func TestHTTPServerBootstrapOnConnectSendsExistingAwareness(t *testing.T) {
+	t.Parallel()
+
+	provider := yprotocol.NewProvider(yprotocol.ProviderConfig{Store: memory.New()})
+	handler, err := NewServer(ServerConfig{
+		Provider:           provider,
+		ResolveRequest:     resolveTestRequest,
+		BootstrapOnConnect: true,
+	})
+	if err != nil {
+		t.Fatalf("NewServer() unexpected error: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/ws", handler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	left := dialWS(t, srv.URL+"/ws?doc=room-awareness-bootstrap&client=501&conn=left")
+	awarenessPayload, err := yprotocol.EncodeProtocolAwarenessUpdate(&yawareness.Update{
+		Clients: []yawareness.ClientState{{
+			ClientID: 501,
+			Clock:    1,
+			State:    json.RawMessage(`{"name":"left"}`),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("EncodeProtocolAwarenessUpdate() unexpected error: %v", err)
+	}
+	writeBinary(t, left, awarenessPayload)
+
+	right := dialWS(t, srv.URL+"/ws?doc=room-awareness-bootstrap&client=502&conn=right")
+	for i := 0; i < 2; i++ {
+		payload := readBinary(t, right)
+		messages, err := yprotocol.DecodeProtocolMessages(payload)
+		if err != nil {
+			t.Fatalf("DecodeProtocolMessages(bootstrap frame %d) unexpected error: %v", i, err)
+		}
+		for _, message := range messages {
+			if message.Awareness == nil {
+				continue
+			}
+			for _, client := range message.Awareness.Clients {
+				if client.ClientID == 501 && bytes.Equal(client.State, []byte(`{"name":"left"}`)) {
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("right connection did not receive existing awareness during bootstrap")
+}
+
 func TestHTTPServerPersistsSnapshotOnClose(t *testing.T) {
 	t.Parallel()
 
@@ -130,6 +181,48 @@ func TestHTTPServerPersistsSnapshotOnClose(t *testing.T) {
 	if !bytes.Equal(messages[0].Sync.Payload, expected) {
 		t.Fatalf("step2 reply payload = %v, want %v", messages[0].Sync.Payload, expected)
 	}
+}
+
+func TestHTTPServerSyncOutputFormatV2OptIn(t *testing.T) {
+	t.Parallel()
+
+	srv := newHTTPTestServer(t, nil)
+	left := dialWS(t, srv.URL+"/ws?doc=room-v2-output&client=451&conn=left")
+	right := dialWS(t, srv.URL+"/ws?doc=room-v2-output&client=452&conn=right&sync=v2")
+
+	update := buildGCOnlyUpdate(91, 3)
+	writeBinary(t, left, yprotocol.EncodeProtocolSyncUpdate(update))
+
+	broadcast := readBinary(t, right)
+	broadcastMessages, err := yprotocol.DecodeProtocolMessages(broadcast)
+	if err != nil {
+		t.Fatalf("DecodeProtocolMessages(v2 broadcast) unexpected error: %v", err)
+	}
+	if len(broadcastMessages) != 1 || broadcastMessages[0].Sync == nil {
+		t.Fatalf("v2 broadcast messages = %#v, want single sync message", broadcastMessages)
+	}
+	if broadcastMessages[0].Sync.Type != yprotocol.SyncMessageTypeUpdate {
+		t.Fatalf("v2 broadcast type = %v, want %v", broadcastMessages[0].Sync.Type, yprotocol.SyncMessageTypeUpdate)
+	}
+	assertYHTTPV2EquivalentToV1(t, "broadcast", broadcastMessages[0].Sync.Payload, update)
+
+	writeBinary(t, right, yprotocol.EncodeProtocolSyncStep1([]byte{0x00}))
+	reply := readBinary(t, right)
+	replyMessages, err := yprotocol.DecodeProtocolMessages(reply)
+	if err != nil {
+		t.Fatalf("DecodeProtocolMessages(v2 direct) unexpected error: %v", err)
+	}
+	if len(replyMessages) != 1 || replyMessages[0].Sync == nil {
+		t.Fatalf("v2 direct messages = %#v, want single sync message", replyMessages)
+	}
+	if replyMessages[0].Sync.Type != yprotocol.SyncMessageTypeStep2 {
+		t.Fatalf("v2 direct type = %v, want %v", replyMessages[0].Sync.Type, yprotocol.SyncMessageTypeStep2)
+	}
+	expectedDiff, err := yjsbridge.DiffUpdate(update, []byte{0x00})
+	if err != nil {
+		t.Fatalf("DiffUpdate() unexpected error: %v", err)
+	}
+	assertYHTTPV2EquivalentToV1(t, "direct", replyMessages[0].Sync.Payload, expectedDiff)
 }
 
 func TestHTTPServerRevalidatesAuthorityAndClosesIdleConnection(t *testing.T) {
@@ -454,10 +547,19 @@ func resolveTestRequest(r *http.Request) (Request, error) {
 			Namespace:  "tests",
 			DocumentID: documentID,
 		},
-		ConnectionID:   strings.TrimSpace(query.Get("conn")),
-		ClientID:       uint32(clientValue),
-		PersistOnClose: query.Get("persist") == "1",
+		ConnectionID:     strings.TrimSpace(query.Get("conn")),
+		ClientID:         uint32(clientValue),
+		PersistOnClose:   query.Get("persist") == "1",
+		SyncOutputFormat: mustResolveTestSyncOutputFormat(r),
 	}, nil
+}
+
+func mustResolveTestSyncOutputFormat(r *http.Request) yjsbridge.UpdateFormat {
+	format, err := SyncOutputFormatFromHTTPRequest(r)
+	if err != nil {
+		return yjsbridge.UpdateFormat(255)
+	}
+	return format
 }
 
 func dialWS(t *testing.T, rawURL string) *websocket.Conn {
@@ -501,6 +603,28 @@ func readBinary(t *testing.T, conn *websocket.Conn) []byte {
 		t.Fatalf("conn.Read() type = %v, want %v", msgType, websocket.MessageBinary)
 	}
 	return payload
+}
+
+func assertYHTTPV2EquivalentToV1(t *testing.T, label string, gotV2, wantV1 []byte) {
+	t.Helper()
+
+	format, err := yjsbridge.FormatFromUpdate(gotV2)
+	if err != nil {
+		t.Fatalf("%s FormatFromUpdate() unexpected error: %v", label, err)
+	}
+	if format != yjsbridge.UpdateFormatV2 {
+		t.Fatalf("%s format = %s, want %s", label, format, yjsbridge.UpdateFormatV2)
+	}
+	converted, err := yjsbridge.ConvertUpdateToV1(gotV2)
+	if err != nil {
+		t.Fatalf("%s ConvertUpdateToV1() unexpected error: %v", label, err)
+	}
+	if !bytes.Equal(converted, wantV1) {
+		t.Fatalf("%s V2 converted to V1 = %x, want %x", label, converted, wantV1)
+	}
+	if bytes.Equal(gotV2, wantV1) {
+		t.Fatalf("%s payload preserved V1 bytes: %x", label, gotV2)
+	}
 }
 
 func waitForSnapshot(t *testing.T, store storage.SnapshotStore, key storage.DocumentKey) {

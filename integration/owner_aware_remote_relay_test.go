@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -657,10 +656,6 @@ func readSmokeSyncUpdate(t *testing.T, conn *websocket.Conn, expectedUpdate []by
 
 	t.Fatalf("did not receive expected sync update %v before timeout", expectedUpdate)
 	return nil
-}
-
-func wsURL(rawURL string) string {
-	return "ws" + strings.TrimPrefix(rawURL, "http")
 }
 
 type memoryRemoteOwnerDialer struct {

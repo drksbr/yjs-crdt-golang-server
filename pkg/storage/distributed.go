@@ -34,10 +34,14 @@ func (id NodeID) Validate() error {
 // UpdateOffset representa a posição monotônica de um update em um log por documento.
 type UpdateOffset uint64
 
-// UpdateLogRecord representa um update V1 persistido em log append-only.
+// UpdateLogRecord representa um update persistido em log append-only.
+//
+// UpdateV2 é a forma canônica atual. UpdateV1 permanece para compatibilidade
+// com stores e consumidores legados.
 type UpdateLogRecord struct {
 	Key      DocumentKey
 	Offset   UpdateOffset
+	UpdateV2 []byte
 	UpdateV1 []byte
 	Epoch    uint64
 	StoredAt time.Time
@@ -48,8 +52,8 @@ func (r UpdateLogRecord) Validate() error {
 	if err := r.Key.Validate(); err != nil {
 		return err
 	}
-	if len(r.UpdateV1) == 0 {
-		return fmt.Errorf("%w: updateV1 obrigatorio", ErrInvalidUpdatePayload)
+	if len(r.UpdateV2) == 0 && len(r.UpdateV1) == 0 {
+		return fmt.Errorf("%w: update obrigatorio", ErrInvalidUpdatePayload)
 	}
 	return nil
 }
@@ -68,6 +72,9 @@ func (r *UpdateLogRecord) Clone() *UpdateLogRecord {
 	}
 	if len(r.UpdateV1) > 0 {
 		clone.UpdateV1 = append([]byte(nil), r.UpdateV1...)
+	}
+	if len(r.UpdateV2) > 0 {
+		clone.UpdateV2 = append([]byte(nil), r.UpdateV2...)
 	}
 	return clone
 }
@@ -230,6 +237,15 @@ type UpdateLogStore interface {
 	TrimUpdates(ctx context.Context, key DocumentKey, through UpdateOffset) error
 }
 
+// UpdateLogStoreV2 adiciona append nativo de Update V2 sem remover o contrato
+// V1 de compatibilidade.
+type UpdateLogStoreV2 interface {
+	UpdateLogStore
+
+	// AppendUpdateV2 adiciona um update V2 ao fim do log do documento.
+	AppendUpdateV2(ctx context.Context, key DocumentKey, update []byte) (*UpdateLogRecord, error)
+}
+
 // AuthoritativeUpdateLogStore adiciona fencing opcional a writes/trim do log.
 type AuthoritativeUpdateLogStore interface {
 	UpdateLogStore
@@ -240,6 +256,15 @@ type AuthoritativeUpdateLogStore interface {
 
 	// TrimUpdatesAuthoritative exige o mesmo fence antes de compactar o tail.
 	TrimUpdatesAuthoritative(ctx context.Context, key DocumentKey, through UpdateOffset, fence AuthorityFence) error
+}
+
+// AuthoritativeUpdateLogStoreV2 adiciona append autoritativo nativo de Update V2.
+type AuthoritativeUpdateLogStoreV2 interface {
+	AuthoritativeUpdateLogStore
+
+	// AppendUpdateV2Authoritative exige que o placement + lease persistidos ainda
+	// correspondam ao fence esperado no momento do append V2.
+	AppendUpdateV2Authoritative(ctx context.Context, key DocumentKey, update []byte, fence AuthorityFence) (*UpdateLogRecord, error)
 }
 
 // PlacementStore define o contrato de resolução persistida documento -> shard.

@@ -5,15 +5,15 @@ O projeto cobre o núcleo de updates/snapshots, persistência, runtime local por
 
 ## O que já existe
 
-- `pkg/yjsbridge`: merge, diff, state vector, content ids e snapshots persistíveis em V1, com entrada V2 válida e saídas V2 opt-in (`ConvertUpdateToV2`, `MergeUpdatesV2`, `DiffUpdateV2`).
+- `pkg/yjsbridge`: merge, diff, state vector, content ids e snapshots persistíveis com `PersistedSnapshot.UpdateV2` canônico, `UpdateV1` de compatibilidade e saídas V2 explícitas (`ConvertUpdateToV2`, `MergeUpdatesV2`, `DiffUpdateV2`, `EncodePersistedSnapshotV2`).
 - `pkg/storage`: contratos públicos para snapshot, update log, placement, lease, replay/recovery/compaction e fencing autoritativo.
 - `pkg/storage/memory` e `pkg/storage/postgres`: backends de referência.
-- `pkg/yprotocol`: runtime local por documento (`Provider`/`Connection`) com bootstrap por `snapshot + update log`, apply fenced/context-aware e normalização de sync V2 válido para V1 canônico.
+- `pkg/yprotocol`: runtime local por documento (`Provider`/`Connection`) com bootstrap por `snapshot + update log`, estado interno V2-canônico, apply fenced/context-aware e compatibilidade V1 derivada nas APIs antigas.
 - `pkg/storage/prometheus`, `pkg/yprotocol/prometheus` e `pkg/ycluster/prometheus`: adapters Prometheus com labels constantes opcionais para replay/recovery/compaction, lag/offset/epoch, lifecycle local do provider e control plane de lease/owner lookup.
 - `pkg/yawareness`: estado efêmero de awareness/presence.
 - `pkg/ycluster`: resolver de shard, owner lookup, adapters storage-backed, fonte de documentos via placement store, membership/health para targets dinâmicos, `LeaseManager`, `StorageOwnershipCoordinator` e `DocumentOwnershipRuntime` para claim/promoção/lookup/fence/rebalance planejado e periódico/lifecycle compartilhado de ownership por documento.
-- `pkg/ynodeproto`: wire binário tipado entre nós.
-- `pkg/yhttp`: borda HTTP/WebSocket genérica, owner-aware, com auth/authz/rate limit/quotas/origin policy/redaction plugáveis, tenant boundary opt-in, relay edge -> owner, normalização V2 -> V1 antes do wire inter-node, promoção local opt-in e ownership runtime opcional por conexão.
+- `pkg/ynodeproto`: wire binário tipado entre nós, com message types V1 de compatibilidade e V2 bidirecionais edge <-> owner negociados por capability.
+- `pkg/yhttp`: borda HTTP/WebSocket genérica, owner-aware, com auth/authz/rate limit/quotas/origin policy/redaction plugáveis, tenant boundary opt-in, relay edge -> owner, provider V2-canônico com egress sync V2 por request opt-in (`SyncOutputFormatFromHTTPRequest`), V2 inter-node edge <-> owner negociado, promoção local opt-in e ownership runtime opcional por conexão.
 - `pkg/yhttp/prometheus`: adapter Prometheus para métricas de transporte/owner-aware, também com labels constantes opcionais.
 
 ## Estado atual
@@ -33,7 +33,7 @@ Hoje o projeto já suporta este perfil:
 - fencing autoritativo em storage e runtime do owner;
 - cutover retryable (`503`/`1013`) quando um owner perde autoridade;
 - revalidação imediata de autoridade na borda a partir do resultado do `RebalanceController`, acionando close retryable ou rebind transparente quando configurado;
-- relay remoto entre edge e owner via protocolo inter-node tipado.
+- relay remoto entre edge e owner via protocolo inter-node tipado, com V2 bidirecional apenas quando handshake/ack confirmam suporte.
 - handoff transparente do browser entre `remote -> remote`, `remote -> local` e `local -> remote` no mesmo WebSocket.
 - seam de autenticação e validação de epoch no handshake inter-node owner-side.
 - autenticação/autorização HTTP/WebSocket opt-in por `Authenticator`/`Authorizer`, com `BearerTokenAuthenticator` e `TenantAuthorizer` para isolar `DocumentKey.Namespace`.
@@ -42,7 +42,7 @@ Hoje o projeto já suporta este perfil:
 - política de Origin/CORS opt-in por `OriginPolicy`, com `StaticOriginPolicy` para allowlist exata, preflight e validação de método/headers.
 - redaction opt-in de requests em métricas/handlers de erro por `RequestRedactor`, com `HashingRequestRedactor` para hashing salgado de ids sensíveis.
 - autenticação inter-node por bearer dedicado ou HMAC com `key_id`, timestamp/nonce, replay protection local e suporte a rotação de segredo, além de validadores fail-closed para configs de produção.
-- reader/encoder V2 fixture-backed, com conversão V1 <-> V2, saídas públicas V2 opt-in e payloads de sync ainda normalizados para V1 canônico em protocolo/storage.
+- reader/encoder V2 fixture-backed, com conversão V1 <-> V2, snapshots/session/provider/replay em V2 canônico, update log V2 quando o store suporta o contrato novo, V1 preservado para compatibilidade, negociação de egress WebSocket V2 por query/header/subprotocol e inter-node V2 bidirecional negociado.
 
 ## O que ainda falta na fase distribuída
 

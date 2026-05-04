@@ -67,11 +67,11 @@ Projeto em **Meta técnica 9 / Fase 3 em consolidação**, com promoção da API
 - A borda pública atual de V2 também ganhou contratos agregados extras para precedência de mistura `V1/V2` em `MergeUpdates`.
 - `MergeUpdates` agora também aceita V2 válido por conversão canônica para V1, e a suíte passou a cobrir refs não fatiáveis em `ParsedContent.SliceWindow`, erros de `sliceStructWindowV1` e continuação de merge após `Skip` explícito no overlap.
 - `MergeUpdates` também passou a tratar listas compostas apenas por payloads vazios como `no-op`, mantendo o retorno de update V1 vazio, e a suíte cobre payload V1 malformado nos caminhos context-aware de merge e validação agregada.
-- Já existe um primeiro corte funcional de `conversion/snapshots` em V1: `ConvertUpdateToV1` e `ConvertUpdatesToV1` normalizam payloads suportados para a forma canônica, e `SnapshotFromUpdate(s)` extrai `state vector + delete set` em memória a partir de update(s) V1 agregados.
-- Novo corte funcional em V1 de snapshot binário persistido já existe: `PersistedSnapshot` com `PersistedSnapshotFromUpdate(s)` gera, em um passo, `UpdateV1` canônico persistível e `Snapshot` materializado em memória.
-- Há também corte funcional de hidratação reversa V1 (`restore`) para `PersistedSnapshot` com `EncodePersistedSnapshotV1`, `DecodePersistedSnapshotV1` e `DecodePersistedSnapshotV1Context`.
+- Já existe um corte funcional de `conversion/snapshots`: `ConvertUpdateToV1` e `ConvertUpdatesToV1` continuam fornecendo compatibilidade V1, enquanto `SnapshotFromUpdate(s)` extrai `state vector + delete set` a partir do modelo decodificado compartilhado.
+- Snapshot binário persistido agora mantém `PersistedSnapshot.UpdateV2` como forma canônica e `UpdateV1` como compatibilidade, inclusive em `PersistedSnapshotFromUpdate(s)`.
+- Há hidratação reversa para `PersistedSnapshot` nos codecs V1 e V2: `EncodePersistedSnapshotV1`/`DecodePersistedSnapshotV1` preservam o caminho legado, e `EncodePersistedSnapshotV2`/`DecodePersistedSnapshotV2` fazem round-trip do payload canônico.
 - O ciclo de persistência operacional já está em funcionamento via stores; `pkg/yprotocol.Provider` passa a servir como runtime local do futuro owner distribuído.
-- O bloco V2 com reader/encoder, snapshots, state vector, content ids, merge, diff, intersect e sync-runtime derivados já está implementado; a cobertura multi-update já inclui `Y.mergeUpdatesV2` para texto/format, map, XML, array, subdoc e tipos aninhados. Storage/protocolo seguem V1 canônico até existirem campos/versionamento explícitos para V2.
+- O bloco V2 com reader/encoder, snapshots, state vector, content ids, merge, diff, intersect e sync-runtime derivados já está implementado; a cobertura multi-update já inclui `Y.mergeUpdatesV2` para texto/format, map, XML, array, subdoc e tipos aninhados. Snapshot/storage/replay/provider já preservam V2 quando a fronteira suporta o novo contrato, mantendo V1 apenas como compatibilidade; o wire inter-node já possui V2 negociado dedicado nos sentidos owner->edge e edge->owner.
 
 ---
 

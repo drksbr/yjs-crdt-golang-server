@@ -280,6 +280,11 @@ func awarenessStateOffset(t *testing.T, src []byte) int {
 	if err != nil {
 		t.Fatalf("awarenessStateOffset() protocol read error: %v", err)
 	}
+	// awareness payload length
+	_, _, err = varint.Read(r)
+	if err != nil {
+		t.Fatalf("awarenessStateOffset() payload len read error: %v", err)
+	}
 	// client count
 	_, _, err = varint.Read(r)
 	if err != nil {

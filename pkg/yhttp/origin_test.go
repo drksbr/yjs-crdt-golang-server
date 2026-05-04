@@ -55,7 +55,9 @@ func TestHTTPServerHandlesAllowedCORSPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("preflight request unexpected error: %v", err)
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+	}()
 
 	if response.StatusCode != http.StatusNoContent {
 		t.Fatalf("preflight status = %d, want %d", response.StatusCode, http.StatusNoContent)
@@ -89,7 +91,9 @@ func TestHTTPServerRejectsDisallowedCORSPreflightHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("preflight request unexpected error: %v", err)
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+	}()
 
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("preflight status = %d, want %d", response.StatusCode, http.StatusForbidden)

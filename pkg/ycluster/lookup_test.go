@@ -99,7 +99,7 @@ func TestPlacementOwnerLookupLookupOwner(t *testing.T) {
 	}
 	lookup.now = func() time.Time { return time.Unix(110, 0).UTC() }
 
-	resolution, err := lookup.LookupOwner(nil, OwnerLookupRequest{DocumentKey: key})
+	resolution, err := lookup.LookupOwner(context.Background(), OwnerLookupRequest{DocumentKey: key})
 	if err != nil {
 		t.Fatalf("LookupOwner() unexpected error: %v", err)
 	}

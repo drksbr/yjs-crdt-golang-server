@@ -62,6 +62,7 @@ func TestSnapshotRecordClone(t *testing.T) {
 
 	baseTime := time.Unix(123, 0).UTC()
 	baseSnapshot := yjsbridge.NewPersistedSnapshot()
+	baseSnapshot.UpdateV2 = []byte{0x04, 0x05, 0x06}
 	baseSnapshot.UpdateV1 = []byte{0x01, 0x02, 0x03}
 	baseSnapshot.Snapshot = yjsbridge.NewSnapshot()
 	baseSnapshot.Snapshot.StateVector = map[uint32]uint32{1: 2, 3: 4}
@@ -81,6 +82,9 @@ func TestSnapshotRecordClone(t *testing.T) {
 	if !bytes.Equal(clone.Snapshot.UpdateV1, record.Snapshot.UpdateV1) {
 		t.Fatalf("Clone().Snapshot.UpdateV1 = %v, want %v", clone.Snapshot.UpdateV1, record.Snapshot.UpdateV1)
 	}
+	if !bytes.Equal(clone.Snapshot.UpdateV2, record.Snapshot.UpdateV2) {
+		t.Fatalf("Clone().Snapshot.UpdateV2 = %v, want %v", clone.Snapshot.UpdateV2, record.Snapshot.UpdateV2)
+	}
 	if clone.Key != record.Key {
 		t.Fatalf("Clone().Key = %#v, want %#v", clone.Key, record.Key)
 	}
@@ -95,6 +99,7 @@ func TestSnapshotRecordClone(t *testing.T) {
 	}
 
 	clone.Key.DocumentID = "other"
+	clone.Snapshot.UpdateV2[0] = 0x99
 	clone.Snapshot.UpdateV1[0] = 0x99
 	clone.Snapshot.Snapshot.StateVector[1] = 99
 
@@ -103,6 +108,9 @@ func TestSnapshotRecordClone(t *testing.T) {
 	}
 	if record.Snapshot.UpdateV1[0] == 0x99 {
 		t.Fatalf("clone mutou bytes do snapshot original")
+	}
+	if record.Snapshot.UpdateV2[0] == 0x99 {
+		t.Fatalf("clone mutou bytes V2 do snapshot original")
 	}
 	if record.Snapshot.Snapshot.StateVector[1] == 99 {
 		t.Fatalf("clone mutou state vector do snapshot original")

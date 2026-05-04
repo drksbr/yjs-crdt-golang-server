@@ -34,6 +34,14 @@ func EncodeV2(decoded *DecodedUpdate) ([]byte, error) {
 	return encoder.bytes(), nil
 }
 
+func encodeEmptyUpdateV2() []byte {
+	encoded, err := EncodeV2(nil)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
 func (e *updateEncoderV2) writeStructGroups(groups map[uint32][]ytypes.Struct) error {
 	clients := make([]uint32, 0, len(groups))
 	for client := range groups {

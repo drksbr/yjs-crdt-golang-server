@@ -422,7 +422,7 @@ func (m *StateManager) applyClientLocked(client ClientState, now time.Time) chan
 	}
 
 	currentState, hasState := m.states[client.ClientID]
-	if hasMeta && !(currentClock < client.Clock || (currentClock == client.Clock && client.IsNull() && hasState)) {
+	if hasMeta && currentClock >= client.Clock && (currentClock != client.Clock || !client.IsNull() || !hasState) {
 		return changeEntry{}
 	}
 

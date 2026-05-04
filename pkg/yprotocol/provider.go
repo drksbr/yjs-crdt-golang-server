@@ -65,13 +65,28 @@ type DispatchResult struct {
 	Broadcast []byte
 }
 
+// ConnectionHandleOptions controla opções explícitas de saída para uma conexão
+// do provider sem alterar o estado interno V2-canônico do room.
+type ConnectionHandleOptions struct {
+	// DirectSyncOutputFormat define o formato de respostas diretas SyncStep2.
+	//
+	// Zero value e UpdateFormatV1 preservam o contrato V1-first atual. Use
+	// UpdateFormatV2 apenas quando o caller já negociou suporte V2 com o peer.
+	DirectSyncOutputFormat yjsbridge.UpdateFormat
+
+	// BroadcastSyncOutputFormat define o formato de broadcasts SyncStep2/Update.
+	//
+	// Storage e replay continuam V1-compatible enquanto o room mantém V2 em memória.
+	BroadcastSyncOutputFormat yjsbridge.UpdateFormat
+}
+
 // Provider compõe múltiplas `Session` em torno do mesmo documento para um
 // runtime single-process mínimo.
 //
 // O provider:
 // - carrega o snapshot inicial do documento em `Open`;
-// - mantém o update V1 autoritativo do room;
-// - normaliza updates V2 válidos para V1 antes de broadcast e persistência;
+// - mantém o update V2 autoritativo do room em memória;
+// - deriva V1 apenas para compatibilidade, storage e update log existentes;
 // - replica updates e awareness entre conexões do mesmo documento;
 // - deixa transporte, fanout de rede e persistência automática fora de escopo.
 type Provider struct {
@@ -87,6 +102,7 @@ type providerRoom struct {
 	mu            sync.Mutex
 	key           storage.DocumentKey
 	snapshot      *yjsbridge.PersistedSnapshot
+	updateV2      []byte
 	lastOffset    storage.UpdateOffset
 	compactedAt   storage.UpdateOffset
 	authority     *storage.AuthorityFence
@@ -301,12 +317,25 @@ func (c *Connection) HandleEncodedMessages(src []byte) (*DispatchResult, error) 
 	return c.HandleEncodedMessagesContext(context.Background(), src)
 }
 
+// HandleEncodedMessagesWithOptions aplica um stream protocolado à conexão usando
+// opções explícitas de saída e `context.Background()`.
+func (c *Connection) HandleEncodedMessagesWithOptions(src []byte, opts ConnectionHandleOptions) (*DispatchResult, error) {
+	return c.HandleEncodedMessagesContextWithOptions(context.Background(), src, opts)
+}
+
 // HandleEncodedMessagesContext aplica um stream protocolado à conexão e
 // propaga `ctx` para operações bloqueantes de storage, incluindo append
 // autoritativo sob fence quando configurado.
 //
 // `ctx == nil` é tratado como `context.Background()`.
 func (c *Connection) HandleEncodedMessagesContext(ctx context.Context, src []byte) (*DispatchResult, error) {
+	return c.HandleEncodedMessagesContextWithOptions(ctx, src, ConnectionHandleOptions{})
+}
+
+// HandleEncodedMessagesContextWithOptions aplica um stream protocolado à
+// conexão, propagando `ctx` para operações bloqueantes e usando opções
+// explícitas de egress para mensagens sync.
+func (c *Connection) HandleEncodedMessagesContextWithOptions(ctx context.Context, src []byte, opts ConnectionHandleOptions) (*DispatchResult, error) {
 	if c == nil {
 		return nil, ErrConnectionClosed
 	}
@@ -314,6 +343,9 @@ func (c *Connection) HandleEncodedMessagesContext(ctx context.Context, src []byt
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateConnectionHandleOptions(opts); err != nil {
 		return nil, err
 	}
 
@@ -339,7 +371,7 @@ func (c *Connection) HandleEncodedMessagesContext(ctx context.Context, src []byt
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		directMessages, broadcast, err := c.room.handleMessageLocked(ctx, c, message)
+		directMessages, broadcast, err := c.room.handleMessageLocked(ctx, c, message, opts)
 		if err != nil {
 			return nil, fmt.Errorf("provider handle message %d: %w", idx, err)
 		}
@@ -353,6 +385,17 @@ func (c *Connection) HandleEncodedMessagesContext(ctx context.Context, src []byt
 	}
 	result.Direct = encodedDirect
 	return result, nil
+}
+
+func validateConnectionHandleOptions(opts ConnectionHandleOptions) error {
+	for _, format := range []yjsbridge.UpdateFormat{opts.DirectSyncOutputFormat, opts.BroadcastSyncOutputFormat} {
+		switch format {
+		case yjsbridge.UpdateFormatUnknown, yjsbridge.UpdateFormatV1, yjsbridge.UpdateFormatV2:
+		default:
+			return fmt.Errorf("%w: %s", yjsbridge.ErrUnknownUpdateFormat, format)
+		}
+	}
+	return nil
 }
 
 // Persist grava o snapshot autoritativo atual do documento no store configurado.
@@ -508,10 +551,16 @@ func (p *Provider) ensureRoom(ctx context.Context, key storage.DocumentKey) (*pr
 		p.mu.Unlock()
 		return nil, err
 	}
+	updateV2, err := persistedSnapshotUpdateV2(snapshot)
+	if err != nil {
+		p.mu.Unlock()
+		return nil, err
+	}
 
 	room = &providerRoom{
 		key:         key,
 		snapshot:    snapshot,
+		updateV2:    updateV2,
 		lastOffset:  lastOffset,
 		compactedAt: compactedAt,
 		authority:   authority,
@@ -684,7 +733,7 @@ func authorityFenceEqual(left *storage.AuthorityFence, right *storage.AuthorityF
 	}
 }
 
-func (r *providerRoom) handleMessageLocked(ctx context.Context, sender *Connection, message *ProtocolMessage) ([]*ProtocolMessage, []byte, error) {
+func (r *providerRoom) handleMessageLocked(ctx context.Context, sender *Connection, message *ProtocolMessage, opts ConnectionHandleOptions) ([]*ProtocolMessage, []byte, error) {
 	if r.authorityLost {
 		return nil, nil, ErrAuthorityLost
 	}
@@ -700,7 +749,11 @@ func (r *providerRoom) handleMessageLocked(ctx context.Context, sender *Connecti
 		}}, nil, nil
 	case ProtocolTypeSync:
 		if message.Sync.Type == SyncMessageTypeStep2 || message.Sync.Type == SyncMessageTypeUpdate {
-			updateV1, err := r.applyDocumentPayloadLocked(ctx, sender.provider, r.key, message.Sync.Payload)
+			updateV2, err := r.applyDocumentPayloadLocked(ctx, sender.provider, r.key, message.Sync.Payload)
+			if err != nil {
+				return nil, nil, err
+			}
+			payload, err := convertForSyncOutputFormat(updateV2, opts.BroadcastSyncOutputFormat)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -708,7 +761,7 @@ func (r *providerRoom) handleMessageLocked(ctx context.Context, sender *Connecti
 				Protocol: ProtocolTypeSync,
 				Sync: &SyncMessage{
 					Type:    message.Sync.Type,
-					Payload: updateV1,
+					Payload: payload,
 				},
 			})
 			if err != nil {
@@ -720,7 +773,7 @@ func (r *providerRoom) handleMessageLocked(ctx context.Context, sender *Connecti
 			return nil, nil, fmt.Errorf("%w: %d", ErrUnknownSyncMessageType, message.Sync.Type)
 		}
 
-		diff, err := yjsbridge.DiffUpdate(r.snapshot.UpdateV1, message.Sync.Payload)
+		diff, err := diffForSyncOutputFormat(r.updateV2, message.Sync.Payload, opts.DirectSyncOutputFormat)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -767,7 +820,11 @@ func (r *providerRoom) applyDocumentPayloadLocked(ctx context.Context, provider 
 		return nil, err
 	}
 
-	updateV1, err := yjsbridge.ConvertUpdateToV1(payload)
+	updateV2, err := yjsbridge.ConvertUpdateToV2(payload)
+	if err != nil {
+		return nil, err
+	}
+	updateV1, err := yjsbridge.ConvertUpdateToV1(updateV2)
 	if err != nil {
 		return nil, err
 	}
@@ -783,7 +840,13 @@ func (r *providerRoom) applyDocumentPayloadLocked(ctx context.Context, provider 
 				err    error
 			)
 			if r.authority != nil {
-				record, err = provider.authoritativeUpdateLogStore().AppendUpdateAuthoritative(ctx, key, updateV1, *r.authority)
+				if updateStoreV2, ok := provider.store.(storage.AuthoritativeUpdateLogStoreV2); ok {
+					record, err = updateStoreV2.AppendUpdateV2Authoritative(ctx, key, updateV2, *r.authority)
+				} else {
+					record, err = provider.authoritativeUpdateLogStore().AppendUpdateAuthoritative(ctx, key, updateV1, *r.authority)
+				}
+			} else if updateStoreV2, ok := updateStore.(storage.UpdateLogStoreV2); ok {
+				record, err = updateStoreV2.AppendUpdateV2(ctx, key, updateV2)
 			} else {
 				record, err = updateStore.AppendUpdate(ctx, key, updateV1)
 			}
@@ -816,20 +879,30 @@ func (r *providerRoom) applyDocumentPayloadLocked(ctx context.Context, provider 
 		if recoverErr != nil {
 			return nil, fmt.Errorf("rebuild room snapshot: %w (recover: %v)", err, recoverErr)
 		}
+		recoveredUpdateV2, updateErr := persistedSnapshotUpdateV2(recovered)
+		if updateErr != nil {
+			return nil, fmt.Errorf("rebuild room snapshot v2: %w", updateErr)
+		}
 		r.snapshot = recovered
+		r.updateV2 = recoveredUpdateV2
 		if lastOffset < appendedOffset {
 			lastOffset = appendedOffset
 		}
 		r.lastOffset = lastOffset
 		r.compactedAt = compactedAt
-		return updateV1, r.syncSessionsToSnapshotLocked()
+		return r.updateV2, r.syncSessionsToSnapshotLocked()
 	}
 
+	nextUpdateV2, err := yjsbridge.MergeUpdatesV2(r.updateV2, updateV2)
+	if err != nil {
+		return nil, err
+	}
 	r.snapshot = nextSnapshot
+	r.updateV2 = nextUpdateV2
 	if appendedOffset > 0 {
 		r.lastOffset = appendedOffset
 	}
-	return updateV1, r.syncSessionsToSnapshotLocked()
+	return updateV2, r.syncSessionsToSnapshotLocked()
 }
 
 func (r *providerRoom) syncSessionsToSnapshotLocked() error {
@@ -842,6 +915,17 @@ func (r *providerRoom) syncSessionsToSnapshotLocked() error {
 		}
 	}
 	return nil
+}
+
+func persistedSnapshotUpdateV2(snapshot *yjsbridge.PersistedSnapshot) ([]byte, error) {
+	if snapshot != nil && len(snapshot.UpdateV2) != 0 {
+		return append([]byte(nil), snapshot.UpdateV2...), nil
+	}
+	updateV2, err := yjsbridge.EncodePersistedSnapshotV2(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	return updateV2, nil
 }
 
 func (r *providerRoom) aggregateLocalAwarenessLocked(excludeConnectionID string) *yawareness.Update {

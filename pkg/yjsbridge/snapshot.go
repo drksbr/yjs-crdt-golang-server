@@ -11,8 +11,8 @@ import (
 // A estrutura contém o state vector consolidado e o delete set atual do documento.
 type Snapshot = yupdate.Snapshot
 
-// PersistedSnapshot é o contrato público de snapshot persistível com `UpdateV1` e
-// estado em memória derivado em `Snapshot`.
+// PersistedSnapshot é o contrato público de snapshot persistível com `UpdateV2`
+// canônico, `UpdateV1` de compatibilidade e estado derivado em `Snapshot`.
 type PersistedSnapshot = yupdate.PersistedSnapshot
 
 var (
@@ -30,7 +30,7 @@ func NewSnapshot() *Snapshot {
 	return yupdate.NewSnapshot()
 }
 
-// NewPersistedSnapshot cria um novo snapshot persistido vazio em V1 canônico.
+// NewPersistedSnapshot cria um novo snapshot persistido vazio em V2 canônico.
 func NewPersistedSnapshot() *PersistedSnapshot {
 	return yupdate.NewPersistedSnapshot()
 }
@@ -38,8 +38,8 @@ func NewPersistedSnapshot() *PersistedSnapshot {
 // PersistedSnapshotFromUpdate materializa um snapshot persistido a partir de um
 // único update.
 //
-// Atualizações V2 válidas são convertidas para `UpdateV1` canônico antes da
-// materialização.
+// A materialização mantém `UpdateV2` como forma canônica e preenche `UpdateV1`
+// apenas para compatibilidade.
 func PersistedSnapshotFromUpdate(update []byte) (*PersistedSnapshot, error) {
 	return yupdate.PersistedSnapshotFromUpdate(update)
 }
@@ -74,6 +74,14 @@ func EncodePersistedSnapshotV1(snapshot *PersistedSnapshot) ([]byte, error) {
 	return yupdate.EncodePersistedSnapshotV1(snapshot)
 }
 
+// EncodePersistedSnapshotV2 materializa e retorna o payload canônico V2 do
+// snapshot persistido.
+//
+// Esta função retorna a representação canônica V2 do snapshot.
+func EncodePersistedSnapshotV2(snapshot *PersistedSnapshot) ([]byte, error) {
+	return yupdate.EncodePersistedSnapshotV2(snapshot)
+}
+
 // DecodePersistedSnapshotV1 restaura um snapshot persistido a partir de um
 // payload V1.
 //
@@ -93,4 +101,22 @@ func DecodePersistedSnapshotV1Context(ctx context.Context, payload []byte) (*Per
 		ctx = context.Background()
 	}
 	return yupdate.DecodePersistedSnapshotV1Context(ctx, payload)
+}
+
+// DecodePersistedSnapshotV2 restaura um snapshot persistido a partir de um
+// payload V2.
+//
+// `payload == nil` e payloads vazios são tratados como snapshot vazio. O retorno
+// mantém `UpdateV2` como forma canônica e preenche `UpdateV1` para
+// compatibilidade.
+func DecodePersistedSnapshotV2(payload []byte) (*PersistedSnapshot, error) {
+	return yupdate.DecodePersistedSnapshotV2(payload)
+}
+
+// DecodePersistedSnapshotV2Context é a variante context-aware da restauração V2.
+func DecodePersistedSnapshotV2Context(ctx context.Context, payload []byte) (*PersistedSnapshot, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return yupdate.DecodePersistedSnapshotV2Context(ctx, payload)
 }

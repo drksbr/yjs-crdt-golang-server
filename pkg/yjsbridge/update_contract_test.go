@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 	"unicode/utf16"
 
@@ -71,6 +72,42 @@ func TestPublicUpdateAPIFormatsAndDispatch(t *testing.T) {
 		_, err := FormatFromUpdates(updateA, v2UpdatePayload)
 		if !errors.Is(err, ErrMismatchedUpdateFormats) {
 			t.Fatalf("FormatFromUpdates(v1, v2) error = %v, want %v", err, ErrMismatchedUpdateFormats)
+		}
+	})
+
+	t.Run("ValidateUpdate_decodes_detected_v2", func(t *testing.T) {
+		t.Parallel()
+
+		if err := ValidateUpdate(v2UpdatePayload); err != nil {
+			t.Fatalf("ValidateUpdate(v2) unexpected error: %v", err)
+		}
+		if err := ValidateUpdate([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}); !errors.Is(err, varint.ErrUnexpectedEOF) {
+			t.Fatalf("ValidateUpdate(malformed v2) error = %v, want %v", err, varint.ErrUnexpectedEOF)
+		}
+	})
+
+	t.Run("ValidateUpdates_context_preserves_index", func(t *testing.T) {
+		t.Parallel()
+
+		if err := ValidateUpdates(updateA, v2UpdatePayload); err != nil {
+			t.Fatalf("ValidateUpdates(v1, v2) unexpected error: %v", err)
+		}
+
+		err := ValidateUpdates(updateA, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
+		if err == nil {
+			t.Fatal("ValidateUpdates() error = nil, want malformed update")
+		}
+		if !errors.Is(err, varint.ErrUnexpectedEOF) {
+			t.Fatalf("ValidateUpdates() error = %v, want %v", err, varint.ErrUnexpectedEOF)
+		}
+		if !strings.Contains(err.Error(), "update[1]") {
+			t.Fatalf("ValidateUpdates() error = %v, want update index 1", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := ValidateUpdatesContext(ctx, updateA); !errors.Is(err, context.Canceled) {
+			t.Fatalf("ValidateUpdatesContext(cancelled) error = %v, want %v", err, context.Canceled)
 		}
 	})
 }
@@ -400,6 +437,35 @@ func TestPublicUpdateAPIV2LimitsAreExplicitlyEnforced(t *testing.T) {
 		}
 		if !bytes.Equal(converted, mergedV1) {
 			t.Fatalf("ConvertUpdatesToV1(v2...) = %x, want %x", converted, mergedV1)
+		}
+
+		gotStateVector, err := StateVectorFromUpdates(firstV2, secondV2)
+		if err != nil {
+			t.Fatalf("StateVectorFromUpdates(v2...) unexpected error: %v", err)
+		}
+		wantStateVector, err := StateVectorFromUpdates(mergedV1)
+		if err != nil {
+			t.Fatalf("StateVectorFromUpdates(mergedV1) unexpected error: %v", err)
+		}
+		if len(gotStateVector) != len(wantStateVector) {
+			t.Fatalf("StateVectorFromUpdates(v2...) = %#v, want %#v", gotStateVector, wantStateVector)
+		}
+		for client, clock := range wantStateVector {
+			if gotStateVector[client] != clock {
+				t.Fatalf("StateVectorFromUpdates(v2...)[%d] = %d, want %d", client, gotStateVector[client], clock)
+			}
+		}
+
+		gotEncodedStateVector, err := EncodeStateVectorFromUpdates(firstV2, secondV2)
+		if err != nil {
+			t.Fatalf("EncodeStateVectorFromUpdates(v2...) unexpected error: %v", err)
+		}
+		wantEncodedStateVector, err := EncodeStateVectorFromUpdates(mergedV1)
+		if err != nil {
+			t.Fatalf("EncodeStateVectorFromUpdates(mergedV1) unexpected error: %v", err)
+		}
+		if !bytes.Equal(gotEncodedStateVector, wantEncodedStateVector) {
+			t.Fatalf("EncodeStateVectorFromUpdates(v2...) = %x, want %x", gotEncodedStateVector, wantEncodedStateVector)
 		}
 
 		stateVector, err := EncodeStateVectorFromUpdate(convertedTextInsertV1ForTest(t))

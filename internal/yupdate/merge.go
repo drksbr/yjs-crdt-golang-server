@@ -53,6 +53,18 @@ func decodeMergeUpdateV1(_ context.Context, _ int, update []byte) (decodedMergeU
 	}, nil
 }
 
+func decodeMergeUpdate(_ context.Context, _ int, update []byte) (decodedMergeUpdateV1, error) {
+	decoded, err := DecodeUpdate(update)
+	if err != nil {
+		return decodedMergeUpdateV1{}, err
+	}
+
+	return decodedMergeUpdateV1{
+		blockSet:  newBlockSetV1(decoded.Structs),
+		deleteSet: decoded.DeleteSet,
+	}, nil
+}
+
 func mergeDecodedUpdatesV1(_ context.Context, entries []decodedMergeUpdateV1) (decodedMergeUpdateV1, error) {
 	merged := decodedMergeUpdateV1{
 		blockSet:  &blockSetV1{clients: make(map[uint32][]ytypes.Struct)},
@@ -71,6 +83,17 @@ func mergeDecodedUpdatesV1(_ context.Context, entries []decodedMergeUpdateV1) (d
 		}
 	}
 	return merged, nil
+}
+
+func (b *blockSetV1) structs() []ytypes.Struct {
+	if b == nil || len(b.clients) == 0 {
+		return nil
+	}
+	structs := make([]ytypes.Struct, 0)
+	for _, clientStructs := range b.clients {
+		structs = append(structs, clientStructs...)
+	}
+	return structs
 }
 
 func (b *blockSetV1) insertInto(other *blockSetV1) error {

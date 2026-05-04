@@ -177,6 +177,44 @@ func TestStoreAppendListAndTrimUpdates(t *testing.T) {
 	}
 }
 
+func TestStoreAppendUpdateV2PreservesCanonicalPayload(t *testing.T) {
+	t.Parallel()
+
+	store := New()
+	key := storage.DocumentKey{Namespace: "team-v2", DocumentID: "doc-v2"}
+	updateV2 := yjsbridge.NewPersistedSnapshot().UpdateV2
+
+	record, err := store.AppendUpdateV2(context.Background(), key, updateV2)
+	if err != nil {
+		t.Fatalf("AppendUpdateV2() unexpected error: %v", err)
+	}
+	if !bytes.Equal(record.UpdateV2, updateV2) {
+		t.Fatalf("AppendUpdateV2().UpdateV2 = %v, want %v", record.UpdateV2, updateV2)
+	}
+	if len(record.UpdateV1) == 0 {
+		t.Fatal("AppendUpdateV2().UpdateV1 is empty, want compatibility payload")
+	}
+
+	records, err := store.ListUpdates(context.Background(), key, 0, 0)
+	if err != nil {
+		t.Fatalf("ListUpdates() unexpected error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("len(ListUpdates()) = %d, want 1", len(records))
+	}
+	if !bytes.Equal(records[0].UpdateV2, updateV2) {
+		t.Fatalf("ListUpdates()[0].UpdateV2 = %v, want %v", records[0].UpdateV2, updateV2)
+	}
+	records[0].UpdateV2[0] ^= 0xff
+	reloaded, err := store.ListUpdates(context.Background(), key, 0, 0)
+	if err != nil {
+		t.Fatalf("ListUpdates(reload) unexpected error: %v", err)
+	}
+	if bytes.Equal(reloaded[0].UpdateV2, records[0].UpdateV2) {
+		t.Fatal("ListUpdates() leaked mutable V2 payload")
+	}
+}
+
 func TestStoreSaveAndLoadPlacement(t *testing.T) {
 	t.Parallel()
 

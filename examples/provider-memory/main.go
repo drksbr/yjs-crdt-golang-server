@@ -82,7 +82,7 @@ func main() {
 		log.Fatalf("decodificando reply direto do late joiner: %v", err)
 	}
 
-	record, err := author.Persist(nil)
+	record, err := author.Persist(context.Background())
 	if err != nil {
 		log.Fatalf("persistindo snapshot em memoria: %v", err)
 	}

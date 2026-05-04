@@ -148,14 +148,15 @@ Capacidade de:
 - responder syncs iniciais com consistência estrutural maior
 - preparar backend para persistência e compaction
 
-### Corte funcional V1
-- `ConvertUpdateToV1` e `ConvertUpdatesToV1` normalizam payload para V1 canônico com validação agregada; V2 válido entra pelo reader interno fixture-backed e sai como V1 canônico.
-- `ConvertUpdateToV2`, `ConvertUpdatesToV2`, `MergeUpdatesV2`, `DiffUpdateV2` e `IntersectUpdateWithContentIDsV2` fornecem saída V2 explícita/opt-in, validada contra fixtures upstream; as APIs sem sufixo continuam V1-first.
+### Corte funcional V2 com compatibilidade V1
+- `ConvertUpdateToV1` e `ConvertUpdatesToV1` mantêm o limite de compatibilidade V1 com validação agregada; V2 válido entra pelo reader interno fixture-backed e é materializado no modelo decodificado compartilhado.
+- `ConvertUpdateToV2`, `ConvertUpdatesToV2`, `MergeUpdatesV2`, `DiffUpdateV2` e `IntersectUpdateWithContentIDsV2` fornecem saída V2 explícita, validada contra fixtures upstream; as APIs sem sufixo continuam emitindo V1-compatible para callers legados.
 - `PersistedSnapshotFromUpdate`, `PersistedSnapshotFromUpdates` e `PersistedSnapshotFromUpdatesContext` materializam um snapshot persistível em memória, com:
-  - `UpdateV1` canônico consolidado
+  - `UpdateV2` canônico consolidado
+  - `UpdateV1` de compatibilidade
   - `StateVector` e `DeleteSet` derivados em `Snapshot`
-- `SnapshotFromUpdate`/`SnapshotFromUpdates` cobrem extração de estado e delete set para V1 e aceitam V2 válido via conversão canônica para V1.
-- `EncodePersistedSnapshotV1`, `DecodePersistedSnapshotV1` e `DecodePersistedSnapshotV1Context` fecham o ciclo mínimo de persistência/restore em V1; `DecodePersistedSnapshotV1` continua rejeitando restore V2, enquanto os construtores de snapshot persistido aceitam V2 válido após conversão para V1.
+- `SnapshotFromUpdate`/`SnapshotFromUpdates` cobrem extração de estado e delete set para V1/V2 pelo modelo decodificado compartilhado.
+- `EncodePersistedSnapshotV1`, `DecodePersistedSnapshotV1` e `DecodePersistedSnapshotV1Context` mantêm o ciclo legado de persistência/restore em V1; `DecodePersistedSnapshotV1` continua rejeitando restore V2. `EncodePersistedSnapshotV2`/`DecodePersistedSnapshotV2` fazem o round-trip do snapshot canônico e retornam `UpdateV2` canônico com `UpdateV1` materializado para compatibilidade.
 
 ---
 
@@ -171,10 +172,10 @@ Status: **em execução (promoção da API pública de update em `pkg/yjsbridge`
 - activity
 - changeset
 - recursos auxiliares para auditoria e histórico
-- exposição estável de `merge/diff/intersect`, `state vector` e `content ids` com V2 válido via conversão canônica para V1 em `pkg/yjsbridge`, além de variantes `*V2` explícitas para saída V2 onde aplicável
-- exposição estável da superfície de protocolo sync em `pkg/yprotocol` para `SyncStep1`, `SyncStep2` e envelope de mensagens websocket, com payloads V2 válidos normalizados para V1 canônico nos caminhos mutáveis de sync
-- runtime in-process mínimo em `pkg/yprotocol` para composição local de sessão/protocolo com `Session`, `HandleProtocolMessage`, `HandleEncodedMessages`, `HandleEncodedMessagesContext` no provider e encode público de `ProtocolMessage`, ainda sem provider completo e com estado/snapshot sempre em V1 canônico
-- camada mínima de provider em `pkg/yprotocol` com `Provider`, `Open`, `Connection`, `DispatchResult`, `Persist` e `Close`, ainda sem provider completo/transporte distribuído próprio e com broadcast/update log/persistência sempre em V1 canônico
+- exposição estável de `merge/diff/intersect`, `state vector` e `content ids` com V2 válido via modelo decodificado compartilhado em `pkg/yjsbridge`, além de variantes `*V2` explícitas para saída V2 onde aplicável
+- exposição estável da superfície de protocolo sync em `pkg/yprotocol` para `SyncStep1`, `SyncStep2` e envelope de mensagens websocket, com estado V2-canônico nos caminhos mutáveis de sync e helpers V2 explícitos para egress quando o caller negociou esse formato
+- runtime in-process mínimo em `pkg/yprotocol` para composição local de sessão/protocolo com `Session`, `HandleProtocolMessage`, `HandleEncodedMessages`, `HandleEncodedMessagesContext` no provider e encode público de `ProtocolMessage`, com estado/snapshot V2-canônico e V1 derivado para compatibilidade
+- camada mínima de provider em `pkg/yprotocol` com `Provider`, `Open`, `Connection`, `DispatchResult`, `Persist` e `Close`, com broadcast/update log/persistência V2 quando a fronteira suporta e V1 compatível por padrão para clientes legados
 - exposição estável da superfície awareness em `pkg/yawareness` para wire format e runtime básico em V1 (sem provider completo e sem suporte V2)
 
 ### Resultado esperado
@@ -218,9 +219,9 @@ que vão sustentar a próxima etapa:
 - `pkg/storage` também já expõe `ReplaySnapshot`, `RecoverSnapshot`, `ReplayUpdateLog`, `CompactUpdateLog` e `CompactUpdateLogAuthoritative` para reconstrução pública via `snapshot + update log` com compaction fenced quando há owner ativo;
 - `pkg/storage/memory` e `pkg/storage/postgres` já materializam esses contratos distribuídos de snapshot, update log, placement e lease, com `OwnerInfo.Epoch` obrigatório, `ErrLeaseConflict`/`ErrLeaseStaleEpoch`, preservação da última geração após release, `LeaseHandoffStore` para troca atômica de owner/epoch e validação de placement + lease + token + expiração para append/persist/trim autoritativos;
 - `pkg/ycluster` já expõe tipos estáveis de cluster, `DeterministicShardResolver`, `StaticLocalNode`, `PlacementOwnerLookup`, `StorageOwnerLookup`, `StorageLeaseStore`, `StoragePlacementDocumentSource`, membership/health com seleção dinâmica de targets saudáveis, `LeaseManager` com loop autônomo de renovação, `StorageOwnershipCoordinator`, `DocumentOwnershipRuntime`, planner/executor/controller de rebalance, métricas opcionais e interfaces mínimas de `Runtime`, resolvendo owner apenas a partir de lease ativa e válida e já compondo claim/promoção/handoff/lookup/fence/execução storage-backed compartilhada por documento;
-- `pkg/ynodeproto` já expõe o framing binário versionado do wire inter-node e payloads tipados para handshake/ack com `clientID`, sync, document update, awareness, `query-awareness`, `disconnect`, `close` e ping/pong;
+- `pkg/ynodeproto` já expõe o framing binário versionado do wire inter-node e payloads tipados para handshake/ack com `clientID`, sync, document update, awareness, `query-awareness`, `disconnect`, `close` e ping/pong; o wire inter-node também possui `FlagSupportsUpdateV2` e tipos V2 negociados dedicados para sync/update nos sentidos owner->edge e edge->owner sem sobrecarregar campos `UpdateV1`;
 - `pkg/yprotocol.Provider` já atua como runtime local de referência do owner, com bootstrap/recovery via `snapshot + update log`, caminho fenced e context-aware em `apply`/persist/cutover, checkpoint/high-water mark persistidos com metadata de `epoch` e hooks opcionais de observabilidade para persistência/revalidação/perda de autoridade;
-- `pkg/yhttp` já expõe `OwnerAwareServer` como borda pública HTTP/WebSocket para resolver owner antes do provider local, além de autenticação/autorização/rate limit/quotas/origin policy/redaction HTTP opt-in (`Authenticator`/`Authorizer`/`RateLimiter`/`QuotaLimiter`/`OriginPolicy`/`RequestRedactor`, bearer estático, tenant boundary por namespace, fixed window local, quotas locais por conexão/tenant/documento, CORS allowlist e hashing salgado de ids como referências locais), promoção local opt-in quando não há owner ativo, integração opcional com `DocumentOwnershipRuntime` no `Server` local, endpoint owner-side e takeover `remote -> local`, seam typed de forwarding remoto via `RemoteOwnerDialer`/`NodeMessageStream` com normalização V2 -> V1 antes dos campos inter-node `UpdateV1`, hook de autenticação `RemoteOwnerAuthenticator`, autenticação inter-node por bearer dedicado ou HMAC com `key_id`, timestamp/nonce/replay protection local e rotação de segredos, validação de epoch do handshake inter-node owner-side, revalidação imediata de autoridade pós-rebalance, validadores fail-closed de configuração de produção e observabilidade opcional para lookup de owner, decisão de rota e relay remoto;
+- `pkg/yhttp` já expõe `OwnerAwareServer` como borda pública HTTP/WebSocket para resolver owner antes do provider local, além de autenticação/autorização/rate limit/quotas/origin policy/redaction HTTP opt-in (`Authenticator`/`Authorizer`/`RateLimiter`/`QuotaLimiter`/`OriginPolicy`/`RequestRedactor`, bearer estático, tenant boundary por namespace, fixed window local, quotas locais por conexão/tenant/documento, CORS allowlist e hashing salgado de ids como referências locais), egress sync V2 por `Request.SyncOutputFormat` e `SyncOutputFormatFromHTTPRequest`, promoção local opt-in quando não há owner ativo, integração opcional com `DocumentOwnershipRuntime` no `Server` local, endpoint owner-side e takeover `remote -> local`, seam typed de forwarding remoto via `RemoteOwnerDialer`/`NodeMessageStream` com V2 dedicado edge->owner quando negociado, apply/storage mantendo estado V2-canônico, V1 apenas nas fronteiras legadas, e V2 owner->edge negociado por tipos dedicados, hook de autenticação `RemoteOwnerAuthenticator`, autenticação inter-node por bearer dedicado ou HMAC com `key_id`, timestamp/nonce/replay protection local e rotação de segredos, validação de epoch do handshake inter-node owner-side, revalidação imediata de autoridade pós-rebalance, validadores fail-closed de configuração de produção e observabilidade opcional para lookup de owner, decisão de rota e relay remoto;
 - `pkg/storage`, `pkg/yprotocol` e `pkg/ycluster` já também expõem adapters opcionais de observabilidade com labels constantes para replay/recovery/compaction, offsets, lag de tail, epoch observado, lifecycle local do owner e control plane de lease/owner lookup; `examples/owner-aware-http-edge/observability` entrega alertas Prometheus e dashboards Grafana operacional/oráculo de referência; a próxima etapa operacional concentra SLOs reais por topologia/tenant e endurecimento para produção pública.
 
 ### Segurança operacional
@@ -376,7 +377,7 @@ Exemplos:
 - [x] múltiplos updates podem ser mesclados em cenários amplos
 - [x] estado consolidado pode ser produzido e divergências estruturais conhecidas são registradas
 - [x] writer lazy com compatibilidade estrutural suficiente para o escopo da Fase 2
-- [x] corte funcional V1 de snapshot persistido disponível (`PersistedSnapshotFromUpdate(s)` com `UpdateV1` canônico)
+- [x] corte funcional V2 de snapshot persistido disponível (`PersistedSnapshotFromUpdate(s)` com `UpdateV2` canônico e `UpdateV1` compatível)
 - [x] ciclo de hidratação reversa/restore de `PersistedSnapshot` V1 está encapsulado e validado para storage operacional
 - [x] compatibilidade V2 e conversão de formato possuem corte funcional verificável
 - [x] integração de persistência operacional de snapshot está implementada
@@ -397,7 +398,7 @@ Exemplos:
 
 1. Consolidar cenários de `merge/diff/intersect` com composição estrutural mais rica.
 2. Ampliar e endurecer a integração do lazy writer no fluxo de atualização.
-3. Evoluir o mapa de compatibilidade V2. O reader/encoder V2 e as APIs `*V2` opt-in já cobrem fixtures upstream single-update e multi-update; a próxima decisão segura é versionar storage/protocolo antes de qualquer saída V2 em sync, replay ou inter-node.
+3. Evoluir o mapa de compatibilidade V2. O reader/encoder V2, as APIs `*V2` opt-in, o egress WebSocket V2 explícito e o inter-node V2 negociado nos dois sentidos já cobrem o primeiro slice; os próximos passos ficam em cobertura de fixtures, compatibilidade legada e hardening operacional.
 4. Ligar `AuthorityFence`/`ResolveAuthorityFence` ao caminho autoritativo do provider, incluindo `apply`, persist, recovery e respostas de handoff/cutover.
 5. Evoluir failover/rebalance end-to-end em cima do bootstrap/recovery já operacional por `snapshot + update log` e da troca atômica de `epoch` já definida no storage/control plane. O corte document-level está entregue em `StorageOwnershipCoordinator.RebalanceDocument`, com planner/executor determinístico, `RebalanceController`, source por placement store, targets dinâmicos por membership/health e callback yhttp para acionar cutover/rebind imediato após rebalance.
 6. Conectar o wire tipado já exposto em `pkg/ynodeproto` ao forwarding/cutover end-to-end entre edge e owner, reduzindo seams ad hoc.

@@ -109,10 +109,6 @@ func encodeAnyArray(values [][]byte) []byte {
 	return dst
 }
 
-func sliceUTF16String(s string, diff uint32) (string, error) {
-	return sliceUTF16Window(s, diff, utf16Length(s)-diff)
-}
-
 func sliceUTF16Window(s string, start, length uint32) (string, error) {
 	units := utf16.Encode([]rune(s))
 	end := uint64(start) + uint64(length)

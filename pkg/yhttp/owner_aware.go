@@ -178,6 +178,7 @@ func (s *OwnerAwareServer) serveLocalOwner(w http.ResponseWriter, r *http.Reques
 	observeRouteDecision(s.metrics, req, routeDecision)
 	s.local.serveResolvedHTTPWithOptions(w, r, req, serverSocketSessionOptions{
 		observeConnectionLifecycle: true,
+		bootstrap:                  s.local.bootstrapOnConnect,
 		authorityLossHandler:       s.onLocalAuthorityLost,
 	})
 }

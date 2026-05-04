@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/drksbr/yjs-crdt-golang-server/internal/varint"
@@ -292,6 +293,88 @@ func TestFormatFromUpdatePublicAPI(t *testing.T) {
 				t.Fatalf("FormatFromUpdate() = %s, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestValidateUpdateDecodesDetectedPayload(t *testing.T) {
+	t.Parallel()
+
+	v1 := buildUpdate(
+		clientBlock{
+			client: 9,
+			clock:  0,
+			structs: []structEncoding{
+				itemString(rootParent("doc"), "valid"),
+			},
+		},
+	)
+	v2 := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
+	minimalDetectedV2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+
+	tests := []struct {
+		name    string
+		update  []byte
+		wantErr error
+	}{
+		{name: "valid_v1", update: v1},
+		{name: "valid_v2", update: v2},
+		{name: "detected_but_malformed_v2", update: minimalDetectedV2, wantErr: varint.ErrUnexpectedEOF},
+		{name: "unknown_empty", update: nil, wantErr: ErrUnknownUpdateFormat},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := ValidateUpdate(tt.update)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("ValidateUpdate() error = %v, want %v", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateUpdate() unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateUpdatesContextPreservesIndexAndCancellation(t *testing.T) {
+	t.Parallel()
+
+	valid := buildUpdate(
+		clientBlock{
+			client: 10,
+			clock:  0,
+			structs: []structEncoding{
+				itemString(rootParent("doc"), "valid"),
+			},
+		},
+	)
+	malformedV2 := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	validV2 := mustDecodeHex(t, "000002a50100000104060374686901020101000001010000")
+
+	if err := ValidateUpdates(valid, validV2); err != nil {
+		t.Fatalf("ValidateUpdates(v1, v2) unexpected error: %v", err)
+	}
+
+	err := ValidateUpdates(valid, malformedV2)
+	if err == nil {
+		t.Fatal("ValidateUpdates() error = nil, want malformed update")
+	}
+	if !strings.Contains(err.Error(), "update[1]") {
+		t.Fatalf("ValidateUpdates() error = %v, want update index 1", err)
+	}
+	if !errors.Is(err, varint.ErrUnexpectedEOF) {
+		t.Fatalf("ValidateUpdates() error = %v, want %v", err, varint.ErrUnexpectedEOF)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := ValidateUpdatesContext(ctx, valid); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ValidateUpdatesContext(cancelled) error = %v, want %v", err, context.Canceled)
 	}
 }
 

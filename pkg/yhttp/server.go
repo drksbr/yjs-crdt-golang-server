@@ -28,6 +28,7 @@ type Server struct {
 	readLimitBytes                int64
 	writeTimeout                  time.Duration
 	persistTimeout                time.Duration
+	bootstrapOnConnect            bool
 	authorityRevalidationInterval time.Duration
 	authenticator                 Authenticator
 	authorizer                    Authorizer
@@ -125,6 +126,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		readLimitBytes:                readLimit,
 		writeTimeout:                  writeTimeout,
 		persistTimeout:                persistTimeout,
+		bootstrapOnConnect:            cfg.BootstrapOnConnect,
 		authorityRevalidationInterval: cfg.AuthorityRevalidationInterval,
 		authenticator:                 cfg.Authenticator,
 		authorizer:                    cfg.Authorizer,
@@ -171,6 +173,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serveResolvedHTTP(w http.ResponseWriter, r *http.Request, req Request) {
 	s.serveResolvedHTTPWithOptions(w, r, req, serverSocketSessionOptions{
 		observeConnectionLifecycle: true,
+		bootstrap:                  s.bootstrapOnConnect,
 	})
 }
 
@@ -181,6 +184,10 @@ func (s *Server) serveResolvedHTTPWithOptions(
 	options serverSocketSessionOptions,
 ) {
 	if err := req.DocumentKey.Validate(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateRequestSyncOutputFormat(req.SyncOutputFormat); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -413,7 +420,7 @@ func (s *Server) serveConnectedSocket(
 		defer s.metrics.ConnectionClosed(req)
 	}
 
-	peer := s.registry.add(req.DocumentKey, req.ConnectionID, quotaWrapPeer(&websocketPeer{conn: socket}, options.quota))
+	peer := s.registry.add(req.DocumentKey, req.ConnectionID, s.socketPeer(socket, req, options.quota))
 	var onAuthorityLoss func(remoteOwnerCloseSignal)
 	if options.authorityLossHandler == nil {
 		onAuthorityLoss = func(signal remoteOwnerCloseSignal) {
@@ -552,7 +559,7 @@ func (s *Server) serveSwitchableConnectedSocket(
 		defer s.metrics.ConnectionClosed(req)
 	}
 
-	peer := quotaWrapPeer(&websocketPeer{conn: socket}, options.quota)
+	peer := s.socketPeer(socket, req, options.quota)
 	s.registry.add(req.DocumentKey, req.ConnectionID, peer)
 	revalidateCh := s.startAuthorityRevalidator(sessionCtx, req, connection, cancelSession, nil)
 	defer drainRemoteOwnerCloseSignal(revalidateCh)
@@ -641,48 +648,6 @@ func (s *Server) serveSwitchableConnectedSocket(
 	}
 }
 
-func (s *Server) serveAttachedSocket(r *http.Request, req Request, socket *websocket.Conn, bootstrap bool) error {
-	return s.serveAttachedSocketWithOptions(r, req, socket, serverSocketSessionOptions{
-		bootstrap: bootstrap,
-	})
-}
-
-func (s *Server) serveAttachedSocketWithOptions(
-	r *http.Request,
-	req Request,
-	socket *websocket.Conn,
-	options serverSocketSessionOptions,
-) error {
-	if err := req.DocumentKey.Validate(); err != nil {
-		return err
-	}
-	if strings.TrimSpace(req.ConnectionID) == "" {
-		req.ConnectionID = s.newConnectionID()
-	}
-
-	quota, err := s.openQuota(r, req)
-	if err != nil {
-		return err
-	}
-	options.quota = quota
-
-	ownership, err := s.acquireRequestOwnership(r.Context(), req)
-	if err != nil {
-		s.closeQuota(r, req, quota)
-		return err
-	}
-	options.ownership = ownership
-
-	connection, err := s.provider.Open(r.Context(), req.DocumentKey, req.ConnectionID, req.ClientID)
-	if err != nil {
-		s.closeQuota(r, req, quota)
-		s.releaseRequestOwnership(r, req, ownership)
-		return err
-	}
-	s.serveConnectedSocket(r, req, connection, socket, options)
-	return nil
-}
-
 func (s *Server) bootstrapConnection(r *http.Request, req Request, connection *yprotocol.Connection, peer roomPeer) error {
 	for _, payload := range [][]byte{
 		yprotocol.EncodeProtocolSyncStep1([]byte{0x00}),
@@ -714,10 +679,6 @@ func (s *Server) acquireRequestOwnership(ctx context.Context, req Request) (*ycl
 	return s.ownershipRuntime.AcquireDocumentOwnership(ctx, ycluster.ClaimDocumentRequest{
 		DocumentKey: req.DocumentKey,
 	})
-}
-
-func (s *Server) cleanupConnection(r *http.Request, req Request, connection *yprotocol.Connection) {
-	s.cleanupConnectionWithOwnership(r, req, connection, nil)
 }
 
 func (s *Server) cleanupConnectionWithOwnership(
@@ -844,6 +805,10 @@ func (s *Server) writeBinary(peer roomPeer, payload []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), s.writeTimeout)
 	defer cancel()
 	return peer.deliver(ctx, payload)
+}
+
+func (s *Server) socketPeer(socket *websocket.Conn, req Request, quota QuotaLease) roomPeer {
+	return syncOutputFormatWrapPeer(quotaWrapPeer(&websocketPeer{conn: socket}, quota), req.SyncOutputFormat)
 }
 
 func (s *Server) report(r *http.Request, req Request, err error) {

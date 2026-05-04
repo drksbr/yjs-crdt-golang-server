@@ -189,6 +189,41 @@ func (m *DocumentSyncRequest) appendPayload(dst []byte) ([]byte, error) {
 	return appendRoutedPayload(dst, m.DocumentKey, m.ConnectionID, m.Epoch, m.StateVector)
 }
 
+// DocumentSyncRequestV2 solicita catch-up de um documento para uma resposta em
+// Update V2 e carrega o state vector bruto do solicitante.
+type DocumentSyncRequestV2 struct {
+	Flags        Flags
+	DocumentKey  storage.DocumentKey
+	ConnectionID string
+	Epoch        uint64
+	StateVector  []byte
+}
+
+// Type retorna o message type associado ao payload.
+func (m *DocumentSyncRequestV2) Type() MessageType {
+	return MessageTypeDocumentSyncRequestV2
+}
+
+// FrameFlags retorna os bits auxiliares do header preservados por esta mensagem.
+func (m *DocumentSyncRequestV2) FrameFlags() Flags {
+	if m == nil {
+		return FlagNone
+	}
+	return m.Flags
+}
+
+// Validate confirma se o payload contém os campos mínimos exigidos pelo wire.
+func (m *DocumentSyncRequestV2) Validate() error {
+	if m == nil {
+		return ErrNilMessage
+	}
+	return validateRoutedBody(m.DocumentKey, m.ConnectionID, m.Epoch, m.StateVector)
+}
+
+func (m *DocumentSyncRequestV2) appendPayload(dst []byte) ([]byte, error) {
+	return appendRoutedPayload(dst, m.DocumentKey, m.ConnectionID, m.Epoch, m.StateVector)
+}
+
 // DocumentSyncResponse entrega o update V1 necessário para sincronizar um
 // documento.
 type DocumentSyncResponse struct {
@@ -224,6 +259,41 @@ func (m *DocumentSyncResponse) appendPayload(dst []byte) ([]byte, error) {
 	return appendRoutedPayload(dst, m.DocumentKey, m.ConnectionID, m.Epoch, m.UpdateV1)
 }
 
+// DocumentSyncResponseV2 entrega o update V2 necessário para sincronizar um
+// documento quando o handshake inter-node negociou suporte explícito.
+type DocumentSyncResponseV2 struct {
+	Flags        Flags
+	DocumentKey  storage.DocumentKey
+	ConnectionID string
+	Epoch        uint64
+	UpdateV2     []byte
+}
+
+// Type retorna o message type associado ao payload.
+func (m *DocumentSyncResponseV2) Type() MessageType {
+	return MessageTypeDocumentSyncResponseV2
+}
+
+// FrameFlags retorna os bits auxiliares do header preservados por esta mensagem.
+func (m *DocumentSyncResponseV2) FrameFlags() Flags {
+	if m == nil {
+		return FlagNone
+	}
+	return m.Flags
+}
+
+// Validate confirma se o payload contém os campos mínimos exigidos pelo wire.
+func (m *DocumentSyncResponseV2) Validate() error {
+	if m == nil {
+		return ErrNilMessage
+	}
+	return validateRoutedBody(m.DocumentKey, m.ConnectionID, m.Epoch, m.UpdateV2)
+}
+
+func (m *DocumentSyncResponseV2) appendPayload(dst []byte) ([]byte, error) {
+	return appendRoutedPayload(dst, m.DocumentKey, m.ConnectionID, m.Epoch, m.UpdateV2)
+}
+
 // DocumentUpdate carrega um update V1 incremental de documento.
 type DocumentUpdate struct {
 	Flags        Flags
@@ -256,6 +326,76 @@ func (m *DocumentUpdate) Validate() error {
 
 func (m *DocumentUpdate) appendPayload(dst []byte) ([]byte, error) {
 	return appendRoutedPayload(dst, m.DocumentKey, m.ConnectionID, m.Epoch, m.UpdateV1)
+}
+
+// DocumentUpdateV2 carrega um update V2 incremental de documento quando o
+// handshake inter-node negociou suporte explícito.
+type DocumentUpdateV2 struct {
+	Flags        Flags
+	DocumentKey  storage.DocumentKey
+	ConnectionID string
+	Epoch        uint64
+	UpdateV2     []byte
+}
+
+// Type retorna o message type associado ao payload.
+func (m *DocumentUpdateV2) Type() MessageType {
+	return MessageTypeDocumentUpdateV2
+}
+
+// FrameFlags retorna os bits auxiliares do header preservados por esta mensagem.
+func (m *DocumentUpdateV2) FrameFlags() Flags {
+	if m == nil {
+		return FlagNone
+	}
+	return m.Flags
+}
+
+// Validate confirma se o payload contém os campos mínimos exigidos pelo wire.
+func (m *DocumentUpdateV2) Validate() error {
+	if m == nil {
+		return ErrNilMessage
+	}
+	return validateRoutedBody(m.DocumentKey, m.ConnectionID, m.Epoch, m.UpdateV2)
+}
+
+func (m *DocumentUpdateV2) appendPayload(dst []byte) ([]byte, error) {
+	return appendRoutedPayload(dst, m.DocumentKey, m.ConnectionID, m.Epoch, m.UpdateV2)
+}
+
+// DocumentUpdateV2FromEdge carrega um update V2 incremental da borda para o
+// owner sem sobrecarregar o campo UpdateV1 de DocumentUpdate.
+type DocumentUpdateV2FromEdge struct {
+	Flags        Flags
+	DocumentKey  storage.DocumentKey
+	ConnectionID string
+	Epoch        uint64
+	UpdateV2     []byte
+}
+
+// Type retorna o message type associado ao payload.
+func (m *DocumentUpdateV2FromEdge) Type() MessageType {
+	return MessageTypeDocumentUpdateV2FromEdge
+}
+
+// FrameFlags retorna os bits auxiliares do header preservados por esta mensagem.
+func (m *DocumentUpdateV2FromEdge) FrameFlags() Flags {
+	if m == nil {
+		return FlagNone
+	}
+	return m.Flags
+}
+
+// Validate confirma se o payload contém os campos mínimos exigidos pelo wire.
+func (m *DocumentUpdateV2FromEdge) Validate() error {
+	if m == nil {
+		return ErrNilMessage
+	}
+	return validateRoutedBody(m.DocumentKey, m.ConnectionID, m.Epoch, m.UpdateV2)
+}
+
+func (m *DocumentUpdateV2FromEdge) appendPayload(dst []byte) ([]byte, error) {
+	return appendRoutedPayload(dst, m.DocumentKey, m.ConnectionID, m.Epoch, m.UpdateV2)
 }
 
 // AwarenessUpdate carrega um delta bruto de awareness associado a uma conexão
@@ -562,6 +702,14 @@ func DecodeMessagePayload(typ MessageType, flags Flags, payload []byte) (Message
 		message, err = decodeDocumentSyncResponse(reader, flags)
 	case MessageTypeDocumentUpdate:
 		message, err = decodeDocumentUpdate(reader, flags)
+	case MessageTypeDocumentSyncResponseV2:
+		message, err = decodeDocumentSyncResponseV2(reader, flags)
+	case MessageTypeDocumentUpdateV2:
+		message, err = decodeDocumentUpdateV2(reader, flags)
+	case MessageTypeDocumentSyncRequestV2:
+		message, err = decodeDocumentSyncRequestV2(reader, flags)
+	case MessageTypeDocumentUpdateV2FromEdge:
+		message, err = decodeDocumentUpdateV2FromEdge(reader, flags)
 	case MessageTypeAwarenessUpdate:
 		message, err = decodeAwarenessUpdate(reader, flags)
 	case MessageTypeQueryAwarenessRequest:
@@ -702,6 +850,29 @@ func decodeDocumentSyncRequest(r *ybinary.Reader, flags Flags) (*DocumentSyncReq
 	return message, nil
 }
 
+func decodeDocumentSyncRequestV2(r *ybinary.Reader, flags Flags) (*DocumentSyncRequestV2, error) {
+	routed, err := readRoutedPayload(
+		r,
+		"ReadDocumentSyncRequestV2.documentKey",
+		"ReadDocumentSyncRequestV2.connectionID",
+		"ReadDocumentSyncRequestV2.epoch",
+	)
+	if err != nil {
+		return nil, err
+	}
+	message := &DocumentSyncRequestV2{
+		Flags:        flags,
+		DocumentKey:  routed.DocumentKey,
+		ConnectionID: routed.ConnectionID,
+		Epoch:        routed.Epoch,
+		StateVector:  routed.Body,
+	}
+	if err := message.Validate(); err != nil {
+		return nil, wrapParseError("ReadDocumentSyncRequestV2.validate", r.Offset(), err)
+	}
+	return message, nil
+}
+
 func decodeDocumentSyncResponse(r *ybinary.Reader, flags Flags) (*DocumentSyncResponse, error) {
 	routed, err := readRoutedPayload(
 		r,
@@ -725,6 +896,29 @@ func decodeDocumentSyncResponse(r *ybinary.Reader, flags Flags) (*DocumentSyncRe
 	return message, nil
 }
 
+func decodeDocumentSyncResponseV2(r *ybinary.Reader, flags Flags) (*DocumentSyncResponseV2, error) {
+	routed, err := readRoutedPayload(
+		r,
+		"ReadDocumentSyncResponseV2.documentKey",
+		"ReadDocumentSyncResponseV2.connectionID",
+		"ReadDocumentSyncResponseV2.epoch",
+	)
+	if err != nil {
+		return nil, err
+	}
+	message := &DocumentSyncResponseV2{
+		Flags:        flags,
+		DocumentKey:  routed.DocumentKey,
+		ConnectionID: routed.ConnectionID,
+		Epoch:        routed.Epoch,
+		UpdateV2:     routed.Body,
+	}
+	if err := message.Validate(); err != nil {
+		return nil, wrapParseError("ReadDocumentSyncResponseV2.validate", r.Offset(), err)
+	}
+	return message, nil
+}
+
 func decodeDocumentUpdate(r *ybinary.Reader, flags Flags) (*DocumentUpdate, error) {
 	routed, err := readRoutedPayload(
 		r,
@@ -744,6 +938,52 @@ func decodeDocumentUpdate(r *ybinary.Reader, flags Flags) (*DocumentUpdate, erro
 	}
 	if err := message.Validate(); err != nil {
 		return nil, wrapParseError("ReadDocumentUpdate.validate", r.Offset(), err)
+	}
+	return message, nil
+}
+
+func decodeDocumentUpdateV2(r *ybinary.Reader, flags Flags) (*DocumentUpdateV2, error) {
+	routed, err := readRoutedPayload(
+		r,
+		"ReadDocumentUpdateV2.documentKey",
+		"ReadDocumentUpdateV2.connectionID",
+		"ReadDocumentUpdateV2.epoch",
+	)
+	if err != nil {
+		return nil, err
+	}
+	message := &DocumentUpdateV2{
+		Flags:        flags,
+		DocumentKey:  routed.DocumentKey,
+		ConnectionID: routed.ConnectionID,
+		Epoch:        routed.Epoch,
+		UpdateV2:     routed.Body,
+	}
+	if err := message.Validate(); err != nil {
+		return nil, wrapParseError("ReadDocumentUpdateV2.validate", r.Offset(), err)
+	}
+	return message, nil
+}
+
+func decodeDocumentUpdateV2FromEdge(r *ybinary.Reader, flags Flags) (*DocumentUpdateV2FromEdge, error) {
+	routed, err := readRoutedPayload(
+		r,
+		"ReadDocumentUpdateV2FromEdge.documentKey",
+		"ReadDocumentUpdateV2FromEdge.connectionID",
+		"ReadDocumentUpdateV2FromEdge.epoch",
+	)
+	if err != nil {
+		return nil, err
+	}
+	message := &DocumentUpdateV2FromEdge{
+		Flags:        flags,
+		DocumentKey:  routed.DocumentKey,
+		ConnectionID: routed.ConnectionID,
+		Epoch:        routed.Epoch,
+		UpdateV2:     routed.Body,
+	}
+	if err := message.Validate(); err != nil {
+		return nil, wrapParseError("ReadDocumentUpdateV2FromEdge.validate", r.Offset(), err)
 	}
 	return message, nil
 }

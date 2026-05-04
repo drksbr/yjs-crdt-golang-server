@@ -27,6 +27,8 @@ const (
 	// FlagCloseRetryable informa que a mensagem Close representa um cutover
 	// retryable e o cliente deve tentar reconectar.
 	FlagCloseRetryable
+	// FlagSupportsUpdateV2 anuncia suporte aos message types de update V2.
+	FlagSupportsUpdateV2
 )
 
 // MessageType identifica a classe semântica do payload inter-node.
@@ -54,6 +56,14 @@ const (
 	MessageTypeDisconnect MessageType = 22
 	// MessageTypeClose instrui a borda a encerrar explicitamente a conexao encaminhada.
 	MessageTypeClose MessageType = 23
+	// MessageTypeDocumentSyncResponseV2 entrega material de sincronização em Update V2.
+	MessageTypeDocumentSyncResponseV2 MessageType = 24
+	// MessageTypeDocumentUpdateV2 carrega um delta incremental em Update V2.
+	MessageTypeDocumentUpdateV2 MessageType = 25
+	// MessageTypeDocumentSyncRequestV2 solicita catch-up owner-side com resposta em Update V2.
+	MessageTypeDocumentSyncRequestV2 MessageType = 26
+	// MessageTypeDocumentUpdateV2FromEdge carrega um delta Update V2 da borda para o owner.
+	MessageTypeDocumentUpdateV2FromEdge MessageType = 27
 
 	// MessageTypePing carrega keepalive/medição de latência entre nós.
 	MessageTypePing MessageType = 240
@@ -74,6 +84,10 @@ func (t MessageType) Valid() bool {
 		MessageTypeQueryAwarenessResponse,
 		MessageTypeDisconnect,
 		MessageTypeClose,
+		MessageTypeDocumentSyncResponseV2,
+		MessageTypeDocumentUpdateV2,
+		MessageTypeDocumentSyncRequestV2,
+		MessageTypeDocumentUpdateV2FromEdge,
 		MessageTypePing,
 		MessageTypePong:
 		return true
@@ -105,6 +119,14 @@ func (t MessageType) String() string {
 		return "disconnect"
 	case MessageTypeClose:
 		return "close"
+	case MessageTypeDocumentSyncResponseV2:
+		return "document-sync-response-v2"
+	case MessageTypeDocumentUpdateV2:
+		return "document-update-v2"
+	case MessageTypeDocumentSyncRequestV2:
+		return "document-sync-request-v2"
+	case MessageTypeDocumentUpdateV2FromEdge:
+		return "document-update-v2-from-edge"
 	case MessageTypePing:
 		return "ping"
 	case MessageTypePong:

@@ -1,6 +1,7 @@
 package yprotocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -77,7 +78,33 @@ func buildAwarenessProtocolMessage() []byte {
 	payload = varint.Append(payload, uint32(len(state)))
 	payload = append(payload, state...)
 
-	return append(AppendProtocolType(nil, ProtocolTypeAwareness), payload...)
+	enveloped, err := AppendProtocolMessagePayload(nil, ProtocolTypeAwareness, payload)
+	if err != nil {
+		panic(err)
+	}
+	return enveloped
+}
+
+func TestEncodeProtocolMessageWrapsAwarenessPayload(t *testing.T) {
+	t.Parallel()
+
+	payload := varint.Append(nil, 1)
+	payload = varint.Append(payload, 7)
+	payload = varint.Append(payload, 3)
+	payload = varint.Append(payload, uint32(len(`{"name":"ramon"}`)))
+	payload = append(payload, []byte(`{"name":"ramon"}`)...)
+
+	got, err := EncodeProtocolMessage(ProtocolTypeAwareness, payload)
+	if err != nil {
+		t.Fatalf("EncodeProtocolMessage() unexpected error: %v", err)
+	}
+
+	want := AppendProtocolType(nil, ProtocolTypeAwareness)
+	want = varint.Append(want, uint32(len(payload)))
+	want = append(want, payload...)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("EncodeProtocolMessage() = %v, want y-websocket varUint8Array framing %v", got, want)
+	}
 }
 
 func TestDecodeProtocolMessageRejectsUnknownProtocol(t *testing.T) {

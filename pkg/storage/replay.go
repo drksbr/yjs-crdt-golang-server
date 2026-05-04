@@ -87,12 +87,12 @@ func ReplaySnapshot(ctx context.Context, base *yjsbridge.PersistedSnapshot, upda
 		ctx = context.Background()
 	}
 
-	currentUpdate, err := yjsbridge.EncodePersistedSnapshotV1(base)
+	currentUpdate, err := yjsbridge.EncodePersistedSnapshotV2(base)
 	if err != nil {
 		return nil, err
 	}
 	if len(updates) == 0 {
-		return yjsbridge.DecodePersistedSnapshotV1Context(ctx, currentUpdate)
+		return yjsbridge.DecodePersistedSnapshotV2Context(ctx, currentUpdate)
 	}
 
 	payloads := make([][]byte, 0, len(updates)+1)
@@ -108,14 +108,18 @@ func ReplaySnapshot(ctx context.Context, base *yjsbridge.PersistedSnapshot, upda
 		if err := record.Validate(); err != nil {
 			return nil, fmt.Errorf("update log record %d: %w", idx, err)
 		}
-		payloads = append(payloads, record.UpdateV1)
+		updateV2, err := updateLogRecordV2(record)
+		if err != nil {
+			return nil, fmt.Errorf("update log record %d: %w", idx, err)
+		}
+		payloads = append(payloads, updateV2)
 	}
 
-	merged, err := yjsbridge.MergeUpdatesContext(ctx, payloads...)
+	merged, err := yjsbridge.MergeUpdatesV2Context(ctx, payloads...)
 	if err != nil {
 		return nil, err
 	}
-	return yjsbridge.DecodePersistedSnapshotV1Context(ctx, merged)
+	return yjsbridge.DecodePersistedSnapshotV2Context(ctx, merged)
 }
 
 // ReplayUpdateLog rebuilds a persisted snapshot from a base snapshot plus the
@@ -155,7 +159,7 @@ func ReplayUpdateLogContext(ctx context.Context, store UpdateLogStore, key Docum
 		return nil, err
 	}
 
-	currentUpdate, err := yjsbridge.EncodePersistedSnapshotV1(base)
+	currentUpdate, err := yjsbridge.EncodePersistedSnapshotV2(base)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +187,7 @@ func ReplayUpdateLogContext(ctx context.Context, store UpdateLogStore, key Docum
 		}
 	}
 
-	snapshot, err := yjsbridge.DecodePersistedSnapshotV1Context(ctx, currentUpdate)
+	snapshot, err := yjsbridge.DecodePersistedSnapshotV2Context(ctx, currentUpdate)
 	if err != nil {
 		return nil, err
 	}
@@ -516,7 +520,11 @@ func replayUpdateBatchContext(ctx context.Context, key DocumentKey, currentUpdat
 			return nil, fmt.Errorf("update log record %d: %w", idx, err)
 		}
 
-		updates = append(updates, record.UpdateV1)
+		updateV2, err := updateLogRecordV2(record)
+		if err != nil {
+			return nil, fmt.Errorf("update log record %d: %w", idx, err)
+		}
+		updates = append(updates, updateV2)
 		result.Through = record.Offset
 		result.Applied++
 		if record.Epoch > 0 {
@@ -524,7 +532,17 @@ func replayUpdateBatchContext(ctx context.Context, key DocumentKey, currentUpdat
 		}
 	}
 
-	return yjsbridge.MergeUpdatesContext(ctx, updates...)
+	return yjsbridge.MergeUpdatesV2Context(ctx, updates...)
+}
+
+func updateLogRecordV2(record *UpdateLogRecord) ([]byte, error) {
+	if record == nil {
+		return nil, ErrInvalidUpdatePayload
+	}
+	if len(record.UpdateV2) != 0 {
+		return append([]byte(nil), record.UpdateV2...), nil
+	}
+	return yjsbridge.ConvertUpdateToV2(record.UpdateV1)
 }
 
 func validateReplayEpochProgression(lastEpoch uint64, nextEpoch uint64) error {

@@ -48,22 +48,11 @@ func (s *Snapshot) IsEmpty() bool {
 
 // SnapshotFromUpdate extrai um snapshot do payload conforme o formato detectado.
 func SnapshotFromUpdate(update []byte) (*Snapshot, error) {
-	format, err := FormatFromUpdate(update)
+	decoded, err := DecodeUpdate(update)
 	if err != nil {
 		return nil, err
 	}
-	switch format {
-	case UpdateFormatV1:
-		return SnapshotFromUpdateV1(update)
-	case UpdateFormatV2:
-		converted, err := ConvertUpdateToV1(update)
-		if err != nil {
-			return nil, err
-		}
-		return SnapshotFromUpdateV1(converted)
-	default:
-		return nil, ErrUnknownUpdateFormat
-	}
+	return snapshotFromDecodedUpdate(decoded), nil
 }
 
 // SnapshotFromUpdateV1 extrai um snapshot em memória a partir de um update V1.
@@ -74,6 +63,9 @@ func SnapshotFromUpdateV1(update []byte) (*Snapshot, error) {
 // SnapshotFromUpdatesContext agrega snapshots extraídos de múltiplos updates,
 // respeitando cancelamento e tratando payloads vazios como no-op.
 func SnapshotFromUpdatesContext(ctx context.Context, updates ...[]byte) (*Snapshot, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	format, err := detectAggregateUpdateFormatSkippingEmptyContext(ctx, updates...)
 	if err != nil {
 		return nil, err
@@ -82,11 +74,21 @@ func SnapshotFromUpdatesContext(ctx context.Context, updates ...[]byte) (*Snapsh
 	case UpdateFormatUnknown:
 		return NewSnapshot(), nil
 	case UpdateFormatV2:
-		converted, err := ConvertUpdatesToV1Context(ctx, updates...)
+		filtered := make([][]byte, 0, len(updates))
+		for _, update := range updates {
+			if len(update) == 0 {
+				continue
+			}
+			filtered = append(filtered, update)
+		}
+		merged, err := aggregatePayloadsInParallel(ctx, filtered, 0, decodeMergeUpdate, mergeDecodedUpdatesV1)
 		if err != nil {
 			return nil, err
 		}
-		return SnapshotFromUpdateV1(converted)
+		return snapshotFromDecodedUpdate(&DecodedUpdate{
+			Structs:   merged.blockSet.structs(),
+			DeleteSet: merged.deleteSet,
+		}), nil
 	}
 
 	filtered := make([][]byte, 0, len(updates))
@@ -138,4 +140,18 @@ func extractSnapshotFromUpdateV1Context(ctx context.Context, update []byte) (*Sn
 		StateVector: stateVector,
 		DeleteSet:   decoded.DeleteSet.Clone(),
 	}, nil
+}
+
+func snapshotFromDecodedUpdate(decoded *DecodedUpdate) *Snapshot {
+	if decoded == nil {
+		return NewSnapshot()
+	}
+	deleteSet := ytypes.NewDeleteSet()
+	if decoded.DeleteSet != nil {
+		deleteSet = decoded.DeleteSet.Clone()
+	}
+	return &Snapshot{
+		StateVector: stateVectorFromStructs(decoded.Structs),
+		DeleteSet:   deleteSet,
+	}
 }
