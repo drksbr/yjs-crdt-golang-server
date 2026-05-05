@@ -13,7 +13,7 @@ func EncodePersistedSnapshotV1(snapshot *PersistedSnapshot) ([]byte, error) {
 	}
 	if len(snapshot.UpdateV1) == 0 {
 		if len(snapshot.UpdateV2) != 0 {
-			updateV1, err := ConvertUpdateToV1(snapshot.UpdateV2)
+			updateV1, err := compactUpdateAsV1(snapshot.UpdateV2)
 			if err != nil {
 				return nil, err
 			}
@@ -25,7 +25,7 @@ func EncodePersistedSnapshotV1(snapshot *PersistedSnapshot) ([]byte, error) {
 		return encodeEmptyUpdateV1(), nil
 	}
 
-	updateV1, err := ConvertUpdateToV1(snapshot.UpdateV1)
+	updateV1, err := compactUpdateAsV1(snapshot.UpdateV1)
 	if err != nil {
 		return nil, err
 	}
@@ -59,26 +59,14 @@ func DecodePersistedSnapshotV1Context(ctx context.Context, payload []byte) (*Per
 		return nil, ErrUnsupportedUpdateFormatV2
 	}
 
-	updateV1, err := ConvertUpdateToV1(payload)
+	decoded, err := DecodeV1(payload)
 	if err != nil {
 		return nil, err
 	}
-
-	snapshot, err := extractSnapshotFromUpdateV1Context(ctx, updateV1)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-
-	updateV2, err := ConvertUpdateToV2(updateV1)
-	if err != nil {
-		return nil, err
-	}
-
-	return &PersistedSnapshot{
-		UpdateV2: updateV2,
-		UpdateV1: updateV1,
-		Snapshot: snapshot,
-	}, nil
+	return persistedSnapshotFromDecodedUpdate(decoded)
 }
 
 // EncodePersistedSnapshotV2 materializa o payload canônico V2 a ser armazenado
@@ -88,7 +76,7 @@ func EncodePersistedSnapshotV2(snapshot *PersistedSnapshot) ([]byte, error) {
 		return encodeEmptyUpdateV2(), nil
 	}
 	if len(snapshot.UpdateV2) != 0 {
-		updateV2, err := ConvertUpdateToV2(snapshot.UpdateV2)
+		updateV2, err := compactUpdateAsV2(snapshot.UpdateV2)
 		if err != nil {
 			return nil, err
 		}
@@ -101,7 +89,37 @@ func EncodePersistedSnapshotV2(snapshot *PersistedSnapshot) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ConvertUpdateToV2(updateV1)
+	return compactUpdateAsV2(updateV1)
+}
+
+func compactUpdateAsV1(update []byte) ([]byte, error) {
+	if len(update) == 0 {
+		return encodeEmptyUpdateV1(), nil
+	}
+	decoded, err := DecodeUpdate(update)
+	if err != nil {
+		return nil, err
+	}
+	decoded, err = garbageCollectDeletedContent(decoded)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeUpdate(decoded)
+}
+
+func compactUpdateAsV2(update []byte) ([]byte, error) {
+	if len(update) == 0 {
+		return encodeEmptyUpdateV2(), nil
+	}
+	decoded, err := DecodeUpdate(update)
+	if err != nil {
+		return nil, err
+	}
+	decoded, err = garbageCollectDeletedContent(decoded)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeUpdateV2(decoded)
 }
 
 // DecodePersistedSnapshotV2 restaura um snapshot persistido a partir de um

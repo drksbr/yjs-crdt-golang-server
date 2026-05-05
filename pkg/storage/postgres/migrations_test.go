@@ -18,8 +18,8 @@ func TestLoadMigrations(t *testing.T) {
 	if migrations[0].version != 1 {
 		t.Fatalf("migrations[0].version = %d, want 1", migrations[0].version)
 	}
-	if migrations[len(migrations)-1].version < 7 {
-		t.Fatalf("last migration version = %d, want at least 7", migrations[len(migrations)-1].version)
+	if migrations[len(migrations)-1].version < 9 {
+		t.Fatalf("last migration version = %d, want at least 9", migrations[len(migrations)-1].version)
 	}
 	if !strings.Contains(migrations[0].sql, `"tenant_app".document_snapshots`) {
 		t.Fatalf("migration sql = %q, want quoted schema substitution", migrations[0].sql)
@@ -30,6 +30,7 @@ func TestLoadMigrations(t *testing.T) {
 	var foundSnapshotThrough bool
 	var foundOwnerEpochColumns bool
 	var foundSnapshotV2 bool
+	var foundV2CanonicalStorage bool
 	for _, migration := range migrations {
 		if migration.version == 3 &&
 			strings.Contains(migration.sql, `"tenant_app".shard_lease_generations`) &&
@@ -55,6 +56,13 @@ func TestLoadMigrations(t *testing.T) {
 			strings.Contains(migration.sql, "snapshot_v2") {
 			foundSnapshotV2 = true
 		}
+		if migration.version == 9 &&
+			strings.Contains(migration.sql, "ALTER COLUMN snapshot_v1 DROP NOT NULL") &&
+			strings.Contains(migration.sql, "ALTER COLUMN update_v1 DROP NOT NULL") &&
+			strings.Contains(migration.sql, "SET snapshot_v1 = NULL") &&
+			strings.Contains(migration.sql, "SET update_v1 = NULL") {
+			foundV2CanonicalStorage = true
+		}
 	}
 	if !foundGenerationTable {
 		t.Fatal("migration version 3 does not define/backfill shard_lease_generations")
@@ -70,5 +78,8 @@ func TestLoadMigrations(t *testing.T) {
 	}
 	if !foundSnapshotV2 {
 		t.Fatal("migration version 7 does not add optional V2 snapshot payloads")
+	}
+	if !foundV2CanonicalStorage {
+		t.Fatal("migration version 9 does not switch duplicated V1 payloads to nullable compatibility storage")
 	}
 }

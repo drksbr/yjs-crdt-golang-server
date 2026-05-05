@@ -222,7 +222,10 @@ func (d *decoderV2) readAnyRaw(op string) ([]byte, error) {
 	if err != nil {
 		return nil, wrapError(op+".tag", start, err)
 	}
+	return d.readAnyRawWithTag(op, start, tag)
+}
 
+func (d *decoderV2) readAnyRawWithTag(op string, start int, tag byte) ([]byte, error) {
 	raw := []byte{tag}
 	switch tag {
 	case 127, 126, 121, 120:
@@ -299,6 +302,60 @@ func (d *decoderV2) readAnyRaw(op string) ([]byte, error) {
 	default:
 		return nil, wrapError(op, start, fmt.Errorf("tag any desconhecida: %d", tag))
 	}
+}
+
+func (d *decoderV2) readJSONRawCompat(op string) ([]byte, error) {
+	start := d.offset()
+	first, err := d.rest.ReadByte()
+	if err != nil {
+		return nil, wrapError(op+".tag", start, err)
+	}
+
+	if isLib0AnyTag(first) {
+		return d.readAnyRawWithTag(op+".any", start, first)
+	}
+	return d.readVarStringRawWithFirst(op+".json", start, first)
+}
+
+func (d *decoderV2) readVarStringRawWithFirst(op string, start int, first byte) ([]byte, error) {
+	rawLen := []byte{first}
+	value := uint32(first & 0x7f)
+	shift := uint(7)
+	i := 0
+	last := first
+
+	for last&0x80 != 0 {
+		i++
+		if i >= 5 {
+			return nil, wrapError(op+".len", start, varint.ErrOverflow)
+		}
+		next, err := d.rest.ReadByte()
+		if err != nil {
+			return nil, wrapError(op+".len", start, varint.ErrUnexpectedEOF)
+		}
+		rawLen = append(rawLen, next)
+		last = next
+
+		if i == 4 {
+			if next&0x80 != 0 || next > 0x0f {
+				return nil, wrapError(op+".len", start, varint.ErrOverflow)
+			}
+		}
+		value |= uint32(next&0x7f) << shift
+		shift += 7
+	}
+
+	if encodedVarUintLen(value) != len(rawLen) {
+		return nil, wrapError(op+".len", start, varint.ErrNonCanonical)
+	}
+
+	payload, err := d.rest.ReadN(int(value))
+	if err != nil {
+		return nil, wrapError(op, d.offset(), err)
+	}
+	raw := append([]byte{}, rawLen...)
+	raw = append(raw, payload...)
+	return raw, nil
 }
 
 func (d *decoderV2) readDSClock() (uint32, error) {

@@ -215,7 +215,11 @@ func EncodeSyncStep2FromUpdatesV2Context(ctx context.Context, updates ...[]byte)
 	if err != nil {
 		return nil, err
 	}
-	return EncodeSyncMessage(SyncMessageTypeStep2, merged)
+	wire, err := yjsbridge.ConvertUpdateToV2YjsWire(merged)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeSyncMessage(SyncMessageTypeStep2, wire)
 }
 
 // EncodeSyncUpdate serializa uma mensagem incremental de update.
@@ -225,7 +229,7 @@ func EncodeSyncUpdate(update []byte) []byte {
 
 // EncodeSyncUpdateV2 converte um update suportado para V2 e serializa uma mensagem incremental.
 func EncodeSyncUpdateV2(update []byte) ([]byte, error) {
-	converted, err := yjsbridge.ConvertUpdateToV2(update)
+	converted, err := yjsbridge.ConvertUpdateToV2YjsWire(update)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +313,11 @@ func EncodeProtocolSyncStep2FromUpdatesV2Context(ctx context.Context, updates ..
 	if err != nil {
 		return nil, err
 	}
-	return EncodeProtocolSyncMessage(SyncMessageTypeStep2, merged)
+	wire, err := yjsbridge.ConvertUpdateToV2YjsWire(merged)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeProtocolSyncMessage(SyncMessageTypeStep2, wire)
 }
 
 // EncodeProtocolSyncUpdate serializa protocolo + Update incremental.
@@ -319,7 +327,7 @@ func EncodeProtocolSyncUpdate(update []byte) []byte {
 
 // EncodeProtocolSyncUpdateV2 converte um update suportado para V2 e serializa protocolo + Update incremental.
 func EncodeProtocolSyncUpdateV2(update []byte) ([]byte, error) {
-	converted, err := yjsbridge.ConvertUpdateToV2(update)
+	converted, err := yjsbridge.ConvertUpdateToV2YjsWire(update)
 	if err != nil {
 		return nil, err
 	}

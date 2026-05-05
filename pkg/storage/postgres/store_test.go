@@ -140,7 +140,7 @@ func TestStoreSaveAndLoadSnapshotCheckpointRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSaveSnapshotQueryWritesV2Payload(t *testing.T) {
+func TestSaveSnapshotQueryWritesOnlyV2Payload(t *testing.T) {
 	t.Parallel()
 
 	snapshot, err := yjsbridge.PersistedSnapshotFromUpdates()
@@ -169,8 +169,8 @@ func TestSaveSnapshotQueryWritesV2Payload(t *testing.T) {
 	if len(args) != 6 {
 		t.Fatalf("saveSnapshotQuery() args len = %d, want 6", len(args))
 	}
-	if !bytes.Equal(args[2].([]byte), payloadV1) {
-		t.Fatalf("saveSnapshotQuery() V1 arg = %v, want %v", args[2], payloadV1)
+	if args[2] != nil {
+		t.Fatalf("saveSnapshotQuery() V1 arg = %v, want nil", args[2])
 	}
 	if !bytes.Equal(args[3].([]byte), payloadV2) {
 		t.Fatalf("saveSnapshotQuery() V2 arg = %v, want %v", args[3], payloadV2)
@@ -183,6 +183,40 @@ func TestSaveSnapshotQueryWritesV2Payload(t *testing.T) {
 	}
 }
 
+func TestStoreSaveSnapshotStoresOnlyV2Payload(t *testing.T) {
+	store, schema := newTestStore(t, false)
+	ctx := context.Background()
+
+	snapshot, err := yjsbridge.PersistedSnapshotFromUpdates()
+	if err != nil {
+		t.Fatalf("PersistedSnapshotFromUpdates() unexpected error: %v", err)
+	}
+	key := storage.DocumentKey{
+		Namespace:  "integration",
+		DocumentID: "save-snapshot-v2-only",
+	}
+	if _, err := store.SaveSnapshot(ctx, key, snapshot); err != nil {
+		t.Fatalf("SaveSnapshot() unexpected error: %v", err)
+	}
+
+	query := fmt.Sprintf(`
+SELECT snapshot_v1 IS NULL, octet_length(snapshot_v2)
+FROM %s.document_snapshots
+WHERE namespace = $1 AND document_id = $2
+`, quoteIdentifier(schema))
+	var v1IsNull bool
+	var v2Bytes int
+	if err := store.pool.QueryRow(ctx, query, key.Namespace, key.DocumentID).Scan(&v1IsNull, &v2Bytes); err != nil {
+		t.Fatalf("query persisted snapshot payloads unexpected error: %v", err)
+	}
+	if !v1IsNull {
+		t.Fatal("snapshot_v1 stored duplicate payload, want NULL")
+	}
+	if v2Bytes == 0 {
+		t.Fatal("snapshot_v2 is empty")
+	}
+}
+
 func TestDecodePersistedSnapshotPayloadPrefersV2WithV1Fallback(t *testing.T) {
 	t.Parallel()
 
@@ -190,9 +224,13 @@ func TestDecodePersistedSnapshotPayloadPrefersV2WithV1Fallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PersistedSnapshotFromUpdates() unexpected error: %v", err)
 	}
-	payloadV1, payloadV2, err := encodePersistedSnapshotPayloads(snapshot)
+	_, payloadV2, err := encodePersistedSnapshotPayloads(snapshot)
 	if err != nil {
 		t.Fatalf("encodePersistedSnapshotPayloads() unexpected error: %v", err)
+	}
+	payloadV1, err := yjsbridge.EncodePersistedSnapshotV1(snapshot)
+	if err != nil {
+		t.Fatalf("EncodePersistedSnapshotV1() unexpected error: %v", err)
 	}
 
 	fromV2, err := decodePersistedSnapshotPayload([]byte{0xff}, payloadV2)

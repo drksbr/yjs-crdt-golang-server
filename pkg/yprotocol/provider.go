@@ -820,11 +820,11 @@ func (r *providerRoom) applyDocumentPayloadLocked(ctx context.Context, provider 
 		return nil, err
 	}
 
-	updateV2, err := yjsbridge.ConvertUpdateToV2(payload)
+	updateV2, err := yjsbridge.ConvertUpdateToV2YjsWire(payload)
 	if err != nil {
 		return nil, err
 	}
-	updateV1, err := yjsbridge.ConvertUpdateToV1(updateV2)
+	updateV1, err := yjsbridge.ConvertUpdateToV1YjsWire(updateV2)
 	if err != nil {
 		return nil, err
 	}
@@ -868,6 +868,7 @@ func (r *providerRoom) applyDocumentPayloadLocked(ctx context.Context, provider 
 
 	nextSnapshot, err := storage.ReplaySnapshot(context.Background(), r.snapshot, &storage.UpdateLogRecord{
 		Key:      key,
+		UpdateV2: updateV2,
 		UpdateV1: updateV1,
 	})
 	if err != nil {

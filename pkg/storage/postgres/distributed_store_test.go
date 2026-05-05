@@ -86,6 +86,55 @@ func TestStoreAppendListTrimUpdates(t *testing.T) {
 	}
 }
 
+func TestStoreAppendUpdateV2StoresOnlyV2Payload(t *testing.T) {
+	store, schema := newTestStore(t, false)
+	ctx := context.Background()
+	key := storage.DocumentKey{Namespace: "tenant-a", DocumentID: "doc-log-v2-only"}
+	updateV2 := []byte{0x00, 0x02, 0x01}
+
+	record, err := store.AppendUpdateV2(ctx, key, updateV2)
+	if err != nil {
+		t.Fatalf("AppendUpdateV2() unexpected error: %v", err)
+	}
+	if !bytes.Equal(record.UpdateV2, updateV2) {
+		t.Fatalf("AppendUpdateV2().UpdateV2 = %v, want %v", record.UpdateV2, updateV2)
+	}
+	if len(record.UpdateV1) != 0 {
+		t.Fatalf("AppendUpdateV2().UpdateV1 = %v, want empty", record.UpdateV1)
+	}
+
+	query := fmt.Sprintf(`
+SELECT update_v1 IS NULL, update_v2
+FROM %s.document_update_logs
+WHERE namespace = $1 AND document_id = $2 AND log_offset = $3
+`, quoteIdentifier(schema))
+	var v1IsNull bool
+	var storedV2 []byte
+	if err := store.pool.QueryRow(ctx, query, key.Namespace, key.DocumentID, record.Offset).Scan(&v1IsNull, &storedV2); err != nil {
+		t.Fatalf("query persisted update payloads unexpected error: %v", err)
+	}
+	if !v1IsNull {
+		t.Fatal("update_v1 stored duplicate payload, want NULL")
+	}
+	if !bytes.Equal(storedV2, updateV2) {
+		t.Fatalf("stored update_v2 = %v, want %v", storedV2, updateV2)
+	}
+
+	records, err := store.ListUpdates(ctx, key, 0, 0)
+	if err != nil {
+		t.Fatalf("ListUpdates() unexpected error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("ListUpdates() len = %d, want 1", len(records))
+	}
+	if len(records[0].UpdateV1) != 0 {
+		t.Fatalf("ListUpdates()[0].UpdateV1 = %v, want empty", records[0].UpdateV1)
+	}
+	if !bytes.Equal(records[0].UpdateV2, updateV2) {
+		t.Fatalf("ListUpdates()[0].UpdateV2 = %v, want %v", records[0].UpdateV2, updateV2)
+	}
+}
+
 func TestStoreSaveAndLoadPlacement(t *testing.T) {
 	store, _ := newTestStore(t, false)
 	ctx := context.Background()

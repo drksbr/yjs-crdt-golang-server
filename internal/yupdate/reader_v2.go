@@ -200,7 +200,7 @@ func readItemContentV2(decoder *decoderV2, info byte) (ParsedContent, error) {
 			Text:      value,
 		}, nil
 	case itemContentEmbed:
-		raw, err := decoder.readAnyRaw("ReadV2ContentEmbed")
+		raw, err := decoder.readJSONRawCompat("ReadV2ContentEmbed")
 		if err != nil {
 			return ParsedContent{}, err
 		}
@@ -210,7 +210,7 @@ func readItemContentV2(decoder *decoderV2, info byte) (ParsedContent, error) {
 		if err != nil {
 			return ParsedContent{}, err
 		}
-		valueRaw, err := decoder.readAnyRaw("ReadV2ContentFormat.value")
+		valueRaw, err := decoder.readJSONRawCompat("ReadV2ContentFormat.value")
 		if err != nil {
 			return ParsedContent{}, err
 		}

@@ -98,7 +98,7 @@ func readItemContentV1(d *decoderV1, info byte) (ParsedContent, error) {
 			Text:      value,
 		}, nil
 	case itemContentEmbed:
-		raw, err := d.readAnyRaw("ReadContentEmbed")
+		raw, err := d.readJSONRawCompat("ReadContentEmbed")
 		if err != nil {
 			return ParsedContent{}, err
 		}
@@ -108,7 +108,7 @@ func readItemContentV1(d *decoderV1, info byte) (ParsedContent, error) {
 		if err != nil {
 			return ParsedContent{}, err
 		}
-		valueRaw, err := d.readAnyRaw("ReadContentFormat.value")
+		valueRaw, err := d.readJSONRawCompat("ReadContentFormat.value")
 		if err != nil {
 			return ParsedContent{}, err
 		}

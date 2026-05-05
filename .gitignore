@@ -3,5 +3,16 @@
 .tmpcheck/
 _cmpgo/
 _tmp/
+.DS_Store
+**/.DS_Store
 **/node_modules/
 **/dist/
+**/.next/
+**/.next-local*/
+**/*.tsbuildinfo
+examples/DontPadBR2/
+examples/DontPadBR3/apps/backend/.air.toml
+examples/DontPadBR3/storage/data/*
+!examples/DontPadBR3/storage/data/.gitkeep
+storage/data/*
+!storage/data/.gitkeep

@@ -109,9 +109,21 @@ func ConvertUpdateToV1(update []byte) ([]byte, error) {
 	return yupdate.ConvertUpdateToV1(update)
 }
 
+// ConvertUpdateToV1YjsWire converte para V1 no wire compatível com clientes
+// Yjs (ContentEmbed/ContentFormat em JSON-string).
+func ConvertUpdateToV1YjsWire(update []byte) ([]byte, error) {
+	return yupdate.ConvertUpdateToV1YjsWire(update)
+}
+
 // ConvertUpdateToV2 normaliza um update suportado para a forma canônica V2.
 func ConvertUpdateToV2(update []byte) ([]byte, error) {
 	return yupdate.ConvertUpdateToV2(update)
+}
+
+// ConvertUpdateToV2YjsWire converte para V2 no wire compatível com clientes
+// Yjs (ContentEmbed/ContentFormat em lib0-any).
+func ConvertUpdateToV2YjsWire(update []byte) ([]byte, error) {
+	return yupdate.ConvertUpdateToV2YjsWire(update)
 }
 
 // ConvertUpdatesToV1 consolida múltiplos payloads em um único update V1 canônico.
