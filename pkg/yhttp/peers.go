@@ -101,7 +101,7 @@ func protocolPayloadForSyncOutputFormat(payload []byte, format yjsbridge.UpdateF
 		if message.Sync.Type != yprotocol.SyncMessageTypeStep2 && message.Sync.Type != yprotocol.SyncMessageTypeUpdate {
 			continue
 		}
-		converted, err := yjsbridge.ConvertUpdateToV2(message.Sync.Payload)
+		converted, err := yjsbridge.ConvertUpdateToV2YjsWire(message.Sync.Payload)
 		if err != nil {
 			return nil, err
 		}

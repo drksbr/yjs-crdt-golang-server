@@ -183,6 +183,52 @@ func TestProviderSyncUpdateAppendsCanonicalV1ForV2Input(t *testing.T) {
 	}
 }
 
+func TestProviderPersistKeepsYjsV2KanbanObjectRewrites(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	key := storage.DocumentKey{
+		Namespace:  "tests",
+		DocumentID: "provider-persist-kanban-v2-rewrites",
+	}
+	store := memory.New()
+	provider := NewProvider(ProviderConfig{Store: store})
+
+	conn, err := provider.Open(ctx, key, "conn-a", 813)
+	if err != nil {
+		t.Fatalf("provider.Open() unexpected error: %v", err)
+	}
+
+	updates := [][]byte{
+		mustDecodeProtocolHex(t, "00000597d3ca951d0000012813106b616e62616e2d636f6c73636f6c2d310b05010100010101010076050269647705636f6c2d31057469746c65770b4e6f766120636f6c756e610b6465736372697074696f6e770005636f6c6f72770723363437343862056f726465727da80f00"),
+		mustDecodeProtocolHex(t, "00000597d3ca951d0000012815126b616e62616e2d6974656d736974656d2d310c060101000101010101760802696477066974656d2d31057469746c6577044974656d0b6465736372697074696f6e770008636f6c756d6e49647705636f6c2d31056f726465727da80f05636f6c6f727700106c696e6b6564446f63756d656e7449647700156c696e6b6564537562646f63756d656e744e616d65770000"),
+		mustDecodeProtocolHex(t, "000006d7d3ca951d0001000001a801000000010101010276050269647705636f6c2d31057469746c65770b4e6f766120636f6c756e610b6465736372697074696f6e770005636f6c6f72770723656634343434056f726465727da80f01d7a9e5ca0e010000"),
+		mustDecodeProtocolHex(t, "000006d7d3ca951d0001020001a8010000000101010103760802696477066974656d2d31057469746c6577044974656d0b6465736372697074696f6e770008636f6c756d6e49647705636f6c2d31056f726465727da80f05636f6c6f72770723323263353565106c696e6b6564446f63756d656e7449647700156c696e6b6564537562646f63756d656e744e616d65770001d7a9e5ca0e010100"),
+	}
+
+	for idx, update := range updates {
+		if _, err := conn.HandleEncodedMessages(EncodeProtocolSyncUpdate(update)); err != nil {
+			t.Fatalf("conn.HandleEncodedMessages(update %d) unexpected error: %v", idx, err)
+		}
+	}
+
+	record, err := conn.Persist(ctx)
+	if err != nil {
+		t.Fatalf("conn.Persist() unexpected error: %v", err)
+	}
+	if record == nil || record.Snapshot == nil {
+		t.Fatalf("conn.Persist() = %#v, want persisted snapshot", record)
+	}
+
+	expected, err := yjsbridge.MergeUpdatesV2(updates...)
+	if err != nil {
+		t.Fatalf("MergeUpdatesV2() unexpected error: %v", err)
+	}
+	if !bytes.Equal(record.Snapshot.UpdateV2, expected) {
+		t.Fatalf("record.Snapshot.UpdateV2 mismatch:\n got: %x\nwant: %x", record.Snapshot.UpdateV2, expected)
+	}
+}
+
 func TestProviderPersistCompactsRecoveredSnapshotPlusTail(t *testing.T) {
 	t.Parallel()
 

@@ -61,7 +61,7 @@ func (s *Session) UpdateV1() []byte {
 	if len(updateV2) == 0 {
 		return nil
 	}
-	updateV1, err := yjsbridge.ConvertUpdateToV1(updateV2)
+	updateV1, err := yjsbridge.ConvertUpdateToV1YjsWire(updateV2)
 	if err != nil {
 		return nil
 	}
@@ -86,7 +86,7 @@ func (s *Session) LoadUpdate(update []byte) error {
 		return ErrNilSession
 	}
 
-	updateV2, err := yjsbridge.ConvertUpdateToV2(update)
+	updateV2, err := yjsbridge.ConvertUpdateToV2YjsWire(update)
 	if err != nil {
 		return err
 	}
@@ -224,7 +224,7 @@ func (s *Session) handleSyncMessage(message *SyncMessage, opts SessionHandleOpti
 		}}, nil
 	case SyncMessageTypeStep2, SyncMessageTypeUpdate:
 		current := s.UpdateV2()
-		updateV2, err := yjsbridge.ConvertUpdateToV2(message.Payload)
+		updateV2, err := yjsbridge.ConvertUpdateToV2YjsWire(message.Payload)
 		if err != nil {
 			return nil, err
 		}
@@ -249,13 +249,17 @@ func (s *Session) diffForSyncStep1(stateVector []byte, opts SessionHandleOptions
 func diffForSyncOutputFormat(updateV2, stateVector []byte, format yjsbridge.UpdateFormat) ([]byte, error) {
 	switch format {
 	case yjsbridge.UpdateFormatUnknown, yjsbridge.UpdateFormatV1:
-		updateV1, err := yjsbridge.ConvertUpdateToV1(updateV2)
+		updateV1, err := yjsbridge.ConvertUpdateToV1YjsWire(updateV2)
 		if err != nil {
 			return nil, err
 		}
 		return yjsbridge.DiffUpdate(updateV1, stateVector)
 	case yjsbridge.UpdateFormatV2:
-		return yjsbridge.DiffUpdateV2(updateV2, stateVector)
+		diff, err := yjsbridge.DiffUpdateV2(updateV2, stateVector)
+		if err != nil {
+			return nil, err
+		}
+		return yjsbridge.ConvertUpdateToV2YjsWire(diff)
 	default:
 		return nil, fmt.Errorf("%w: %s", yjsbridge.ErrUnknownUpdateFormat, format)
 	}
@@ -264,9 +268,9 @@ func diffForSyncOutputFormat(updateV2, stateVector []byte, format yjsbridge.Upda
 func convertForSyncOutputFormat(updateV2 []byte, format yjsbridge.UpdateFormat) ([]byte, error) {
 	switch format {
 	case yjsbridge.UpdateFormatUnknown, yjsbridge.UpdateFormatV1:
-		return yjsbridge.ConvertUpdateToV1(updateV2)
+		return yjsbridge.ConvertUpdateToV1YjsWire(updateV2)
 	case yjsbridge.UpdateFormatV2:
-		return append([]byte(nil), updateV2...), nil
+		return yjsbridge.ConvertUpdateToV2YjsWire(updateV2)
 	default:
 		return nil, fmt.Errorf("%w: %s", yjsbridge.ErrUnknownUpdateFormat, format)
 	}

@@ -297,19 +297,15 @@ ON CONFLICT (namespace, document_id)
 DO UPDATE SET snapshot_v1 = EXCLUDED.snapshot_v1, snapshot_v2 = EXCLUDED.snapshot_v2, through_offset = EXCLUDED.through_offset, owner_epoch = EXCLUDED.owner_epoch, stored_at = now()
 RETURNING stored_at
 `, quoteIdentifier(s.schema))
-	return query, []any{key.Namespace, key.DocumentID, payloadV1, payloadV2, throughOffset, epochValue}, nil
+	return query, []any{key.Namespace, key.DocumentID, nullableBytes(payloadV1), nullableBytes(payloadV2), throughOffset, epochValue}, nil
 }
 
 func encodePersistedSnapshotPayloads(snapshot *yjsbridge.PersistedSnapshot) ([]byte, []byte, error) {
-	payloadV1, err := yjsbridge.EncodePersistedSnapshotV1(snapshot)
-	if err != nil {
-		return nil, nil, err
-	}
 	payloadV2, err := yjsbridge.EncodePersistedSnapshotV2(snapshot)
 	if err != nil {
 		return nil, nil, err
 	}
-	return payloadV1, payloadV2, nil
+	return nil, payloadV2, nil
 }
 
 func decodePersistedSnapshotPayload(payloadV1, payloadV2 []byte) (*yjsbridge.PersistedSnapshot, error) {
@@ -317,4 +313,11 @@ func decodePersistedSnapshotPayload(payloadV1, payloadV2 []byte) (*yjsbridge.Per
 		return yjsbridge.DecodePersistedSnapshotV2(payloadV2)
 	}
 	return yjsbridge.DecodePersistedSnapshotV1(payloadV1)
+}
+
+func nullableBytes(payload []byte) any {
+	if payload == nil {
+		return nil
+	}
+	return payload
 }

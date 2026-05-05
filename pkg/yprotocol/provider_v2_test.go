@@ -56,6 +56,46 @@ func TestConnectionHandleEncodedMessagesV2DirectOutputOptIn(t *testing.T) {
 	assertProtocolV2PayloadEquivalentToV1(t, conn.room.updateV2, update)
 }
 
+func TestConnectionV2DirectOutputUsesYjsWireFormatForTextFormatting(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	key := storage.DocumentKey{Namespace: "tests", DocumentID: "provider-v2-direct-quill-format"}
+	provider := NewProvider(ProviderConfig{})
+	conn, err := provider.Open(ctx, key, "conn-a", 931)
+	if err != nil {
+		t.Fatalf("provider.Open() unexpected error: %v", err)
+	}
+
+	update := mustDecodeProtocolHex(t, "01039fecb8ca09000601047465787404626f6c640474727565849fecb8ca09000568656c6c6f869fecb8ca090504626f6c64046e756c6c00")
+	if _, err := conn.HandleEncodedMessages(EncodeProtocolSyncUpdate(update)); err != nil {
+		t.Fatalf("HandleEncodedMessages(sync-update) unexpected error: %v", err)
+	}
+
+	result, err := conn.HandleEncodedMessagesWithOptions(
+		EncodeProtocolSyncStep1([]byte{0x00}),
+		ConnectionHandleOptions{DirectSyncOutputFormat: yjsbridge.UpdateFormatV2},
+	)
+	if err != nil {
+		t.Fatalf("HandleEncodedMessagesWithOptions(step1 v2) unexpected error: %v", err)
+	}
+
+	messages, err := DecodeProtocolMessages(result.Direct)
+	if err != nil {
+		t.Fatalf("DecodeProtocolMessages(direct) unexpected error: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Sync == nil {
+		t.Fatalf("direct messages = %#v, want single sync step2", messages)
+	}
+	roundTrip, err := yjsbridge.ConvertUpdateToV1YjsWire(messages[0].Sync.Payload)
+	if err != nil {
+		t.Fatalf("ConvertUpdateToV1YjsWire(v2 payload) unexpected error: %v", err)
+	}
+	if !bytes.Equal(roundTrip, update) {
+		t.Fatalf("direct V2 wire payload round-trip mismatch:\n got: %x\nwant: %x", roundTrip, update)
+	}
+}
+
 func TestConnectionHandleEncodedMessagesV2BroadcastOutputOptInKeepsStorageV1(t *testing.T) {
 	t.Parallel()
 

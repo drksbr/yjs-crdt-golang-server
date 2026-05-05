@@ -166,6 +166,84 @@ func TestPersistedSnapshotFromUpdatesContext(t *testing.T) {
 	}
 }
 
+func TestPersistedSnapshotGarbageCollectsDeletedInlineContent(t *testing.T) {
+	t.Parallel()
+
+	inlineImage := bytes.Repeat([]byte{0x7f}, 1<<20)
+	update := buildUpdate(
+		clientBlock{
+			client: 12,
+			clock:  0,
+			structs: []structEncoding{
+				itemBinary(rootParent("doc"), inlineImage),
+			},
+		},
+		deleteRange{client: 12, clock: 0, length: 1},
+	)
+
+	got, err := PersistedSnapshotFromUpdate(update)
+	if err != nil {
+		t.Fatalf("PersistedSnapshotFromUpdate() unexpected error: %v", err)
+	}
+	if len(got.UpdateV2) >= len(update)/10 {
+		t.Fatalf("UpdateV2 len = %d, original len = %d, want deleted inline content compacted", len(got.UpdateV2), len(update))
+	}
+
+	decoded, err := DecodeV1(got.UpdateV1)
+	if err != nil {
+		t.Fatalf("DecodeV1(compacted) unexpected error: %v", err)
+	}
+	if len(decoded.Structs) != 1 {
+		t.Fatalf("compacted structs len = %d, want 1", len(decoded.Structs))
+	}
+	gc, ok := decoded.Structs[0].(ytypes.GC)
+	if !ok {
+		t.Fatalf("compacted struct = %T, want ytypes.GC", decoded.Structs[0])
+	}
+	if gc.ID() != (ytypes.ID{Client: 12, Clock: 0}) || gc.Length() != 1 {
+		t.Fatalf("GC = id %v len %d, want client 12 clock 0 len 1", gc.ID(), gc.Length())
+	}
+	if !decoded.DeleteSet.Has(ytypes.ID{Client: 12, Clock: 0}) {
+		t.Fatalf("DeleteSet = %#v, want deleted inline content range preserved", decoded.DeleteSet)
+	}
+}
+
+func TestPersistedSnapshotGarbageCollectsDeletedTextWindow(t *testing.T) {
+	t.Parallel()
+
+	update := buildUpdate(
+		clientBlock{
+			client: 17,
+			clock:  0,
+			structs: []structEncoding{
+				itemString(rootParent("doc"), "abcdef"),
+			},
+		},
+		deleteRange{client: 17, clock: 2, length: 3},
+	)
+
+	got, err := PersistedSnapshotFromUpdate(update)
+	if err != nil {
+		t.Fatalf("PersistedSnapshotFromUpdate() unexpected error: %v", err)
+	}
+	decoded, err := DecodeV1(got.UpdateV1)
+	if err != nil {
+		t.Fatalf("DecodeV1(compacted) unexpected error: %v", err)
+	}
+	if len(decoded.Structs) != 3 {
+		t.Fatalf("compacted structs len = %d, want 3", len(decoded.Structs))
+	}
+	assertStringStruct(t, decoded.Structs[0], 17, 0, "ab")
+	gc, ok := decoded.Structs[1].(ytypes.GC)
+	if !ok {
+		t.Fatalf("middle struct = %T, want ytypes.GC", decoded.Structs[1])
+	}
+	if gc.ID() != (ytypes.ID{Client: 17, Clock: 2}) || gc.Length() != 3 {
+		t.Fatalf("middle GC = id %v len %d, want client 17 clock 2 len 3", gc.ID(), gc.Length())
+	}
+	assertStringStruct(t, decoded.Structs[2], 17, 5, "f")
+}
+
 func TestPersistedSnapshotClone(t *testing.T) {
 	t.Parallel()
 

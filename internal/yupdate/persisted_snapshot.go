@@ -90,6 +90,11 @@ func PersistedSnapshotFromUpdates(updates ...[]byte) (*PersistedSnapshot, error)
 }
 
 func persistedSnapshotFromDecodedUpdate(decoded *DecodedUpdate) (*PersistedSnapshot, error) {
+	var err error
+	decoded, err = garbageCollectDeletedContent(decoded)
+	if err != nil {
+		return nil, err
+	}
 	updateV2, err := EncodeUpdateV2(decoded)
 	if err != nil {
 		return nil, err

@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
-	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
 
 var _ storage.DistributedStore = (*Store)(nil)
@@ -30,7 +29,6 @@ func (s *Store) AppendUpdate(ctx context.Context, key storage.DocumentKey, updat
 	if len(update) == 0 {
 		return nil, storage.ErrInvalidUpdatePayload
 	}
-	updateV2 := bestEffortUpdateV2(update)
 	pool, err := s.requirePool()
 	if err != nil {
 		return nil, err
@@ -53,7 +51,7 @@ RETURNING log_offset, owner_epoch, stored_at
 	var offset int64
 	var epoch int64
 	var storedAt time.Time
-	if err := pool.QueryRow(ctx, query, key.Namespace, key.DocumentID, update, updateV2).Scan(&offset, &epoch, &storedAt); err != nil {
+	if err := pool.QueryRow(ctx, query, key.Namespace, key.DocumentID, update, nil).Scan(&offset, &epoch, &storedAt); err != nil {
 		return nil, err
 	}
 
@@ -69,7 +67,6 @@ RETURNING log_offset, owner_epoch, stored_at
 	return &storage.UpdateLogRecord{
 		Key:      key,
 		Offset:   logOffset,
-		UpdateV2: append([]byte(nil), updateV2...),
 		UpdateV1: append([]byte(nil), update...),
 		Epoch:    epochValue,
 		StoredAt: storedAt,
@@ -77,11 +74,7 @@ RETURNING log_offset, owner_epoch, stored_at
 }
 
 func (s *Store) AppendUpdateV2(ctx context.Context, key storage.DocumentKey, update []byte) (*storage.UpdateLogRecord, error) {
-	updateV1, err := yjsbridge.ConvertUpdateToV1(update)
-	if err != nil {
-		return nil, err
-	}
-	return s.appendUpdateV2(ctx, key, update, updateV1, 0, nil)
+	return s.appendUpdateV2(ctx, key, update, nil, 0, nil)
 }
 
 // AppendUpdateAuthoritative adiciona um update V1 ao fim do log do documento,
@@ -101,7 +94,6 @@ func (s *Store) AppendUpdateAuthoritative(
 	if len(update) == 0 {
 		return nil, storage.ErrInvalidUpdatePayload
 	}
-	updateV2 := bestEffortUpdateV2(update)
 	if err := fence.Validate(); err != nil {
 		return nil, err
 	}
@@ -122,7 +114,7 @@ func (s *Store) AppendUpdateAuthoritative(
 		return nil, err
 	}
 
-	logOffset, storedAt, err := s.appendUpdateTx(ctx, tx, key, update, updateV2, fence.Owner.Epoch)
+	logOffset, storedAt, err := s.appendUpdateTx(ctx, tx, key, update, nil, fence.Owner.Epoch)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +125,6 @@ func (s *Store) AppendUpdateAuthoritative(
 	return &storage.UpdateLogRecord{
 		Key:      key,
 		Offset:   logOffset,
-		UpdateV2: append([]byte(nil), updateV2...),
 		UpdateV1: append([]byte(nil), update...),
 		Epoch:    fence.Owner.Epoch,
 		StoredAt: storedAt,
@@ -146,11 +137,7 @@ func (s *Store) AppendUpdateV2Authoritative(
 	update []byte,
 	fence storage.AuthorityFence,
 ) (*storage.UpdateLogRecord, error) {
-	updateV1, err := yjsbridge.ConvertUpdateToV1(update)
-	if err != nil {
-		return nil, err
-	}
-	return s.appendUpdateV2(ctx, key, update, updateV1, fence.Owner.Epoch, &fence)
+	return s.appendUpdateV2(ctx, key, update, nil, fence.Owner.Epoch, &fence)
 }
 
 func (s *Store) appendUpdateV2(
@@ -958,7 +945,7 @@ RETURNING log_offset, stored_at
 
 	var offset int64
 	var storedAt time.Time
-	if err := pool.QueryRow(ctx, query, key.Namespace, key.DocumentID, updateV1, updateV2, epochValue).Scan(&offset, &storedAt); err != nil {
+	if err := pool.QueryRow(ctx, query, key.Namespace, key.DocumentID, nullableBytes(updateV1), nullableBytes(updateV2), epochValue).Scan(&offset, &storedAt); err != nil {
 		return 0, time.Time{}, err
 	}
 	logOffset, err := int64ToOffset(offset)
@@ -990,7 +977,7 @@ RETURNING log_offset, stored_at
 
 	var offset int64
 	var storedAt time.Time
-	if err := tx.QueryRow(ctx, query, key.Namespace, key.DocumentID, updateV1, updateV2, epochValue).Scan(&offset, &storedAt); err != nil {
+	if err := tx.QueryRow(ctx, query, key.Namespace, key.DocumentID, nullableBytes(updateV1), nullableBytes(updateV2), epochValue).Scan(&offset, &storedAt); err != nil {
 		return 0, time.Time{}, err
 	}
 
@@ -1003,14 +990,6 @@ RETURNING log_offset, stored_at
 
 type queryRower interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
-func bestEffortUpdateV2(updateV1 []byte) []byte {
-	updateV2, err := yjsbridge.ConvertUpdateToV2(updateV1)
-	if err != nil {
-		return nil
-	}
-	return updateV2
 }
 
 func (s *Store) trimUpdatesTx(ctx context.Context, tx pgx.Tx, key storage.DocumentKey, through storage.UpdateOffset) error {
