@@ -7,15 +7,9 @@ _tmp/
 **/.DS_Store
 **/node_modules/
 **/dist/
-!examples/DontPadBR3/apps/frontend2/dist/
-examples/DontPadBR3/apps/frontend2/dist/*
-!examples/DontPadBR3/apps/frontend2/dist/.gitkeep
 **/.next/
 **/.next-local*/
 **/*.tsbuildinfo
 examples/DontPadBR2/
-examples/DontPadBR3/apps/backend/.air.toml
-examples/DontPadBR3/storage/data/*
-!examples/DontPadBR3/storage/data/.gitkeep
 storage/data/*
 !storage/data/.gitkeep
