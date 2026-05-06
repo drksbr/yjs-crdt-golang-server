@@ -98,6 +98,7 @@ Neste momento o repositório já possui:
 - pacote `integration` adiciona smoke tests opt-in com Postgres efêmero via Docker para funcionalidade, persistência e performance básica do fluxo WebSocket
 - pacote `integration` também adiciona matriz opt-in de performance entre `net/http`, `gin`, `echo` e `chi`, cobrindo memória/Postgres e medindo throughput, latência e restore
 - `integration/owner_aware_remote_relay_test.go` agora cobre sync e awareness atravessando o relay owner-aware para um owner remoto
+- O backend DontPadBR3 agora possui camada de object store local/S3 para anexos, notas de áudio e leitura de dados legados y-sweet, preservando as chaves relativas já armazenadas na metadata.
 
 A fase atual é **Meta técnica 9 / Fase 3 em consolidação**, com API pública de snapshot e de update em V1 já em operação em `pkg/yjsbridge`, além da exposição pública de protocolo e awareness em `pkg/yprotocol` e `pkg/yawareness` em V1.
 As metas técnicas 1, 2, 3, 4, 5, 6, 7 e 8 já possuem corte mínimo implementado.

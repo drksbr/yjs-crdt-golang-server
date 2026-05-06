@@ -154,13 +154,15 @@ type FilesManifest struct {
 }
 
 type AudioNote struct {
-	ID          string  `json:"id"`
-	Name        string  `json:"name"`
-	Duration    float64 `json:"duration"`
-	MimeType    string  `json:"mimeType"`
-	Size        int64   `json:"size"`
-	CreatedAt   int64   `json:"createdAt"`
-	StoragePath string  `json:"-"`
+	ID            string  `json:"id"`
+	DocumentID    string  `json:"documentId,omitempty"`
+	SubdocumentID *string `json:"subdocumentId,omitempty"`
+	Name          string  `json:"name"`
+	Duration      float64 `json:"duration"`
+	MimeType      string  `json:"mimeType"`
+	Size          int64   `json:"size"`
+	CreatedAt     int64   `json:"createdAt"`
+	StoragePath   string  `json:"-"`
 }
 
 type DocumentVersion struct {

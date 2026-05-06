@@ -1,16 +1,15 @@
 package media
 
 import (
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/drksbr/yjs-crdt-golang-server/examples/DontPadBR3/apps/backend/internal/common"
+	"github.com/drksbr/yjs-crdt-golang-server/examples/DontPadBR3/apps/backend/internal/objectstore"
 	"github.com/gin-gonic/gin"
 )
 
@@ -94,40 +93,33 @@ func (s *Service) HandleCreateAudioNote(c *gin.Context) {
 
 	now := time.Now()
 	subdoc := common.NormalizeOptionalSubdocumentID(c.PostForm("subdocumentId"))
-	audioDir := s.paths.DatedAudioDir(access.DocumentID, subdoc, now, true)
-	targetPath := filepath.Join(audioDir, noteID+".webm")
-	storagePath := s.paths.RelativeStoragePath(targetPath)
-	target, err := os.Create(targetPath)
+	storagePath := s.paths.DatedAudioKey(access.DocumentID, subdoc, now, noteID)
+	written, err := s.objects.Put(c.Request.Context(), storagePath, src, objectstore.PutOptions{
+		ContentType: "audio/webm",
+		MaxBytes:    common.MaxAudioSizeBytes,
+	})
 	if err != nil {
+		if errors.Is(err, common.ErrPayloadTooLarge) {
+			common.WriteError(c, http.StatusBadRequest, "Nota de áudio excede o limite permitido")
+			return
+		}
 		common.WriteError(c, http.StatusInternalServerError, "Falha ao salvar nota de áudio")
-		return
-	}
-	defer func() {
-		_ = target.Close()
-	}()
-
-	written, err := io.Copy(target, io.LimitReader(src, common.MaxAudioSizeBytes+1))
-	if err != nil {
-		common.WriteError(c, http.StatusInternalServerError, "Falha ao salvar nota de áudio")
-		return
-	}
-	if written > common.MaxAudioSizeBytes {
-		_ = os.Remove(targetPath)
-		common.WriteError(c, http.StatusBadRequest, "Nota de áudio excede o limite permitido")
 		return
 	}
 
 	note := common.AudioNote{
-		ID:          noteID,
-		Name:        fmt.Sprintf("Nota de Áudio %s", now.Format("02/01/2006 15:04")),
-		Duration:    common.MathRound(duration, 1),
-		MimeType:    "audio/webm",
-		Size:        written,
-		CreatedAt:   now.UnixMilli(),
-		StoragePath: storagePath,
+		ID:            noteID,
+		DocumentID:    access.DocumentID,
+		SubdocumentID: subdoc,
+		Name:          fmt.Sprintf("Nota de Áudio %s", now.Format("02/01/2006 15:04")),
+		Duration:      common.MathRound(duration, 1),
+		MimeType:      "audio/webm",
+		Size:          written,
+		CreatedAt:     now.UnixMilli(),
+		StoragePath:   storagePath,
 	}
 	if err := s.upsertAudioNote(c.Request.Context(), access.DocumentID, subdoc, note); err != nil {
-		_ = os.Remove(targetPath)
+		_ = s.objects.Delete(c.Request.Context(), storagePath)
 		common.WriteError(c, http.StatusInternalServerError, "Falha ao salvar nota de áudio")
 		return
 	}
@@ -162,14 +154,14 @@ func (s *Service) HandleDeleteAudioNote(c *gin.Context) {
 
 	subdoc := common.NormalizeOptionalSubdocumentID(req.Subdocument)
 	noteID := strings.ToLower(req.NoteID)
-	path := filepath.Join(s.paths.AudioDir(access.DocumentID, subdoc, true), noteID+".webm")
+	storagePath := s.paths.AudioKey(access.DocumentID, subdoc, noteID)
 	if note, err := s.getAudioNote(c.Request.Context(), access.DocumentID, subdoc, noteID); err != nil {
 		common.WriteError(c, http.StatusInternalServerError, "Falha ao deletar áudio")
 		return
 	} else if note != nil && note.StoragePath != "" {
-		path = s.paths.ResolveStoragePath(note.StoragePath)
+		storagePath = note.StoragePath
 	}
-	_ = os.Remove(path)
+	_ = s.objects.Delete(c.Request.Context(), storagePath)
 	if err := s.removeAudioNote(c.Request.Context(), access.DocumentID, subdoc, noteID); err != nil {
 		common.WriteError(c, http.StatusInternalServerError, "Falha ao deletar áudio")
 		return
@@ -201,20 +193,20 @@ func (s *Service) HandleGetAudioNote(c *gin.Context) {
 	}
 
 	subdoc := common.NormalizeOptionalSubdocumentID(c.GetHeader("X-Subdocument-Id"))
-	path := filepath.Join(s.paths.AudioDir(access.DocumentID, subdoc, false), noteID+".webm")
+	storagePath := s.paths.AudioKey(access.DocumentID, subdoc, noteID)
 	mimeType := "audio/webm"
 	if note, err := s.getAudioNote(c.Request.Context(), access.DocumentID, subdoc, noteID); err != nil {
 		common.WriteError(c, http.StatusInternalServerError, "Falha ao carregar áudio")
 		return
 	} else if note != nil {
 		if note.StoragePath != "" {
-			path = s.paths.ResolveStoragePath(note.StoragePath)
+			storagePath = note.StoragePath
 		}
 		if note.MimeType != "" {
 			mimeType = note.MimeType
 		}
 	}
-	content, err := os.ReadFile(path)
+	content, err := objectstore.ReadAll(c.Request.Context(), s.objects, storagePath, common.MaxAudioSizeBytes)
 	if err != nil {
 		common.WriteError(c, http.StatusNotFound, "Nota de áudio não encontrada")
 		return

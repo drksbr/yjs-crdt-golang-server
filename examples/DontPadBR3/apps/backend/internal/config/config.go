@@ -20,6 +20,13 @@ type Options struct {
 	Schema         string
 	Namespace      string
 	DataDir        string
+	StorageBackend string
+	S3Bucket       string
+	S3Prefix       string
+	S3Region       string
+	S3Endpoint     string
+	S3Profile      string
+	S3PathStyle    string
 	AllowedOrigins string
 	AuthSecret     string
 	MasterPassword string
@@ -31,6 +38,13 @@ type Config struct {
 	Schema         string
 	Namespace      string
 	DataDir        string
+	StorageBackend string
+	S3Bucket       string
+	S3Prefix       string
+	S3Region       string
+	S3Endpoint     string
+	S3Profile      string
+	S3PathStyle    bool
 	AllowedOrigins []string
 	AuthSecret     string
 	MasterPassword string
@@ -95,6 +109,24 @@ func Load(opts Options) (Config, error) {
 		dataDir = common.DefaultDataDir
 	}
 
+	storageBackend := strings.ToLower(strings.TrimSpace(firstNonEmpty(opts.StorageBackend, os.Getenv("DONTPAD_STORAGE_BACKEND"))))
+	if storageBackend == "" {
+		storageBackend = "local"
+	}
+	if storageBackend != "local" && storageBackend != "s3" {
+		return Config{}, fmt.Errorf("DONTPAD_STORAGE_BACKEND invalido: %q", storageBackend)
+	}
+
+	s3Bucket := firstNonEmpty(opts.S3Bucket, os.Getenv("DONTPAD_S3_BUCKET"))
+	s3Region := firstNonEmpty(opts.S3Region, os.Getenv("DONTPAD_S3_REGION"), os.Getenv("AWS_REGION"), os.Getenv("AWS_DEFAULT_REGION"))
+	s3PathStyle, err := parseOptionalBool(firstNonEmpty(opts.S3PathStyle, os.Getenv("DONTPAD_S3_PATH_STYLE")))
+	if err != nil {
+		return Config{}, fmt.Errorf("DONTPAD_S3_PATH_STYLE invalido: %w", err)
+	}
+	if storageBackend == "s3" && strings.TrimSpace(s3Bucket) == "" {
+		return Config{}, errors.New("defina DONTPAD_S3_BUCKET quando DONTPAD_STORAGE_BACKEND=s3")
+	}
+
 	authSecret := firstNonEmpty(opts.AuthSecret, os.Getenv("JWT_SECRET"))
 	if authSecret == "" {
 		authSecret = "dontpad-go-backend-dev-secret-change-me"
@@ -106,6 +138,13 @@ func Load(opts Options) (Config, error) {
 		Schema:         schema,
 		Namespace:      namespace,
 		DataDir:        dataDir,
+		StorageBackend: storageBackend,
+		S3Bucket:       s3Bucket,
+		S3Prefix:       firstNonEmpty(opts.S3Prefix, os.Getenv("DONTPAD_S3_PREFIX")),
+		S3Region:       s3Region,
+		S3Endpoint:     firstNonEmpty(opts.S3Endpoint, os.Getenv("DONTPAD_S3_ENDPOINT")),
+		S3Profile:      firstNonEmpty(opts.S3Profile, os.Getenv("DONTPAD_S3_PROFILE"), os.Getenv("AWS_PROFILE")),
+		S3PathStyle:    s3PathStyle,
 		AllowedOrigins: loadAllowedOrigins(firstNonEmpty(opts.AllowedOrigins, os.Getenv("DONTPAD_ALLOWED_ORIGINS"))),
 		AuthSecret:     authSecret,
 		MasterPassword: firstNonEmpty(opts.MasterPassword, os.Getenv("MASTER_PASSWORD")),
@@ -137,6 +176,10 @@ func loadAllowedOrigins(raw string) []string {
 	defaults := []string{
 		"http://127.0.0.1:3000",
 		"http://localhost:3000",
+		"http://127.0.0.1:5173",
+		"http://localhost:5173",
+		"http://127.0.0.1:5174",
+		"http://localhost:5174",
 	}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -169,4 +212,19 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func parseOptionalBool(raw string) (bool, error) {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return false, nil
+	}
+	switch raw {
+	case "1", "true", "t", "yes", "y", "on":
+		return true, nil
+	case "0", "false", "f", "no", "n", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%q", raw)
+	}
 }

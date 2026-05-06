@@ -18,6 +18,8 @@ export DATABASE_URL=postgres://USER@127.0.0.1:5432/dontpadbr3
 export DONTPAD_ADDR=:8080
 export DONTPAD_SCHEMA=dontpadbr3
 export DONTPAD_NAMESPACE=dontpadbr3
+export DONTPAD_STORAGE_BACKEND=local
+export DONTPAD_DATA_DIR=storage/data
 go run ./apps/backend
 ```
 
@@ -49,3 +51,7 @@ Por padrão:
   `DONTPAD_BACKEND_URL`.
 - O backend persiste snapshots/update logs no Postgres e usa
   `storage/data` para anexos/áudios.
+- Para gravar anexos, áudios e dados legados do y-sweet em S3, use
+  `DONTPAD_STORAGE_BACKEND=s3`, `DONTPAD_S3_BUCKET`, `DONTPAD_S3_PREFIX`
+  opcional, `DONTPAD_S3_REGION`, `DONTPAD_S3_ENDPOINT` opcional para
+  storage compatível e `DONTPAD_S3_PATH_STYLE=true` quando o provedor exigir.

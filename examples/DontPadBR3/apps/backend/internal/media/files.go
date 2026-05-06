@@ -1,21 +1,23 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"path"
 	"strings"
 
 	"github.com/drksbr/yjs-crdt-golang-server/examples/DontPadBR3/apps/backend/internal/common"
+	"github.com/drksbr/yjs-crdt-golang-server/examples/DontPadBR3/apps/backend/internal/objectstore"
 )
 
-func (s *Service) readFilesManifest(documentID string, subdoc *string) ([]common.DocumentFile, error) {
-	path := s.paths.FilesManifestPath(documentID, subdoc)
-	data, err := os.ReadFile(path)
+func (s *Service) readFilesManifest(ctx context.Context, documentID string, subdoc *string) ([]common.DocumentFile, error) {
+	key := s.paths.FilesManifestKey(documentID, subdoc)
+	data, err := objectstore.ReadAll(ctx, s.objects, key, 1<<20)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, common.ErrNotFound) {
 			return []common.DocumentFile{}, nil
 		}
 		return nil, err
@@ -30,16 +32,16 @@ func (s *Service) readFilesManifest(documentID string, subdoc *string) ([]common
 	return manifest.Files, nil
 }
 
-func (s *Service) writeFilesManifest(documentID string, subdoc *string, files []common.DocumentFile) error {
-	path := s.paths.FilesManifestPath(documentID, subdoc)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
+func (s *Service) writeFilesManifest(ctx context.Context, documentID string, subdoc *string, files []common.DocumentFile) error {
 	payload, err := json.MarshalIndent(common.FilesManifest{Files: files}, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, payload, 0o644)
+	_, err = s.objects.Put(ctx, s.paths.FilesManifestKey(documentID, subdoc), bytes.NewReader(payload), objectstore.PutOptions{
+		ContentType: "application/json",
+		MaxBytes:    1 << 20,
+	})
+	return err
 }
 
 func (s *Service) listFileEntries(ctx context.Context, documentID string, subdoc *string) ([]common.DocumentFile, error) {
@@ -73,12 +75,12 @@ func (s *Service) listFileEntries(ctx context.Context, documentID string, subdoc
 	if len(files) > 0 {
 		return files, nil
 	}
-	return s.readFilesManifest(documentID, subdoc)
+	return s.readFilesManifest(ctx, documentID, subdoc)
 }
 
 func (s *Service) upsertFileEntry(ctx context.Context, documentID string, subdoc *string, entry common.DocumentFile) error {
 	if entry.StoragePath == "" {
-		entry.StoragePath = filepath.ToSlash(filepath.Join("documents", documentID, entry.Name))
+		entry.StoragePath = path.Join("documents", documentID, entry.Name)
 	}
 	query := fmt.Sprintf(
 		`INSERT INTO %s.document_files
@@ -111,7 +113,7 @@ func (s *Service) upsertFileEntry(ctx context.Context, documentID string, subdoc
 		return err
 	}
 
-	files, err := s.readFilesManifest(documentID, subdoc)
+	files, err := s.readFilesManifest(ctx, documentID, subdoc)
 	if err != nil {
 		return err
 	}
@@ -123,7 +125,7 @@ func (s *Service) upsertFileEntry(ctx context.Context, documentID string, subdoc
 		next = append(next, existing)
 	}
 	next = append(next, entry)
-	return s.writeFilesManifest(documentID, subdoc, next)
+	return s.writeFilesManifest(ctx, documentID, subdoc, next)
 }
 
 func (s *Service) getFileEntry(ctx context.Context, documentID string, subdoc *string, fileID string) (*common.DocumentFile, error) {
@@ -154,7 +156,7 @@ func (s *Service) getFileEntry(ctx context.Context, documentID string, subdoc *s
 		return nil, err
 	}
 
-	files, err := s.readFilesManifest(documentID, subdoc)
+	files, err := s.readFilesManifest(ctx, documentID, subdoc)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +180,7 @@ func (s *Service) removeFileEntry(ctx context.Context, documentID string, subdoc
 		return err
 	}
 
-	files, err := s.readFilesManifest(documentID, subdoc)
+	files, err := s.readFilesManifest(ctx, documentID, subdoc)
 	if err != nil {
 		return err
 	}
@@ -189,5 +191,5 @@ func (s *Service) removeFileEntry(ctx context.Context, documentID string, subdoc
 		}
 		next = append(next, file)
 	}
-	return s.writeFilesManifest(documentID, subdoc, next)
+	return s.writeFilesManifest(ctx, documentID, subdoc, next)
 }

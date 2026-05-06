@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/drksbr/yjs-crdt-golang-server/examples/DontPadBR3/apps/backend/internal/common"
 	"github.com/gin-gonic/gin"
@@ -77,11 +76,10 @@ func (s *Service) HandleDeleteDocument(c *gin.Context) {
 			common.WriteError(c, http.StatusInternalServerError, "Failed to delete subdocument metadata")
 			return
 		}
-		_ = os.RemoveAll(s.paths.DocumentDir(child.DocumentID))
+		_ = s.deleteDocumentObjects(ctx, child.DocumentID)
 	}
 
-	docDir := s.paths.DocumentDir(access.DocumentID)
-	_ = os.RemoveAll(docDir)
+	_ = s.deleteDocumentObjects(ctx, access.DocumentID)
 	s.security.ClearDocumentAuthCookie(c, access.DocumentID)
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
@@ -173,6 +171,16 @@ func (s *Service) HandleDeleteSubdocument(c *gin.Context) {
 		common.WriteError(c, http.StatusInternalServerError, "Failed to delete subdocument metadata")
 		return
 	}
-	_ = os.RemoveAll(s.paths.DocumentDir(child.DocumentID))
+	_ = s.deleteDocumentObjects(c.Request.Context(), child.DocumentID)
 	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func (s *Service) deleteDocumentObjects(ctx context.Context, documentID string) error {
+	if s.objects == nil {
+		return nil
+	}
+	if err := s.objects.DeletePrefix(ctx, s.paths.DocumentPrefix(documentID)); err != nil {
+		return err
+	}
+	return s.objects.DeletePrefix(ctx, s.paths.LegacyDocumentPrefix(documentID))
 }

@@ -7,10 +7,11 @@ import (
 	"encoding/hex"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"testing"
 
+	"github.com/drksbr/yjs-crdt-golang-server/examples/DontPadBR3/apps/backend/internal/common"
+	"github.com/drksbr/yjs-crdt-golang-server/examples/DontPadBR3/apps/backend/internal/objectstore"
 	"github.com/drksbr/yjs-crdt-golang-server/internal/ytypes"
 	"github.com/drksbr/yjs-crdt-golang-server/internal/yupdate"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
@@ -18,26 +19,27 @@ import (
 
 func TestLegacyYSweetMigratorReadUpdateFromBincodeStore(t *testing.T) {
 	storeDir := t.TempDir()
-	documentID := "legacy-fixture"
-	docDir := filepath.Join(storeDir, documentID)
-	if err := os.MkdirAll(docDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll() unexpected error: %v", err)
+	objects, err := objectstore.NewLocal(storeDir)
+	if err != nil {
+		t.Fatalf("NewLocal() unexpected error: %v", err)
 	}
+	paths := common.StoragePaths{Root: storeDir}
 
+	documentID := "legacy-fixture"
 	const oid uint32 = 1
 	baseUpdate := mustDecodeLegacyHex(t, "010165000401017402686900")
 	tailUpdate := mustDecodeLegacyHex(t, "0101ca0100846501012100")
-	legacyFile := filepath.Join(docDir, legacyYSweetFileName)
-	if err := os.WriteFile(legacyFile, encodeLegacyBincodeMap(t, map[string][]byte{
+	legacyKey := paths.LegacyYSweetKey(documentID)
+	if _, err := objects.Put(context.Background(), legacyKey, bytes.NewReader(encodeLegacyBincodeMap(t, map[string][]byte{
 		string(legacyYSweetOIDKey([]byte(legacyYSweetDocName))):         legacyTestOIDBytes(oid),
 		string(legacyYSweetDocStateKey(oid)):                            baseUpdate,
 		string(append(legacyYSweetUpdateKeyPrefix(oid), 0, 0, 0, 1, 0)): tailUpdate,
-	}), 0o600); err != nil {
-		t.Fatalf("WriteFile() unexpected error: %v", err)
+	})), objectstore.PutOptions{}); err != nil {
+		t.Fatalf("Put() unexpected error: %v", err)
 	}
 
-	migrator := NewLegacyYSweetMigrator(storeDir)
-	got, err := migrator.readUpdate(context.Background(), legacyFile)
+	migrator := NewLegacyYSweetMigrator(objects, paths)
+	got, err := migrator.readUpdate(context.Background(), legacyKey)
 	if err != nil {
 		t.Fatalf("readUpdate() unexpected error: %v", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/drksbr/yjs-crdt-golang-server/examples/DontPadBR3/apps/backend/internal/common"
+	"github.com/drksbr/yjs-crdt-golang-server/examples/DontPadBR3/apps/backend/internal/objectstore"
 	"github.com/drksbr/yjs-crdt-golang-server/examples/DontPadBR3/apps/backend/internal/security"
 	pgstore "github.com/drksbr/yjs-crdt-golang-server/pkg/storage/postgres"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/yprotocol"
@@ -20,6 +21,7 @@ type Service struct {
 	provider  *yprotocol.Provider
 	paths     common.StoragePaths
 	security  *security.Service
+	objects   objectstore.Store
 
 	nextClientID atomic.Uint32
 	legacy       *LegacyYSweetMigrator
@@ -35,6 +37,7 @@ type Deps struct {
 	Provider  *yprotocol.Provider
 	Paths     common.StoragePaths
 	Security  *security.Service
+	Objects   objectstore.Store
 	Legacy    *LegacyYSweetMigrator
 }
 
@@ -47,6 +50,7 @@ func New(deps Deps) *Service {
 		provider:    deps.Provider,
 		paths:       deps.Paths,
 		security:    deps.Security,
+		objects:     deps.Objects,
 		legacy:      deps.Legacy,
 		legacyLocks: make(map[string]*sync.Mutex),
 	}

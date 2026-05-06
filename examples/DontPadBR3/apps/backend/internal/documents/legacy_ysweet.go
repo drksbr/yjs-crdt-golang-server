@@ -7,13 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/drksbr/yjs-crdt-golang-server/examples/DontPadBR3/apps/backend/internal/common"
+	"github.com/drksbr/yjs-crdt-golang-server/examples/DontPadBR3/apps/backend/internal/objectstore"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/storage"
 	"github.com/drksbr/yjs-crdt-golang-server/pkg/yjsbridge"
 )
@@ -25,7 +23,8 @@ const (
 )
 
 type LegacyYSweetMigrator struct {
-	dataRoot string
+	objects objectstore.Store
+	paths   common.StoragePaths
 }
 
 type legacyYSweetEntry struct {
@@ -33,8 +32,8 @@ type legacyYSweetEntry struct {
 	value []byte
 }
 
-func NewLegacyYSweetMigrator(dataRoot string) *LegacyYSweetMigrator {
-	return &LegacyYSweetMigrator{dataRoot: strings.TrimSpace(dataRoot)}
+func NewLegacyYSweetMigrator(objects objectstore.Store, paths common.StoragePaths) *LegacyYSweetMigrator {
+	return &LegacyYSweetMigrator{objects: objects, paths: paths}
 }
 
 func (s *Service) EnsureLegacyMigrated(ctx context.Context, documentID string) error {
@@ -58,12 +57,13 @@ func (s *Service) EnsureLegacyMigrated(ctx context.Context, documentID string) e
 		return s.ensureLegacySubdocumentsMigrated(ctx, documentID)
 	}
 
-	legacyPath := s.legacy.documentPath(documentID)
-	if _, err := os.Stat(legacyPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("stat legacy ysweet %s: %w", legacyPath, err)
+	legacyKey := s.legacy.documentKey(documentID)
+	exists, err := s.legacy.exists(ctx, legacyKey)
+	if err != nil {
+		return fmt.Errorf("stat legacy ysweet %s: %w", legacyKey, err)
+	}
+	if !exists {
+		return nil
 	}
 
 	unlock := s.lockLegacyMigration(documentID)
@@ -77,7 +77,7 @@ func (s *Service) EnsureLegacyMigrated(ctx context.Context, documentID string) e
 		return s.ensureLegacySubdocumentsMigrated(ctx, documentID)
 	}
 
-	update, err := s.legacy.readUpdate(ctx, legacyPath)
+	update, err := s.legacy.readUpdate(ctx, legacyKey)
 	if err != nil {
 		return err
 	}
@@ -91,7 +91,7 @@ func (s *Service) EnsureLegacyMigrated(ctx context.Context, documentID string) e
 	if err := s.migrateLegacySubdocuments(ctx, documentID, update); err != nil {
 		return err
 	}
-	log.Printf("legacy ysweet migrated doc=%s bytes=%d source=%s", documentID, len(update), legacyPath)
+	log.Printf("legacy ysweet migrated doc=%s bytes=%d source=%s", documentID, len(update), legacyKey)
 	return nil
 }
 
@@ -127,25 +127,35 @@ func (s *Service) lockLegacyMigration(documentID string) func() {
 	}
 }
 
-func (m *LegacyYSweetMigrator) documentPath(documentID string) string {
-	return filepath.Join(m.dataRoot, documentID, legacyYSweetFileName)
+func (m *LegacyYSweetMigrator) documentKey(documentID string) string {
+	return m.paths.LegacyYSweetKey(documentID)
 }
 
-func (m *LegacyYSweetMigrator) readUpdate(ctx context.Context, legacyPath string) ([]byte, error) {
+func (m *LegacyYSweetMigrator) exists(ctx context.Context, legacyKey string) (bool, error) {
+	if m == nil || m.objects == nil {
+		return false, nil
+	}
+	return m.objects.Exists(ctx, legacyKey)
+}
+
+func (m *LegacyYSweetMigrator) readUpdate(ctx context.Context, legacyKey string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(legacyPath)
+	if m == nil || m.objects == nil {
+		return nil, common.ErrNotFound
+	}
+	data, err := objectstore.ReadAll(ctx, m.objects, legacyKey, 0)
 	if err != nil {
-		return nil, fmt.Errorf("read legacy ysweet %s: %w", legacyPath, err)
+		return nil, fmt.Errorf("read legacy ysweet %s: %w", legacyKey, err)
 	}
 	entries, err := decodeLegacyYSweetBincodeMap(data)
 	if err != nil {
-		return nil, fmt.Errorf("decode legacy ysweet %s: %w", legacyPath, err)
+		return nil, fmt.Errorf("decode legacy ysweet %s: %w", legacyKey, err)
 	}
 	update, err := legacyYSweetEntriesAsUpdate(ctx, entries)
 	if err != nil {
-		return nil, fmt.Errorf("extract legacy ysweet update %s: %w", legacyPath, err)
+		return nil, fmt.Errorf("extract legacy ysweet update %s: %w", legacyKey, err)
 	}
 	return update, nil
 }

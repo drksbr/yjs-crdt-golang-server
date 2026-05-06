@@ -30,6 +30,8 @@ func (s *Service) listAudioNotes(ctx context.Context, documentID string, subdoc 
 		if err := rows.Scan(&note.ID, &note.Name, &note.Duration, &note.MimeType, &note.Size, &note.StoragePath, &createdMillis); err != nil {
 			return nil, err
 		}
+		note.DocumentID = documentID
+		note.SubdocumentID = subdoc
 		note.CreatedAt = int64(createdMillis)
 		notes = append(notes, note)
 	}
@@ -94,6 +96,8 @@ func (s *Service) getAudioNote(ctx context.Context, documentID string, subdoc *s
 		}
 		return nil, err
 	}
+	note.DocumentID = documentID
+	note.SubdocumentID = subdoc
 	note.CreatedAt = int64(createdMillis)
 	return &note, nil
 }

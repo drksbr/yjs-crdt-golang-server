@@ -160,11 +160,21 @@ func (s *Service) WebsocketBaseURL(r *http.Request) string {
 	if proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); proto == "https" || proto == "wss" {
 		scheme = "wss"
 	}
-	if strings.HasPrefix(strings.ToLower(r.Host), "localhost:3000") || strings.HasPrefix(strings.ToLower(r.Host), "127.0.0.1:3000") {
+	if isLocalFrontendDevHost(r.Host) {
 		host = common.NormalizeDisplayAddress(s.address)
 		scheme = "ws"
 	}
 	return fmt.Sprintf("%s://%s/ws", scheme, host)
+}
+
+func isLocalFrontendDevHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	return strings.HasPrefix(host, "localhost:3000") ||
+		strings.HasPrefix(host, "127.0.0.1:3000") ||
+		strings.HasPrefix(host, "localhost:5173") ||
+		strings.HasPrefix(host, "127.0.0.1:5173") ||
+		strings.HasPrefix(host, "localhost:5174") ||
+		strings.HasPrefix(host, "127.0.0.1:5174")
 }
 
 func (rl *pinRateLimiter) allow(key string, maxAttempts int, window time.Duration) (bool, time.Duration) {

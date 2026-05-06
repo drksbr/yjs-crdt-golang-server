@@ -2,10 +2,8 @@ package documents
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
-	"os"
 	"sort"
 	"strings"
 
@@ -42,15 +40,16 @@ func (s *Service) ensureLegacySubdocumentsMigrated(ctx context.Context, parentDo
 		return nil
 	}
 
-	legacyPath := s.legacy.documentPath(parentDocumentID)
-	if _, err := os.Stat(legacyPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("stat legacy ysweet %s: %w", legacyPath, err)
+	legacyKey := s.legacy.documentKey(parentDocumentID)
+	exists, err := s.legacy.exists(ctx, legacyKey)
+	if err != nil {
+		return fmt.Errorf("stat legacy ysweet %s: %w", legacyKey, err)
+	}
+	if !exists {
+		return nil
 	}
 
-	update, err := s.legacy.readUpdate(ctx, legacyPath)
+	update, err := s.legacy.readUpdate(ctx, legacyKey)
 	if err != nil {
 		return err
 	}

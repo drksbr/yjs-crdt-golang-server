@@ -30,10 +30,20 @@ func TestLoadUsesDefaultsFromEnv(t *testing.T) {
 	if cfg.DataDir != common.DefaultDataDir {
 		t.Fatalf("DataDir = %q, want %q", cfg.DataDir, common.DefaultDataDir)
 	}
+	if cfg.StorageBackend != "local" {
+		t.Fatalf("StorageBackend = %q, want local", cfg.StorageBackend)
+	}
 	if !strings.Contains(cfg.PostgresDSN, "sslmode=disable") {
 		t.Fatalf("PostgresDSN = %q, want local DSN with sslmode=disable", cfg.PostgresDSN)
 	}
-	wantOrigins := []string{"http://127.0.0.1:3000", "http://localhost:3000"}
+	wantOrigins := []string{
+		"http://127.0.0.1:3000",
+		"http://localhost:3000",
+		"http://127.0.0.1:5173",
+		"http://localhost:5173",
+		"http://127.0.0.1:5174",
+		"http://localhost:5174",
+	}
 	if !reflect.DeepEqual(cfg.AllowedOrigins, wantOrigins) {
 		t.Fatalf("AllowedOrigins = %#v, want %#v", cfg.AllowedOrigins, wantOrigins)
 	}
@@ -52,6 +62,13 @@ func TestLoadFlagOverridesEnv(t *testing.T) {
 		Schema:         "flagschema",
 		Namespace:      "flagns",
 		DataDir:        "/tmp/dontpad-data",
+		StorageBackend: "s3",
+		S3Bucket:       "flag-bucket",
+		S3Prefix:       "flag-prefix",
+		S3Region:       "us-east-1",
+		S3Endpoint:     "http://minio.local:9000",
+		S3Profile:      "flag-profile",
+		S3PathStyle:    "true",
 		AllowedOrigins: "http://one.local, http://one.local, http://two.local",
 		AuthSecret:     "flag-secret",
 		MasterPassword: "flag-master",
@@ -68,9 +85,25 @@ func TestLoadFlagOverridesEnv(t *testing.T) {
 	if cfg.DataDir != "/tmp/dontpad-data" || cfg.AuthSecret != "flag-secret" || cfg.MasterPassword != "flag-master" {
 		t.Fatalf("config secret/storage flags not applied: %#v", cfg)
 	}
+	if cfg.StorageBackend != "s3" || cfg.S3Bucket != "flag-bucket" || cfg.S3Prefix != "flag-prefix" ||
+		cfg.S3Region != "us-east-1" || cfg.S3Endpoint != "http://minio.local:9000" ||
+		cfg.S3Profile != "flag-profile" || !cfg.S3PathStyle {
+		t.Fatalf("S3 config flags not applied: %#v", cfg)
+	}
 	wantOrigins := []string{"http://one.local", "http://two.local"}
 	if !reflect.DeepEqual(cfg.AllowedOrigins, wantOrigins) {
 		t.Fatalf("AllowedOrigins = %#v, want %#v", cfg.AllowedOrigins, wantOrigins)
+	}
+}
+
+func TestLoadS3RequiresBucket(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://env@remotehost:5432/envdb")
+	t.Setenv("DONTPAD_STORAGE_BACKEND", "s3")
+
+	_, err := Load(Options{})
+	if err == nil || !strings.Contains(err.Error(), "DONTPAD_S3_BUCKET") {
+		t.Fatalf("Load() err = %v, want missing S3 bucket error", err)
 	}
 }
 
@@ -106,7 +139,17 @@ func clearConfigEnv(t *testing.T) {
 		"DONTPAD_SCHEMA",
 		"DONTPAD_NAMESPACE",
 		"DONTPAD_DATA_DIR",
+		"DONTPAD_STORAGE_BACKEND",
+		"DONTPAD_S3_BUCKET",
+		"DONTPAD_S3_PREFIX",
+		"DONTPAD_S3_REGION",
+		"DONTPAD_S3_ENDPOINT",
+		"DONTPAD_S3_PROFILE",
+		"DONTPAD_S3_PATH_STYLE",
 		"DONTPAD_ALLOWED_ORIGINS",
+		"AWS_REGION",
+		"AWS_DEFAULT_REGION",
+		"AWS_PROFILE",
 		"JWT_SECRET",
 		"MASTER_PASSWORD",
 	} {
